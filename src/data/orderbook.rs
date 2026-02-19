@@ -315,16 +315,16 @@ impl OrderBook {
 
         // 1. Топ-25 Bids (уже отсортированы по убыванию, от лучшей цены к худшей)
         for (price, qty) in self.bids.iter().take(25) {
-            let _ = write!(buffer, "{}:{}|", price.normalize(), qty.normalize());
+            let _ = write!(buffer, "{}:{},", price.normalize(), qty.normalize());
         }
 
         // 2. Топ-25 Asks (отсортированы по возрастанию, от лучшей цены к худшей)
         for (price, qty) in self.asks.iter().take(25) {
-            let _ = write!(buffer, "{}:{}|", price.normalize(), qty.normalize());
+            let _ = write!(buffer, "{}:{},", price.normalize(), qty.normalize());
         }
 
-        // 3. Удаляем последний символ | перед хешированием
-        if buffer.ends_with('|') {
+        // 3. Удаляем последний символ , перед хешированием
+        if buffer.ends_with(',') {
             buffer.pop();
         }
 
@@ -983,6 +983,8 @@ mod tests {
 
     #[test]
     fn test_calculate_checksum() {
+        use crc32fast::hash;
+        
         let mut ob = OrderBook::new("BTCUSDT");
         let mut bids = SmallVec::new();
         bids.push(PriceLevel { price: 50000.0, size: 1.5 });
@@ -997,7 +999,15 @@ mod tests {
         });
 
         let cs = ob.calculate_checksum();
+        
+        // Проверяем что checksum не равен 0
         assert!(cs > 0);
+        
+        // Проверяем конкретное значение CRC32 по алгоритму Bybit V5
+        // Строка формируется как "price:size,price:size,..." (bids затем asks)
+        // Для наших данных: "50000:1.5,50001:2.5"
+        let expected_cs = hash(b"50000:1.5,50001:2.5");
+        assert_eq!(cs, expected_cs, "Checksum must match Bybit V5 CRC32 IEEE algorithm");
     }
 
     #[test]
