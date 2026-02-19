@@ -1934,6 +1934,11 @@ async fn handle_market_update(
         let inference = engine.predict_with_buffer(Some(regime_id)).context("Inference prediction failed")?;
         let inference_micros = start_inf.elapsed().as_micros() as u64;
 
+        // Логирование высокой задержки (задача 047, задача 082)
+        if inference_micros > 50_000 {
+            tracing::warn!("High inference latency: {}μs (threshold: 50ms) for {}", inference_micros, execution.symbol);
+        }
+
         // 5. Проверка через RiskManager (Задача 116)
         if !execution.risk_manager.check_latency(network_micros, inference_micros, &execution.bot_config) {
             // Если слишком много отказов подряд — уходим в Waiting Mode
