@@ -1,7 +1,5 @@
-# Documentation folder - ignore subdirectories and their contents
-docs/мусор/
-docs/info/мусор/
-docs/info/
+# Documentation folder
+docs/
 
 # Environment files
 .env
