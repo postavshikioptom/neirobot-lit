@@ -60,6 +60,8 @@ pub struct ExecutionEngine {
     pub health_monitor: crate::risk::HealthMonitor, // Задача 179: Мониторинг здоровья системы
     pub symbol: String,
     pub bot_config: BotConfig,
+    pub thresh_buy: f32,      // Задача 044: Порог вероятности для сигнала покупки
+    pub thresh_sell: f32,     // Задача 044: Порог вероятности для сигнала продажи
     pub close_on_flat: bool, 
     pub market_info: MarketInfo,
     pub trade_tx: mpsc::Sender<TradeRecord>,
@@ -109,6 +111,8 @@ impl ExecutionEngine {
         state_path: PathBuf,
     ) -> Self {
         let close_on_flat = bot_config.close_on_flat;
+        let thresh_buy = bot_config.threshold_buy;
+        let thresh_sell = bot_config.threshold_sell;
         let leverage = bot_config.leverage;
         let risk_config = bot_config.risk.clone();
         
@@ -141,6 +145,8 @@ impl ExecutionEngine {
             health_monitor: crate::risk::HealthMonitor::new(risk_config), // Задача 179
             symbol,
             close_on_flat,
+            thresh_buy,
+            thresh_sell,
             bot_config,
             market_info,
             trade_tx,
@@ -1578,9 +1584,8 @@ impl ExecutionEngine {
         let current_obi = orderbook.calculate_imbalance(self.bot_config.obi_depth);
         debug!("[{}] Current OBI: {:.4}", self.symbol, current_obi);
 
-        // 4. Фильтрация сигнала по порогам вероятности с учетом режима рынка (Задача 161)
-        let current_regime = self.get_current_regime();
-        let effective_signal = self.filter_signal(&fused_probs, current_regime).await;
+        // 4. Фильтрация сигнала по порогам вероятности (Задача 044)
+        let effective_signal = self.filter_signal(&output);
         
         // Задача 201: Создаем SignalWithTimestamp для замера latency
         let signal_with_ts = crate::ml::types::SignalWithTimestamp {
@@ -1775,64 +1780,23 @@ impl ExecutionEngine {
         }
     }
 
-    /// Превращает вероятности в сигнал на основе асимметричных порогов
-    /// Учитывает режимы рынка (Задача 161) и серию убытков (Задача 115)
-    async fn filter_signal(&self, probs: &[f32; 3], regime: crate::config::types::RegimeId) -> Signal {
+    /// Превращает вероятности в сигнал на основе порогов (thresh_buy/sell)
+    /// Задача 044: Фильтрация сигналов нейросети на основе порогов уверенности
+    fn filter_signal(&self, output: &InferenceOutput) -> Signal {
         // Индексы: [0] = Flat, [1] = Up, [2] = Down
-        let prob_flat = probs[0];
-        let prob_up = probs[1];
-        let prob_down = probs[2];
+        let prob_up = output.probabilities[1];
+        let prob_down = output.probabilities[2];
 
-        // Получаем динамические пороги на основе серии убытков (Задача 115)
-        let current_streak = {
-            let state_guard = self.state.lock().await;
-            state_guard.loss_streak
-        };
-        let dynamic_threshold = self.risk_manager.get_effective_threshold(current_streak, &self.bot_config);
-        
-        // Получаем пороги для текущего режима рынка (Задача 161)
-        let (regime_buy_th, regime_sell_th, _regime_min_conf) = self.get_thresholds_for_regime(regime);
-        
-        // Комбинируем пороги: берем максимум между динамическим порогом (задача 115) и режимным (задача 161)
-        // Это обеспечивает консервативный подход: требуем более высокую уверенность в волатильные периоды
-        let long_th = (dynamic_threshold as f32).max(regime_buy_th);
-        let short_th = (dynamic_threshold as f32).max(regime_sell_th);
-
-        // Логирование всех трех вероятностей при принятии решения
-        tracing::info!(
-            "[{}] Probabilities: Flat={:.4}, Down={:.4}, Up={:.4} | Thresholds: Long={:.4} (Streak: {}, Regime: {:?}), Short={:.4}",
-            self.symbol, prob_flat, prob_down, prob_up, long_th, current_streak, regime, short_th
-        );
-
-        // Проверка на противоречивый сигнал (обе вероятности выше порогов)
-        if prob_up > long_th && prob_down > short_th {
-            tracing::warn!(
-                "[{}] Contradictory signal detected: Up={:.4} (>{:.4}), Down={:.4} (>{:.4}). Ignoring.",
-                self.symbol, prob_up, long_th, prob_down, short_th
-            );
-            return Signal::Flat;
-        }
-
-        // Приоритет входа: проверяем пороги
-        if prob_up > long_th {
-            tracing::info!(
-                "[{}] Long signal: Up={:.4} > threshold {:.4}",
-                self.symbol, prob_up, long_th
-            );
+        if prob_up >= self.thresh_buy {
             Signal::Up
-        } else if prob_down > short_th {
-            tracing::info!(
-                "[{}] Short signal: Down={:.4} > threshold {:.4}",
-                self.symbol, prob_down, short_th
-            );
+        } else if prob_down >= self.thresh_sell {
             Signal::Down
         } else {
             // Если уверенность ниже порогов, считаем сигнал нейтральным (Flat)
-            // Логируем отклонение сигнала с указанием серии убытков
             if prob_up > 0.4 || prob_down > 0.4 {
-                tracing::info!(
-                    "[{}] Signal rejected: Up={:.4}, Down={:.4} < Dynamic Threshold {:.4} (Streak: {})",
-                    self.symbol, prob_up, prob_down, dynamic_threshold, current_streak
+                tracing::debug!(
+                    "[{}] Signal suppressed by thresholds: Up={:.2} (>{:.2}), Down={:.2} (>{:.2})",
+                    self.symbol, prob_up, self.thresh_buy, prob_down, self.thresh_sell
                 );
             }
             Signal::Flat
@@ -3486,6 +3450,8 @@ impl ExecutionEngine {
         tracing::info!("[Audit] Updating ExecutionEngine config");
         self.bot_config = bot_config.clone();
         self.close_on_flat = bot_config.close_on_flat;
+        self.thresh_buy = bot_config.threshold_buy;
+        self.thresh_sell = bot_config.threshold_sell;
         
         // Обновляем risk manager с новыми параметрами риска
         self.risk_manager.update_config(bot_config.risk.clone());
