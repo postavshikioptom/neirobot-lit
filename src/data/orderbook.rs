@@ -315,16 +315,16 @@ impl OrderBook {
 
         // 1. Топ-25 Bids (уже отсортированы по убыванию, от лучшей цены к худшей)
         for (price, qty) in self.bids.iter().take(25) {
-            let _ = write!(buffer, "{}:{}|", price.normalize(), qty.normalize());
+            let _ = write!(buffer, "{}:{},", price.normalize(), qty.normalize());
         }
 
         // 2. Топ-25 Asks (отсортированы по возрастанию, от лучшей цены к худшей)
         for (price, qty) in self.asks.iter().take(25) {
-            let _ = write!(buffer, "{}:{}|", price.normalize(), qty.normalize());
+            let _ = write!(buffer, "{}:{},", price.normalize(), qty.normalize());
         }
 
-        // 3. Удаляем последний символ | перед хешированием
-        if buffer.ends_with('|') {
+        // 3. Удаляем последний символ , перед хешированием
+        if buffer.ends_with(',') {
             buffer.pop();
         }
 
@@ -997,7 +997,10 @@ mod tests {
         });
 
         let cs = ob.calculate_checksum();
-        assert!(cs > 0);
+        // Bybit V5: bids сначала, потом asks, разделитель запятая.
+        // Строка: "50000:1.5,50001:2.5"
+        let expected = crc32fast::hash(b"50000:1.5,50001:2.5");
+        assert_eq!(cs, expected, "Checksum must match Bybit V5 CRC32 IEEE algorithm with comma separator");
     }
 
     #[test]
