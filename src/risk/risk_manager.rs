@@ -2039,8 +2039,6 @@ mod tests {
         assert!(rm_no_limit.validate_order_price(dec(20.0), mid, tick).unwrap());
     }
 }
-#[cfg(test)]
-mod tests {
     use super::*;
     use crate::config::types::RiskConfig;
     use std::time::Duration;
@@ -2062,7 +2060,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert!(!risk.check_inactivity(last_update));
     }
-}
 
     #[test]
     fn test_lockout_disabled() {
@@ -2150,7 +2147,6 @@ mod tests {
         // Благодаря saturating_sub не должно быть паники, lockout не активен
         assert!(!risk.is_in_lockout(&state, &bot_config));
     }
-}
 
     // ============================================================================
     // Мониторинг устаревших сигналов (Задача 169)
@@ -2361,7 +2357,6 @@ mod tests {
         
         drawdown_pct.to_f64().unwrap_or(0.0).max(0.0)
     }
-}
 
 
 
