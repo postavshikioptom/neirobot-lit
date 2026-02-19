@@ -2062,7 +2062,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert!(!risk.check_inactivity(last_update));
     }
-}
 
     #[test]
     fn test_lockout_disabled() {
@@ -2151,7 +2150,7 @@ mod tests {
         assert!(!risk.is_in_lockout(&state, &bot_config));
     }
 }
-
+impl RiskManager {
     // ============================================================================
     // Мониторинг устаревших сигналов (Задача 169)
     // ============================================================================
@@ -2365,6 +2364,7 @@ mod tests {
 
 
 
+impl RiskManager {
     /// Задача 184: Обновление конфигурации при SIGHUP
     /// Применяет новые параметры риска к risk manager и health monitor
     pub fn update_config(&mut self, config: RiskConfig) {
@@ -2372,3 +2372,4 @@ mod tests {
         self.config = config.clone();
         self.health_monitor.update_config(config);
     }
+}

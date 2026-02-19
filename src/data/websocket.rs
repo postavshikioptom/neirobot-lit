@@ -28,6 +28,13 @@ pub enum ReconnectSignal {
     Immediate,
 }
 
+#[derive(Debug)]
+pub struct ChecksumMismatch {
+    pub symbol: String,
+    pub local: u32,
+    pub remote: u32,
+}
+
 use crate::config::types::{ExchangeConfig, ChaosConfig};
 
 #[cfg(feature = "chaos")]

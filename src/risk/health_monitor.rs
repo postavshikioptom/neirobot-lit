@@ -657,6 +657,7 @@ impl HealthMonitor {
     }
 }
 
+impl HealthMonitor {
 
     /// Задача 184: Обновление конфигурации при SIGHUP
     /// Применяет новые параметры риска к health monitor
