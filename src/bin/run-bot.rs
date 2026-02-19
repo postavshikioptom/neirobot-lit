@@ -1523,7 +1523,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                             std::sync::atomic::Ordering::Relaxed
                         );
                         
-                        if let Err(e) = handle_market_update(update, &mut ob, &mut tensor_builder, engine, execution, rest_client, &config.exchange, ws_reconnect_tx.clone()).await {
+                        if let Err(e) = handle_market_update(update, &mut ob, &mut tensor_builder, engine, execution, rest_client, &config.exchange).await {
                             if execution.risk_manager.is_blocked {
                                 error!("[{}] HARD STOP: RiskManager blocked. Triggering emergency market close...", symbol);
                                 if let Err(he) = execution.emergency_market_close(rest_client, &config.exchange).await {
@@ -1749,7 +1749,6 @@ async fn handle_market_update(
     execution: &mut ExecutionEngine,
     rest_client: &neirobot_lit::trading::BybitRestClient,
     exchange_config: &neirobot_lit::config::types::ExchangeConfig,
-    ws_reconnect_tx: mpsc::Sender<crate::data::websocket::ReconnectSignal>,
 ) -> Result<()> {
     use chrono::Utc;
     
