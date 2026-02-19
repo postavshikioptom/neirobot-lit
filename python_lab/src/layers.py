@@ -1,0 +1,73 @@
+import torch
+import torch.nn as nn
+
+class LOBPatching(nn.Module):
+    """
+    Продвинутый слой патчинга для стакана (LOB).
+    Группирует уровни стакана и добавляет уровневое и временное позиционное кодирование.
+    """
+    def __init__(self, seq_len=100, n_levels=50, in_channels=3, d_model=64):
+        super().__init__()
+        self.d_model = d_model
+        self.in_channels = in_channels
+        self.n_levels = n_levels
+        self.seq_len = seq_len
+        
+        # Динамический расчет размерностей на основе параметров
+        # Согласно плану 026: num_features = in_channels * n_levels
+        self.num_features = in_channels * n_levels
+        # После Conv1d(kernel=2, stride=2): num_patches = num_features // 2
+        self.num_patches = self.num_features // 2
+        
+        # 1. Vertical Patching: Объединяем пары (цена, объем) через Conv1d
+        # Вход: (Batch*Seq, 1, num_features) -> Выход: (Batch*Seq, d_model, num_patches)
+        # kernel_size=2, stride=2 объединяет каждые 2 фичи в один токен
+        self.patch_conv = nn.Conv1d(1, d_model, kernel_size=2, stride=2)
+        
+        # 2. Level Positional Embedding (динамический размер по плану 026)
+        # После Conv1d(kernel=2, stride=2) получаем num_patches токенов
+        self.level_pos_emb = nn.Parameter(torch.randn(1, self.num_patches, d_model) * 0.02)
+        
+        # 3. Temporal Positional Embedding (строго seq_len по плану 026)
+        # Различаем шаги времени 0..seq_len-1
+        self.time_pos_emb = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
+        
+        # 4. Финальная нормализация для стабильности
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        """
+        x: (Batch, Seq, in_channels, n_levels) - входные данные из dataset
+        Преобразуем в (Batch, Seq, 1, num_features) для патчинга
+        После патчинга: (Batch, Seq, num_patches, d_model) - токены
+        После агрегации: (Batch, Seq, d_model) - один токен на шаг времени
+        """
+        b, s, c, l = x.shape  # c=in_channels, l=n_levels
+        
+        # Шаг 0: Преобразуем (B, S, c, l) -> (B, S, 1, c*l)
+        # Flatten каналы и уровни: (B, S, c*l) = (B, S, num_features)
+        x_flat_seq = x.view(b, s, c * l)  # (B, S, num_features)
+        x_flat_seq = x_flat_seq.unsqueeze(2)  # (B, S, 1, num_features)
+        
+        # Шаг 1: Vertical Patching - объединяем пары (цена, объем)
+        # Reshape в (B*S, 1, num_features) для применения Conv1d с kernel=2, stride=2
+        x_flat = x_flat_seq.view(b * s, 1, self.num_features)  # (B*S, 1, num_features)
+        x_patched = self.patch_conv(x_flat)  # (B*S, d_model, num_patches)
+        x_patched = x_patched.permute(0, 2, 1)  # (B*S, num_patches, d_model)
+        
+        # Reshape обратно в батч: (B, S, num_patches, d_model)
+        x_patched = x_patched.view(b, s, self.num_patches, self.d_model)
+        
+        # Шаг 2: Добавляем уровневые позиции (информация о глубине стакана)
+        x_patched = x_patched + self.level_pos_emb  # Broadcasting: (B, S, num_patches, d_model)
+        
+        # Шаг 3: Агрегация уровней в один "Snapshot Token" на каждый шаг времени.
+        # Сжимаем num_patches уровней в один вектор размерности D.
+        # (B, S, num_patches, d_model) -> (B, S, d_model)
+        x_snapshot = x_patched.mean(dim=2)
+        
+        # Шаг 4: Добавляем временные позиции (информация о порядке событий)
+        # Динамически нарезаем позиционное кодирование под текущую длину последовательности
+        x_temporal = x_snapshot + self.time_pos_emb[:, :s, :]
+        
+        return self.norm(x_temporal)

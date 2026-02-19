@@ -1,0 +1,16 @@
+# Bot configuration for FARTCOINUSDT
+symbol = "FARTCOINUSDT"
+model_path = "bots/FARTCOINUSDT/model/lit.onnx"
+
+[strategy]
+threshold_up = 0.7
+threshold_down = 0.7
+
+[risk]
+max_position_size = 100.0
+max_drawdown = 0.05
+
+[onnx]
+execution_provider = "cpu"
+device_id = 0
+intra_threads = 2

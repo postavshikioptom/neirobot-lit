@@ -1,0 +1,61 @@
+# Пример конфигурации бота с динамическими порогами на основе режимов рынка (Задача 161)
+
+symbol = "BTCUSDT"
+model_path = "bots/BTCUSDT/model/lit.onnx"
+
+# Базовые пороги (используются когда режим Unknown или нет переопределения)
+threshold_buy = 0.55
+threshold_sell = 0.55
+
+# Переопределения порогов для разных режимов рынка
+# Формат: [[regime_overrides]]
+#   regime = "Quiet" | "Trend" | "Volatile"
+#   buy_threshold = порог для покупки (0.0-1.0)
+#   sell_threshold = порог для продажи (0.0-1.0)
+#   min_confidence = минимальная уверенность модели (0.0-1.0)
+
+# Режим Quiet (спокойный рынок): снижаем пороги для более агрессивной торговли
+[[regime_overrides]]
+regime = "Quiet"
+buy_threshold = 0.50
+sell_threshold = 0.50
+min_confidence = 0.45
+
+# Режим Trend (трендовый рынок): умеренные пороги
+[[regime_overrides]]
+regime = "Trend"
+buy_threshold = 0.55
+sell_threshold = 0.55
+min_confidence = 0.50
+
+# Режим Volatile (волатильный рынок): повышаем пороги для защиты от ложных сигналов
+[[regime_overrides]]
+regime = "Volatile"
+buy_threshold = 0.70
+sell_threshold = 0.70
+min_confidence = 0.65
+
+[risk]
+max_position_size = 100.0
+max_drawdown = 0.05
+
+[onnx]
+execution_provider = "cpu"
+device_id = 0
+intra_threads = 4
+
+# Задача 210: Адаптивные пороги отмены ордеров
+# Механизм динамического сужения порогов при росте волатильности и спреда
+# ПАРАМЕТРЫ УСТАНОВЛЕНЫ МАКСИМАЛЬНО МЯГКО для совместимости с разными монетами
+# Реальные спреды: BTC ~10 bps, альткойны ~200-2000 bps, экстремальные ~20000 bps
+# Реальная волатильность: низкая ~100 bps, средняя ~300 bps, высокая ~1000 bps, экстремальная ~2000+ bps
+adaptive_thresholds_enabled = true
+base_threshold_bps = 500.0          # Базовый порог 500 bps (5%) - очень мягко
+vol_multiplier = 0.01               # Коэффициент для волатильности (очень маленький)
+spread_multiplier_adaptive = 0.001  # Коэффициент для спреда (очень маленький)
+min_threshold_bps = 100.0           # Минимальный порог 100 bps (1%)
+max_threshold_bps = 1000.0          # Максимальный порог 1000 bps (10%)
+
+# Формула: adaptive_threshold = base_threshold / (1.0 + (volatility * vol_multiplier) + (spread * spread_multiplier))
+# При высокой волатильности и широком спреде порог сужается, заставляя бота быстрее отменять ордера
+# Но с такими мягкими коэффициентами влияние минимально - механизм не будет мешать торговле

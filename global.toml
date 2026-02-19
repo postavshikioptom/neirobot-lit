@@ -1,0 +1,65 @@
+# Глобальные настройки Neirobot LiT (Defaults)
+
+[general]
+# Окружение: dev или prod
+env = "dev"
+# Таймзона для логирования и вывода (ISO формат)
+timezone = "UTC"
+
+[logging]
+# Уровень логирования: trace, debug, info, warn, error
+level = "info"
+# Формат вывода: full (подробный), json, compact
+format = "full"
+# Имя файла лога. 
+# ВНИМАНИЕ: Полный путь ВСЕГДА формируется в коде динамически: 
+# "bots/{SYMBOL}/logs/{file_name}" для обеспечения изоляции.
+file_name = "bot.log"
+# Ротация логов по достижению размера
+rotate = true
+# Максимальный размер лога перед ротацией (в МБ)
+max_size_mb = 100
+
+[trading_defaults]
+# Максимально допустимая задержка от биржи (ms)
+# Если t_now - t_exchange > max_latency_ms, сигнал отбрасывается
+max_latency_ms = 500
+# Интервал между попытками переподключения (ms)
+retry_interval_ms = 1000
+# Максимальное количество попыток реконнекта
+max_retries = 5
+
+[risk_defaults]
+# Глобальный лимит просадки для остановки (в процентах)
+drawdown_stop_pct = 5.0
+# Rate-limit для REST API (макс. ордеров в минуту на один аккаунт/токен)
+max_orders_per_minute = 30
+
+# Задача 187: Политика автоматизированной очистки данных
+# Срок хранения снимков стакана и сделок (в днях)
+raw_data_retention_days = 14
+# Жесткий лимит объема папки data/ (в ГБ)
+max_data_dir_size_gb = 50
+# Периодичность проверки и очистки (в часах)
+cleanup_interval_hours = 12
+
+# Задача 189: Prometheus Metrics Exporter
+[monitoring]
+# Хост для health-check сервера
+host = "127.0.0.1"
+# Порт для health-check эндпоинта
+port = 8080
+# Порт для Prometheus metrics exporter
+metrics_port = 9090
+# Таймаут для health-check (секунды)
+timeout_sec = 30
+# Максимальное потребление памяти (МБ)
+max_memory_mb = 2048
+
+[monitoring.watchdog]
+# Таймаут для обнаружения зависания hot path (мс)
+stall_timeout_ms = 5000
+# Интервал проверки watchdog (мс)
+check_interval_ms = 2000
+# Период grace после пробуждения системы (мс)
+suspend_grace_ms = 60000

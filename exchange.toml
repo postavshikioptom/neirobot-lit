@@ -1,0 +1,38 @@
+# Настройки биржи Bybit (V5 API)
+# Этот файл содержит общие параметры подключения, лимиты и путь к ключам.
+# Самые API-ключи НЕ хранятся здесь — только путь к файлу (.env или другой).
+
+[bybit]
+# Категория рынка: "linear" (спот, как CAKEUSDT) или "linear" (USDT-perpetual фьючерсы)
+# При смене категории может потребоваться корректировка URL в [websocket]
+category = "linear"
+# Путь к файлу с API-ключами (относительный или абсолютный).
+# По умолчанию — ".env" в корне проекта.
+# Можно переопределить в bot.toml на bots/SYMBOL/.env для полной изоляции ключей по ботам.
+api_key_path = ".env"
+
+[websocket]
+# Базовый публичный WebSocket (для linear).
+public_url = "wss://stream.bybit.com/v5/public/linear"
+# Приватный WebSocket (ордера, позиции) — общий для всех категорий
+private_url = "wss://stream.bybit.com/v5/public/linear"
+# Интервал отправки ping (секунды) для поддержания соединения
+ping_interval_sec = 20
+# Таймаут ожидания pong (секунды). При превышении — реконнект
+pong_timeout_sec = 10
+# Максимальное количество подписок на одно соединение
+max_subscriptions_per_connection = 30
+
+[rest]
+# Базовый URL для REST API
+base_url = "https://api-demo.bybit.com"
+# Таймаут одного запроса (секунды)
+request_timeout_sec = 10
+
+[rate_limits]
+# Консервативный лимит REST-запросов в секунду (IP-based)
+rest_requests_per_second = 20
+# Лимит для приватных эндпоинтов (например, размещение ордеров) в минуту
+private_endpoint_per_minute = 600
+# Базовая задержка при получении ошибки rate limit (ms) для exponential backoff
+backoff_base_ms = 500

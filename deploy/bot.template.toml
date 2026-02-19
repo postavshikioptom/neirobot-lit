@@ -1,0 +1,32 @@
+# Bot configuration template for automated deployment
+# Variables will be substituted by envsubst during deployment
+symbol = "${SYMBOL}"
+model_path = "/opt/neirobot-lit/bots/${SYMBOL}/model/model.onnx"
+
+[strategy]
+threshold_up = ${THRESHOLD_UP:-0.7}
+threshold_down = ${THRESHOLD_DOWN:-0.7}
+
+[risk]
+max_position_size = ${MAX_POSITION_SIZE:-100.0}
+max_drawdown = ${MAX_DRAWDOWN:-0.05}
+
+[onnx]
+execution_provider = "${EXECUTION_PROVIDER:-cpu}"
+device_id = ${DEVICE_ID:-0}
+intra_threads = ${INTRA_THREADS:-4}
+
+# Задача 210: Адаптивные пороги отмены ордеров (максимально мягкие параметры)
+adaptive_thresholds_enabled = ${ADAPTIVE_THRESHOLDS_ENABLED:-false}
+base_threshold_bps = ${BASE_THRESHOLD_BPS:-500.0}
+vol_multiplier = ${VOL_MULTIPLIER:-0.01}
+spread_multiplier_adaptive = ${SPREAD_MULTIPLIER_ADAPTIVE:-0.001}
+min_threshold_bps = ${MIN_THRESHOLD_BPS:-100.0}
+max_threshold_bps = ${MAX_THRESHOLD_BPS:-1000.0}
+
+# Задача 230: Изоляция ресурсов процесса
+[system]
+# Номер ядра CPU для привязки процесса (None = без привязки)
+# cpu_core = 1
+# Максимальный лимит памяти в мегабайтах (для мягкого контроля)
+max_memory_mb = ${MAX_MEMORY_MB:-512}

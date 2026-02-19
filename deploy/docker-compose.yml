@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  neirobot-lit:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: neirobot-lit:latest
+    container_name: neirobot-lit-${SYMBOL}
+    restart: unless-stopped
+    
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - SYMBOL=${SYMBOL}
+      - API_KEY=${API_KEY}
+      - API_SECRET=${API_SECRET}
+    
+    volumes:
+      - ../bots/${SYMBOL}/model:/app/bots/${SYMBOL}/model:ro
+      - ../bots/${SYMBOL}/logs:/app/bots/${SYMBOL}/logs
+      - ../bots/${SYMBOL}/data:/app/bots/${SYMBOL}/data
+      - ../global.toml:/app/global.toml:ro
+      - ../exchange.toml:/app/exchange.toml:ro
+    
+    command: --config /app/bots/${SYMBOL}/config.toml
+    
+    networks:
+      - neirobot-network
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '1'
+          memory: 512M
+
+networks:
+  neirobot-network:
+    driver: bridge

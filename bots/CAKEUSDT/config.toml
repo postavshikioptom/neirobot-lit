@@ -1,0 +1,18 @@
+# Bot configuration for CAKEUSDT
+symbol = "CAKEUSDT"
+# Используйте квантованную INT8 модель для ускорения инференса на CPU
+# model_path = "bots/CAKEUSDT/model/lit_int8.onnx"  # INT8 квантованная модель (рекомендуется для CPU)
+model_path = "bots/CAKEUSDT/model/lit.onnx"  # FP32 модель (по умолчанию)
+
+[strategy]
+threshold_up = 0.7
+threshold_down = 0.7
+
+[risk]
+max_position_size = 100.0
+max_drawdown = 0.05
+
+[onnx]
+execution_provider = "cpu"  # Options: "cpu", "cuda", "tensorrt"
+device_id = 0               # GPU device ID (for cuda/tensorrt)
+intra_threads = 4           # Number of threads for CPU inference

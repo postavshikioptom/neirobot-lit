@@ -1,0 +1,67 @@
+# Пример конфигурации бота с включенным Hot-Swap моделей
+# Задача 228: Автоматизированная дистрибуция и безопасный Hot-Swap моделей
+
+symbol = "BTCUSDT"
+model_path = "bots/BTCUSDT/model/model.onnx"
+seq_len = 100
+features_dim = 50
+
+# === Hot-Swap Configuration (Задача 228) ===
+# Включить автоматическую перезагрузку моделей при обнаружении изменений
+enable_model_hotswap = true
+
+# === Alert Configuration (Задача 222) ===
+# Опционально: переопределить chat_id для алертов этого бота
+# override_chat_id = "123456789"
+
+# TTL дедупликации алертов в секундах
+alert_dedup_ttl_secs = 600
+
+# === Model Confidence Monitoring (Задача 224) ===
+# Частота сэмплирования для записи полных вероятностей (1 из N)
+confidence_sample_rate = 100
+
+# Порог энтропии для генерации алерта о дрейфе модели
+entropy_drift_threshold = 1.5
+
+# Включить проверку дрейфа модели в реальном времени
+enable_realtime_drift_check = true
+
+# Полностью остановить торговлю при обнаружении дрейфа
+drift_stop_enabled = false
+
+# Коэффициент сокращения размера позиции при дрейфе
+drift_scale_factor = 0.5
+
+# === Resource Monitoring (Задача 225) ===
+[resource_thresholds]
+cpu_max_pct = 80.0
+mem_growth_kb_min = 10240  # 10 MB
+sample_interval_sec = 5
+ema_alpha = 0.2
+leak_detection_window = 10  # 10 минут
+
+# === Trading Configuration ===
+initial_balance = 1000.0
+leverage = 10.0
+max_notional_usd = 10000.0
+
+# Пороги для сигналов
+threshold_buy = 0.55
+threshold_sell = 0.55
+threshold_flat = 0.40
+
+# === ONNX Configuration ===
+[onnx]
+execution_provider = "cuda"  # или "cpu", "tensorrt"
+device_id = 0
+intra_threads = 4
+inter_threads = 2
+execution_mode = "Sequential"
+
+# === Risk Management ===
+[risk]
+max_position_size = 1.0
+max_drawdown_pct = 5.0
+stop_loss_pct = 2.0
+take_profit_pct = 3.0

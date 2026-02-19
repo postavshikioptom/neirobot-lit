@@ -1,0 +1,23 @@
+{
+  "ExaSearch": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@smithery/cli@latest",
+      "run",
+      "exa",
+      "--key",
+      "fb937fdf-94b4-4e29-9315-d32fa5a77ff5",
+      "--profile",
+      "moderate-cuckoo-vW7Rzd"
+    ],
+    "type": "stdio"
+  },
+  "chrome-devtools": {
+    "command": "npx",
+    "args": [
+      "chrome-devtools-mcp@latest"
+    ],
+    "type": "stdio"
+  }
+}

@@ -1,0 +1,770 @@
+import heapq
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import List, Tuple, Dict, Any, Optional
+import numpy as np
+from numba import jit
+from python_lab.src.backtest.matching import OrderQueueManager, QueueModel, OrderSide
+from python_lab.src.backtest.error_sim import ExchangeErrorSimulator, ExchangeErrorType, ExchangeErrorData
+
+class EventType(Enum):
+    MARKET = auto()
+    SIGNAL = auto()
+    ORDER = auto()
+    FILL = auto()
+    CANCEL = auto()
+    TRADE = auto()  # Задача 212: События о сделках для обновления очереди
+    EXCHANGE_ERROR = auto()  # Задача 215: События об ошибках биржи
+
+@dataclass(order=True)
+class Event:
+    timestamp: int
+    type: EventType = field(compare=False)
+    data: Any = field(compare=False)
+    symbol: str = field(default="", compare=False)  # Задача 213: Поддержка мульти-инструментальности
+
+@dataclass
+class MarketData:
+    mid_price: float
+    bids: np.ndarray  # (50, 2) [price, volume]
+    asks: np.ndarray  # (50, 2) [price, volume]
+    
+@dataclass
+class SignalData:
+    probs: np.ndarray  # [up, down, flat]
+    side: str  # 'buy', 'sell', 'flat'
+    confidence: float
+
+@dataclass
+class OrderData:
+    order_id: str
+    side: str
+    price: float
+    amount: float
+    order_type: str  # 'limit', 'market'
+    post_only: bool = False
+
+@dataclass
+class FillData:
+    order_id: str
+    side: str
+    price: float
+    amount: float
+    fee_usd: float
+    fill_type: str  # 'maker', 'taker'
+
+@dataclass
+class TradeData:
+    """Задача 212: Данные о сделке для обновления очереди лимитных ордеров"""
+    trade_price: float
+    trade_volume: float
+    timestamp_ms: int
+
+@jit(nopython=True)
+def match_limit_order(side: str, limit_price: float, amount: float, 
+                      bids: np.ndarray, asks: np.ndarray) -> Tuple[bool, float]:
+    """
+    Упрощенный матчинг лимитного ордера.
+    Для BUY: исполняется, если лучшая цена продажи (ask[0]) <= лимитной цене.
+    Для SELL: исполняется, если лучшая цена покупки (bid[0]) >= лимитной цене.
+    """
+    if side == "buy":
+        if asks[0, 0] <= limit_price:
+            return True, asks[0, 0]
+    else:
+        if bids[0, 0] >= limit_price:
+            return True, bids[0, 0]
+    return False, 0.0
+
+@jit(nopython=True)
+def calculate_pnl_numba(entry_price: float, exit_price: float, amount: float, side: str) -> float:
+    if side == "buy":
+        return (exit_price - entry_price) * amount
+    else:
+        return (entry_price - exit_price) * amount
+
+
+@dataclass
+class SorConfig:
+    """Smart Order Routing configuration"""
+    critical_signal: float = 0.75
+    max_size_ratio: float = 0.3
+    default_urgency: float = 0.5
+    slice_interval_ms: int = 100
+    iceberg_randomize: float = 0.2
+    iceberg_price_dev_bps: int = 10
+    switch_base_timeout_ms: int = 500
+    switch_base_distance_bps: int = 5
+    max_switches_per_signal: int = 1
+
+@dataclass
+class BotConfig:
+    symbol: str = "UNKNOWN"
+    initial_balance: float = 1000.0
+    taker_fee_bps: float = 6.0
+    maker_fee_bps: float = 2.0
+    limit_timeout_ms: int = 10000
+    chase_mode: str = "ToBest" # "ToBest", "InsideSpread", "ToVWAP", "None"
+    chase_threshold_bps: float = 2.0
+    chase_distance_bps: float = 0.5
+    chase_max_attempts: int = 3
+    chase_interval_ms: int = 1000
+    sor: SorConfig = field(default_factory=SorConfig)
+    order_size_usd: float = 1000.0
+    
+    # Задача 212: Параметры очереди лимитных ордеров
+    queue_model: str = "conservative"  # "conservative" или "probabilistic"
+    
+    # Задача 213: Параметры риск-менеджмента (индивидуально для каждого символа)
+    max_position: float = 10.0  # Максимальный размер позиции в базовой валюте
+    max_drawdown_pct: float = 10.0  # Максимальная просадка в процентах
+
+
+
+@jit(nopython=True)
+def calculate_book_price_numba(side: str, amount_usd: float, 
+                              bids: np.ndarray, asks: np.ndarray) -> float:
+    """
+    Расчет средневзвешенной цены исполнения с учетом Book Walking.
+    """
+    remaining_usd = amount_usd
+    total_volume_base = 0.0
+    weighted_price_sum = 0.0
+    
+    levels = asks if side == "buy" else bids
+    
+    for i in range(len(levels)):
+        p = levels[i, 0]
+        v = levels[i, 1]
+        
+        level_capacity_usd = p * v
+        
+        if remaining_usd <= level_capacity_usd:
+            fill_volume_base = remaining_usd / p
+            weighted_price_sum += fill_volume_base * p
+            total_volume_base += fill_volume_base
+            remaining_usd = 0
+            break
+        else:
+            weighted_price_sum += v * p
+            total_volume_base += v
+            remaining_usd -= level_capacity_usd
+            
+    if remaining_usd > 0:
+        last_price = levels[-1, 0]
+        fill_volume_base = remaining_usd / last_price
+        weighted_price_sum += fill_volume_base * last_price * 1.01 # +1% штраф
+        total_volume_base += fill_volume_base
+        
+    return weighted_price_sum / total_volume_base
+
+# ============================================================================
+# Задача 213: Поддержка мульти-инструментальности
+# ============================================================================
+
+@dataclass
+class SymbolState:
+    """
+    Состояние для одного торгового символа.
+    Обеспечивает полную изоляцию логики и настроек для каждого символа.
+    """
+    config: BotConfig
+    position: float = 0.0
+    balance: float = 0.0
+    orders: Dict[str, OrderData] = field(default_factory=dict)
+    trades: List[TradeData] = field(default_factory=list)
+    entry_prices: Dict[str, float] = field(default_factory=dict)
+    gross_pnl: float = 0.0
+    signal_mids: Dict[str, float] = field(default_factory=dict)
+    slippages: List[float] = field(default_factory=list)
+    queue_manager: Optional[OrderQueueManager] = None
+    last_market_data: Optional[MarketData] = None
+    total_orders_placed: int = 0
+    total_orders_cancelled: int = 0
+    
+    # Задача 213: Параметры риск-менеджмента
+    peak_balance: float = 0.0  # Пиковый баланс для расчета просадки
+    
+    # Задача 215: Метрики ошибок
+    lost_trades_count: int = 0  # Количество пропущенных сигналов из-за ошибок
+    
+    def __post_init__(self):
+        """Инициализация состояния после создания"""
+        self.balance = self.config.initial_balance
+        self.peak_balance = self.config.initial_balance
+        queue_model = QueueModel.CONSERVATIVE if self.config.queue_model == "conservative" else QueueModel.PROBABILISTIC
+        self.queue_manager = OrderQueueManager(queue_model=queue_model)
+    
+    def get_current_drawdown_pct(self) -> float:
+        """Расчет текущей просадки в процентах"""
+        if self.peak_balance <= 0:
+            return 0.0
+        drawdown = (self.peak_balance - self.balance) / self.peak_balance * 100.0
+        return max(0.0, drawdown)
+    
+    def update_peak_balance(self):
+        """Обновление пикового баланса"""
+        if self.balance > self.peak_balance:
+            self.peak_balance = self.balance
+    
+    def is_position_limit_exceeded(self, additional_size: float) -> bool:
+        """Проверка превышения лимита позиции"""
+        return abs(self.position + additional_size) > self.config.max_position
+    
+    def is_drawdown_limit_exceeded(self) -> bool:
+        """Проверка превышения лимита просадки"""
+        return self.get_current_drawdown_pct() > self.config.max_drawdown_pct
+
+
+class EventEngine:
+    def __init__(self, config: BotConfig, error_simulator: Optional[ExchangeErrorSimulator] = None):
+        """
+        Инициализация движка событий.
+        
+        Поддерживает как одиночный символ (для обратной совместимости),
+        так и мульти-инструментальность (Задача 213).
+        
+        Args:
+            config: Конфигурация бота
+            error_simulator: Симулятор ошибок биржи (Задача 215, опционально)
+        """
+        self.config = config
+        self.events: List[Tuple[int, Event]] = []
+        self.current_time = 0
+        
+        # Параметры задержек (ms)
+        self.internal_latency = 1  
+        self.network_latency = 20
+        
+        # Режим исполнения
+        self.execution_mode = "realistic"
+        
+        # Задача 215: Симулятор ошибок биржи
+        self.error_simulator = error_simulator
+        
+        # Задача 213: Поддержка мульти-инструментальности
+        # Хранение состояний для каждого символа
+        self.states: Dict[str, SymbolState] = {}
+        
+        # Инициализация состояния для основного символа
+        self._init_symbol_state(config.symbol, config)
+        
+        # Для обратной совместимости - прямой доступ к состоянию основного символа
+        self._primary_symbol = config.symbol
+    
+    def _init_symbol_state(self, symbol: str, config: BotConfig):
+        """Инициализация состояния для символа"""
+        if symbol not in self.states:
+            self.states[symbol] = SymbolState(config=config)
+    
+    def add_symbol(self, symbol: str, config: BotConfig):
+        """Добавление нового символа для обработки"""
+        self._init_symbol_state(symbol, config)
+    
+    def get_state(self, symbol: str = "") -> SymbolState:
+        """Получение состояния для символа (по умолчанию - основной символ)"""
+        if not symbol:
+            symbol = self._primary_symbol
+        if symbol not in self.states:
+            raise ValueError(f"Символ {symbol} не инициализирован")
+        return self.states[symbol]
+
+
+
+    def set_mode(self, mode: str):
+        if mode not in ["realistic", "ideal"]:
+            raise ValueError(f"Unknown mode: {mode}")
+        self.execution_mode = mode
+
+    def push_event(self, event: Event):
+        heapq.heappush(self.events, (event.timestamp, event))
+
+    def run(self):
+        while self.events:
+            ts, event = heapq.heappop(self.events)
+            self.current_time = ts
+            self.process_event(event)
+
+    def process_event(self, event: Event):
+        """Обработка события с поддержкой мульти-инструментальности"""
+        # Задача 213: Используем символ из события
+        symbol = event.symbol if event.symbol else self._primary_symbol
+        
+        if event.type == EventType.MARKET:
+            self._on_market(event.data, symbol)
+        elif event.type == EventType.SIGNAL:
+            self._on_signal(event.data, symbol)
+        elif event.type == EventType.ORDER:
+            self._on_order(event.data, symbol)
+        elif event.type == EventType.FILL:
+            self._on_fill(event.data, symbol)
+        elif event.type == EventType.CANCEL:
+            self._on_cancel(event.data, symbol)
+        elif event.type == EventType.TRADE:
+            self._on_trade(event.data, symbol)
+        elif event.type == EventType.EXCHANGE_ERROR:
+            self._on_exchange_error(event.data, symbol)
+
+    def _on_market(self, data: MarketData, symbol: str = ""):
+        """Обработка рыночных данных с поддержкой мульти-инструментальности"""
+        state = self.get_state(symbol)
+        state.last_market_data = data
+        
+        # 1. Матчинг существующих лимитных ордеров
+        if self.execution_mode == "ideal":
+            # Идеальное исполнение: если mid_price коснулся или пересек цену
+            to_fill = []
+            for oid, order in state.orders.items():
+                 if order.order_type == "limit":
+                    mid = data.mid_price
+                    if (order.side == "buy" and mid <= order.price) or \
+                       (order.side == "sell" and mid >= order.price):
+                        to_fill.append((oid, order.price))
+                        
+            for oid, price in to_fill:
+                 self._fill_order(oid, price, "maker", symbol)
+                 
+        elif self.execution_mode == "realistic":
+            to_fill = []
+            
+            # Задача 212: Проверяем пересечение цены (Price Crossing)
+            # Если цена рынка ушла далеко за наш лимит, ордер исполняется мгновенно
+            crossed_orders = state.queue_manager.check_price_crossing(
+                best_bid=data.bids[0, 0],
+                best_ask=data.asks[0, 0]
+            )
+            for oid in crossed_orders:
+                if oid in state.orders:
+                    order = state.orders[oid]
+                    # Исполняем по цене лимита (мы выставили лимит, рынок прошел сквозь него)
+                    to_fill.append((oid, order.price))
+            
+            # Проверяем агрессивное пересечение (когда цена уже ушла сквозь наш лимит)
+            for oid, order in list(state.orders.items()):
+                if order.order_type == "limit" and oid not in crossed_orders:
+                    crossed, price = match_limit_order(
+                        order.side, order.price, order.amount, data.bids, data.asks
+                    )
+                    
+                    if crossed:
+                        to_fill.append((oid, price))
+                    else:
+                        # Логика Chasing (Re-pegging)
+                        if state.config.chase_mode != "None":
+                            # Если цена ушла далеко от нашего лимита
+                            best_price = data.bids[0, 0] if order.side == "buy" else data.asks[0, 0]
+                            dist_bps = 0.0
+                            if order.price > 0:
+                                dist_bps = abs(best_price - order.price) / order.price * 10000
+                            
+                            if dist_bps > state.config.chase_threshold_bps:
+                                # Нужен REPEG (Cancel + New Order)
+                                # Генерируем Cancel событие
+                                cancel_event = Event(
+                                    timestamp=self.current_time + self.internal_latency,
+                                    type=EventType.CANCEL,
+                                    data=order.order_id,
+                                    symbol=symbol
+                                )
+                                self.push_event(cancel_event)
+            
+            for oid, price in to_fill:
+                self._fill_order(oid, price, "maker", symbol)
+
+    def _fill_order(self, oid: str, price: float, fill_type: str, symbol: str = ""):
+        """Исполнение ордера с поддержкой мульти-инструментальности"""
+        state = self.get_state(symbol)
+        if oid not in state.orders: return
+        order = state.orders.pop(oid)
+            
+        # Расчет проскальзывания в bps от мида в момент сигнала
+        if oid in state.signal_mids:
+            mid_at_signal = state.signal_mids.pop(oid)
+            # В HFT проскальзывание обычно считают как разницу между мидом в момент засылки сигнала и ценой исполнения.
+            # Если купили дороже мида - это положительное проскальзывание (slippage).
+            # Для BUY: (fill_price - mid) / mid * 10000
+            # Для SELL: (mid - fill_price) / mid * 10000
+            slippage_bps = (price - mid_at_signal) / mid_at_signal * 10000 if order.side == "buy" else \
+                           (mid_at_signal - price) / mid_at_signal * 10000
+            state.slippages.append(slippage_bps)
+
+        fill_event = Event(
+            timestamp=self.current_time,
+            type=EventType.FILL,
+            data=FillData(
+                order_id=oid,
+                side=order.side,
+                price=price,
+                amount=order.amount,
+                fee_usd=0.0,
+                fill_type=fill_type
+            ),
+            symbol=symbol
+        )
+        self.push_event(fill_event)
+
+    def _on_signal(self, data: SignalData, symbol: str = ""):
+        """Обработка сигнала с поддержкой мульти-инструментальности"""
+        state = self.get_state(symbol)
+        
+        # Задача 213: Проверка лимитов риск-менеджмента
+        if state.is_drawdown_limit_exceeded():
+            print(f"[{symbol}] Trading halted: Drawdown limit exceeded ({state.get_current_drawdown_pct():.2f}%)")
+            return
+        
+        # Добавляем задержку (имитация принятия решения и отправки по сети)
+        latency = 0 if self.execution_mode == "ideal" else (self.internal_latency + self.network_latency)
+        execution_ts = self.current_time + latency
+        
+        # Генерируем ORDER событие
+        if data.side != 'flat':
+            # Логика в зависимости от SorConfig/BotConfig
+            # Если сигнал сильный (critical_signal), бьем маркетом
+            is_aggressive = data.confidence >= state.config.sor.critical_signal
+            
+            order_type = "market" if is_aggressive else "limit"
+            
+            # Расчет цены для лимитки (напр. Best Bid/Ask или с отступом)
+            price = 0.0
+            amount = 0.0
+            if state.last_market_data:
+                # Количество базовой валюты исходя из order_size_usd
+                amount = state.config.order_size_usd / state.last_market_data.mid_price
+                
+                if order_type == "limit":
+                    # ChaseBest: ставим на Best Bid/Ask
+                    if data.side == "buy":
+                        price = state.last_market_data.bids[0, 0]
+                    else:
+                        price = state.last_market_data.asks[0, 0]
+            
+            # Задача 213: Проверка лимита позиции перед созданием ордера
+            side_mult = 1 if data.side == "buy" else -1
+            if state.is_position_limit_exceeded(side_mult * amount):
+                print(f"[{symbol}] Order rejected: Position limit would be exceeded")
+                return
+            
+            total_amount = amount
+            
+            # Simple SOR: Slicing
+            # Вычисляем максимальный размер слайса (напр. 30% от общей суммы или фиксированный лимит)
+            max_slice = total_amount * state.config.sor.max_size_ratio
+            if max_slice <= 0: max_slice = total_amount
+            
+            remaining = total_amount
+            slice_idx = 0
+            while remaining > 0:
+                current_slice = min(remaining, max_slice)
+                remaining -= current_slice
+                
+                slice_ts = execution_ts + (slice_idx * state.config.sor.slice_interval_ms)
+                order_id = f"ord_{slice_ts}_{slice_idx}"
+                
+                # Сохраняем мид для расчета проскальзывания (для всего ордера по частям)
+                if state.last_market_data:
+                    state.signal_mids[order_id] = state.last_market_data.mid_price
+                
+                order_event = Event(
+                    timestamp=slice_ts,
+                    type=EventType.ORDER,
+                    data=OrderData(
+                        order_id=order_id,
+                        side=data.side,
+                        price=price,
+                        amount=current_slice,
+                        order_type=order_type
+                    ),
+                    symbol=symbol
+                )
+                state.total_orders_placed += 1
+                self.push_event(order_event)
+                slice_idx += 1
+
+
+    def _on_order(self, data: OrderData, symbol: str = ""):
+        """Обработка ордера с поддержкой мульти-инструментальности и симуляцией ошибок"""
+        state = self.get_state(symbol)
+        
+        # Задача 215: Проверка на ошибки биржи
+        if self.error_simulator:
+            error_type, error_data = self.error_simulator.should_fail(
+                current_time_ms=self.current_time,
+                order_id=data.order_id
+            )
+            
+            if error_type != ExchangeErrorType.NONE:
+                # Генерируем событие об ошибке
+                error_event = Event(
+                    timestamp=self.current_time,
+                    type=EventType.EXCHANGE_ERROR,
+                    data=error_data,
+                    symbol=symbol
+                )
+                self.push_event(error_event)
+                
+                # Для RateLimitError: повторяем операцию после backoff
+                if error_type == ExchangeErrorType.RATE_LIMIT:
+                    retry_time = self.error_simulator.backoff_until_ms
+                    retry_event = Event(
+                        timestamp=retry_time,
+                        type=EventType.ORDER,
+                        data=data,
+                        symbol=symbol
+                    )
+                    self.push_event(retry_event)
+                else:
+                    # Для других ошибок: считаем сигнал потерянным
+                    state.lost_trades_count += 1
+                
+                return  # Не обрабатываем ордер
+        
+        if data.order_type == "market":
+            # Исполняем немедленно по текущему стакану (с учетом проскальзывания)
+            if state.last_market_data:
+                # В HFT маркет ордер все равно имеет задержку исполнения на бирже
+                # Но мы уже учли network_latency в _on_signal -> ORDER.
+                # Поэтому считаем исполнение по стакану в момент прихода ордера на биржу.
+                
+                amount_usd = data.amount * state.last_market_data.mid_price # Условно
+                fill_price = calculate_book_price_numba(
+                    data.side, amount_usd, state.last_market_data.bids, state.last_market_data.asks
+                )
+                
+                fill_event = Event(
+                    timestamp=self.current_time,
+                    type=EventType.FILL,
+                    data=FillData(
+                        order_id=data.order_id,
+                        side=data.side,
+                        price=fill_price,
+                        amount=data.amount,
+                        fee_usd=0.0,
+                        fill_type="taker"
+                    )
+                )
+                self.push_event(fill_event)
+        else:
+            # Лимитный ордер - сохраняем и ждем матчинга в _on_market или _on_trade
+            state.orders[data.order_id] = data
+            
+            # Задача 212: Размещаем ордер в очереди
+            if state.last_market_data:
+                levels = state.last_market_data.bids if data.side == "buy" else state.last_market_data.asks
+                volume_at_level = 0.0
+                for p, v in levels:
+                    if abs(p - data.price) < 1e-8:  # Точное совпадение цены
+                        volume_at_level = v
+                        break
+                
+                # Размещаем ордер в очереди
+                side = OrderSide.BUY if data.side == "buy" else OrderSide.SELL
+                state.queue_manager.place_order(
+                    order_id=data.order_id,
+                    price=data.price,
+                    volume_at_level=volume_at_level,
+                    side=side
+                )
+
+    def _on_fill(self, data: FillData, symbol: str = ""):
+        """Обработка исполнения ордера с поддержкой мульти-инструментальности"""
+        state = self.get_state(symbol)
+
+        # Обновление позиции и баланса
+        side_mult = 1 if data.side == "buy" else -1
+
+        # Если это закрытие позиции (полное или частичное), считаем PnL
+        if state.position != 0 and np.sign(state.position) != side_mult:
+            # Упрощенно: закрываем позицию (flip или reduce)
+            # В данном бэктестере у нас 1 лот за раз, так что это просто закрытие
+            original_side = "buy" if side_mult < 0 else "sell"
+            entry_price = state.entry_prices.get(original_side, data.price)
+
+            pnl = calculate_pnl_numba(entry_price, data.price, data.amount, original_side)
+            state.gross_pnl += pnl
+            state.balance += pnl
+        else:
+            # Открытие или увеличение
+            state.entry_prices[data.side] = data.price
+
+        # Обновление позиции
+        state.position += side_mult * data.amount
+
+        # Учет комиссий
+        fee_rate = (state.config.maker_fee_bps if data.fill_type == "maker" else state.config.taker_fee_bps) / 10000
+        data.fee_usd = data.amount * data.price * fee_rate
+        state.balance -= data.fee_usd
+
+        # Задача 213: Обновление пикового баланса для расчета просадки
+        state.update_peak_balance()
+
+        state.trades.append(data)
+
+    def get_metrics(self, symbol: str = "") -> Dict[str, Any]:
+        """Получение метрик для символа с поддержкой мульти-инструментальности"""
+        state = self.get_state(symbol)
+
+        if not state.trades:
+            metrics = {}
+        else:
+            fills_count = len(state.trades)
+            maker_fills = len([t for t in state.trades if t.fill_type == "maker"])
+            maker_rate = maker_fills / fills_count if fills_count > 0 else 0
+
+            total_fees = sum(t.fee_usd for t in state.trades)
+            avg_slippage = np.mean(state.slippages) if state.slippages else 0.0
+            unexecuted_rate = state.total_orders_cancelled / state.total_orders_placed if state.total_orders_placed > 0 else 0.0
+
+            metrics = {
+                "total_trades": fills_count,
+                "maker_rate": maker_rate,
+                "total_fees_usd": total_fees,
+                "final_balance": state.balance,
+                "net_pnl": state.balance - state.config.initial_balance,
+                "avg_slippage_bps": avg_slippage,
+                "unexecuted_rate": unexecuted_rate,
+                "total_orders": state.total_orders_placed
+            }
+        
+        # Задача 215: Добавляем метрики ошибок
+        if self.error_simulator:
+            error_metrics = self.error_simulator.get_metrics()
+            metrics.update({
+                "lost_trades_count": state.lost_trades_count,
+                "error_recovery_time_ms": error_metrics["avg_recovery_time_ms"],
+                "max_recovery_time_ms": error_metrics["max_recovery_time_ms"],
+                "total_errors": error_metrics["total_errors"],
+                "error_rate_pct": error_metrics["error_rate_pct"],
+                "resilience_score": self.error_simulator.get_resilience_score()
+            })
+        
+        return metrics
+
+    def _on_trade(self, data: TradeData, symbol: str = ""):
+        """
+        Задача 212: Обработка события о сделке для обновления очереди лимитных ордеров.
+        Задача 213: Поддержка мульти-инструментальности
+
+        Вызывается при получении информации о сделке на рынке.
+        Обновляет состояние всех активных лимитных ордеров в очереди.
+        """
+        state = self.get_state(symbol)
+
+        # Обновляем очередь: проверяем, какие ордера исполнены
+        filled_orders = state.queue_manager.update_on_trade(
+            trade_price=data.trade_price,
+            trade_volume=data.trade_volume
+        )
+
+        # Для каждого исполненного ордера генерируем FILL событие
+        for order_id in filled_orders:
+            if order_id in state.orders:
+                order = state.orders[order_id]
+                # Исполняем ордер по цене сделки
+                self._fill_order(order_id, data.trade_price, "maker", symbol)
+
+    def _on_cancel(self, order_id: str, symbol: str = ""):
+        """Отмена ордера с поддержкой мульти-инструментальности и симуляцией ошибок"""
+        state = self.get_state(symbol)
+        
+        # Задача 215: Проверка на ошибки биржи при отмене ордера
+        if self.error_simulator:
+            error_type, error_data = self.error_simulator.should_fail(
+                current_time_ms=self.current_time,
+                order_id=order_id
+            )
+            
+            if error_type != ExchangeErrorType.NONE:
+                # Генерируем событие об ошибке
+                error_event = Event(
+                    timestamp=self.current_time,
+                    type=EventType.EXCHANGE_ERROR,
+                    data=error_data,
+                    symbol=symbol
+                )
+                self.push_event(error_event)
+                
+                # Для RateLimitError: повторяем операцию после backoff
+                if error_type == ExchangeErrorType.RATE_LIMIT:
+                    retry_time = self.error_simulator.backoff_until_ms
+                    retry_event = Event(
+                        timestamp=retry_time,
+                        type=EventType.CANCEL,
+                        data=order_id,
+                        symbol=symbol
+                    )
+                    self.push_event(retry_event)
+                else:
+                    # Для других ошибок: считаем сигнал потерянным
+                    state.lost_trades_count += 1
+                
+                return  # Не обрабатываем отмену
+
+        if order_id in state.orders:
+            del state.orders[order_id]
+            state.total_orders_cancelled += 1
+            if order_id in state.signal_mids:
+                del state.signal_mids[order_id]
+
+            # Задача 212: Отменяем ордер в очереди
+            state.queue_manager.cancel_order(order_id)
+
+    def _on_exchange_error(self, data: ExchangeErrorData, symbol: str = ""):
+        """
+        Задача 215: Обработка ошибок биржи.
+        
+        Логирует ошибку и обновляет метрики.
+        Для RateLimitError: retry уже запланирован в _on_order.
+        """
+        state = self.get_state(symbol)
+        
+        # Логируем ошибку (в реальном бэктесте можно записывать в файл)
+        error_msg = f"[{symbol}] Exchange Error at {data.timestamp_ms}ms: " \
+                   f"{data.error_type.value} (code {data.error_code}): {data.error_message}"
+        
+        if data.order_id:
+            error_msg += f" | Order ID: {data.order_id}"
+        
+        # В production можно использовать logging
+        # logging.warning(error_msg)
+        # Для бэктеста просто пропускаем (метрики уже обновлены в simulator)
+
+
+    def get_all_trades(self, symbol: str = "") -> List[Dict[str, Any]]:
+        """
+        Получение всех сделок для символа в формате, пригодном для CSV.
+        Задача 213: Поддержка мульти-инструментальности
+        
+        Returns:
+            Список словарей с данными о сделках, включая колонку symbol
+        """
+        state = self.get_state(symbol)
+        trades_list = []
+        
+        for trade in state.trades:
+            trade_dict = {
+                "symbol": symbol if symbol else self._primary_symbol,
+                "order_id": trade.order_id,
+                "side": trade.side,
+                "price": trade.price,
+                "amount": trade.amount,
+                "fee_usd": trade.fee_usd,
+                "fill_type": trade.fill_type
+            }
+            trades_list.append(trade_dict)
+        
+        return trades_list
+    
+    def get_all_trades_multi_symbol(self) -> List[Dict[str, Any]]:
+        """
+        Получение всех сделок для всех символов в формате, пригодном для CSV.
+        Задача 213: Поддержка мульти-инструментальности
+        
+        Returns:
+            Список словарей с данными о сделках от всех символов
+        """
+        all_trades = []
+        for symbol in self.states.keys():
+            all_trades.extend(self.get_all_trades(symbol))
+        
+        # Сортируем по времени (если есть timestamp в TradeData)
+        return all_trades

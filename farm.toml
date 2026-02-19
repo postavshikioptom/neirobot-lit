@@ -1,0 +1,50 @@
+# Farm Configuration for Multi-Instance Bot Management
+# Задача 226: Конфигурация фермы ботов
+
+[farm]
+# Базовый порт для мониторинга (каждому боту назначается порт base + index)
+base_monitoring_port = 9000
+
+# Максимальное количество ботов для параллельного запуска
+max_parallel_starts = 10
+
+# Путь к бинарнику бота
+bot_binary = "./target/release/run-bot"
+
+# Рабочая директория (корень проекта)
+working_directory = "."
+
+[resources]
+# Количество CPU ядер на бота (0 = автоматическое распределение)
+cpu_cores_per_bot = 1
+
+# Лимит памяти на бота в MB (0 = без лимита)
+memory_limit_mb = 512
+
+# Включить CPU affinity (изоляция ядер)
+enable_cpu_affinity = true
+
+[monitoring]
+# Интервал обновления дашборда в секундах
+dashboard_refresh_interval = 2
+
+# Порог для критических алертов (процент мертвых ботов)
+critical_alert_threshold = 0.10
+
+[symbols]
+# Список символов для запуска
+# Каждый символ должен иметь конфигурацию в bots/SYMBOL/config.toml
+list = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+]
+
+[groups]
+# Группы ботов для селективного деплоя
+scalping = ["BTCUSDT", "ETHUSDT"]
+trending = ["SOLUSDT", "ADAUSDT"]
+altcoins = ["BNBUSDT", "ADAUSDT"]
+

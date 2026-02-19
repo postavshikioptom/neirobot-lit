@@ -1,0 +1,61 @@
+[Unit]
+Description=Neirobot LiT Trading Bot for %i
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neirobot
+Group=neirobot
+WorkingDirectory=/opt/neirobot
+
+# Main process commands
+# Задача 226: Передача MONITORING_PORT через переменную окружения
+ExecStart=/opt/neirobot/target/release/run-bot %i --config /opt/neirobot/bots/%i/config.toml --monitoring-port ${MONITORING_PORT}
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy - on-failure with limits for high availability
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=3600
+StartLimitBurst=10
+
+# HFT optimizations - Real-time scheduling for minimal latency
+# CAP_SYS_NICE capability is required for non-root user to use FIFO/RR scheduling
+CapabilityBoundingSet=CAP_SYS_NICE
+AmbientCapabilities=CAP_SYS_NICE
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=50
+
+# Security hardening - Maximum isolation
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# File system access control
+# Binary is read-only to prevent tampering
+ReadOnlyPaths=/opt/neirobot/target/release
+# Only bot-specific directory is writable for logs and data
+ReadWritePaths=/opt/neirobot/bots/%i
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Задача 226: Лимит памяти для каждого бота
+MemoryMax=${MEMORY_LIMIT_MB}M
+
+# Environment variables
+Environment="RUST_LOG=info"
+# Задача 226: Переменные окружения для мониторинга и лимитов
+Environment="MONITORING_PORT=9000"
+Environment="MEMORY_LIMIT_MB=512"
+# Optional .env file for bot-specific settings (e.g., CPU affinity via drop-in files)
+EnvironmentFile=-/opt/neirobot/bots/%i/.env
+
+[Install]
+WantedBy=multi-user.target
