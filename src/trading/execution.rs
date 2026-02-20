@@ -1800,23 +1800,44 @@ impl ExecutionEngine {
         }
     }
 
-    /// Превращает вероятности в сигнал на основе порогов (thresh_buy/sell)
-    /// Задача 044: Фильтрация сигналов нейросети на основе порогов уверенности
+    /// Превращает вероятности в сигнал на основе асимметричных порогов
+    /// Задача 101: Использование long_threshold и short_threshold вместо единых порогов
     fn filter_signal(&self, output: &InferenceOutput) -> Signal {
         // Индексы: [0] = Flat, [1] = Up, [2] = Down
+        let prob_flat = output.probabilities[0];
         let prob_up = output.probabilities[1];
         let prob_down = output.probabilities[2];
 
-        if prob_up >= self.thresh_buy {
+        // Конвертируем Decimal в f32 с безопасными дефолтами (Задача 101)
+        let long_th = self.bot_config.long_threshold.to_f32().unwrap_or(0.6);
+        let short_th = self.bot_config.short_threshold.to_f32().unwrap_or(0.6);
+
+        // Логирование всех трёх вероятностей [F, D, U] при принятии решения (Задача 101)
+        tracing::info!(
+            "[{}] Signal probabilities: [Flat={:.4}, Down={:.4}, Up={:.4}], thresholds: [long={:.4}, short={:.4}]",
+            self.symbol, prob_flat, prob_down, prob_up, long_th, short_th
+        );
+
+        // Приоритет входа: игнорировать противоречивый сигнал (Задача 101)
+        // Если обе вероятности выше порогов - редкий случай при softmax
+        if prob_up > long_th && prob_down > short_th {
+            tracing::warn!(
+                "[{}] Contradictory signal ignored: Up({:.4})>{:.4} AND Down({:.4})>{:.4}",
+                self.symbol, prob_up, long_th, prob_down, short_th
+            );
+            return Signal::Flat;
+        }
+
+        if prob_up > long_th {
             Signal::Up
-        } else if prob_down >= self.thresh_sell {
+        } else if prob_down > short_th {
             Signal::Down
         } else {
-            // Если уверенность ниже порогов, считаем сигнал нейтральным (Flat)
+            // Если уверенность ниже порогов, считаем сигнал нейтральным
             if prob_up > 0.4 || prob_down > 0.4 {
                 tracing::debug!(
                     "[{}] Signal suppressed by thresholds: Up={:.2} (>{:.2}), Down={:.2} (>{:.2})",
-                    self.symbol, prob_up, self.thresh_buy, prob_down, self.thresh_sell
+                    self.symbol, prob_up, long_th, prob_down, short_th
                 );
             }
             Signal::Flat
