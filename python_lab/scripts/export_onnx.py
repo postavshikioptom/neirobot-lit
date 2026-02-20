@@ -234,6 +234,21 @@ def export():
         except Exception as e:
             print(f"⚠️  Simplification failed: {e}")
 
+    # Задача 098: Фиксация динамических размерностей
+    # Post-export Fix: Если модель была экспортирована с динамическими осями ранее,
+    # добавить шаг принудительной фиксации
+    try:
+        from onnxruntime.tools import make_dynamic_shape_fixed
+        print("Fixing dynamic axes in exported ONNX model...")
+        fixed_output = models_dir / "model_fixed.onnx"
+        make_dynamic_shape_fixed.make_dynamic_shape_fixed('batch', 1, str(output_onnx), str(fixed_output))
+        output_onnx = fixed_output
+        print("✓ Dynamic batch dimension fixed to 1")
+    except ImportError:
+        print("⚠️  onnxruntime.tools not available, skipping dynamic shape fix")
+    except Exception as e:
+        print(f"⚠️  Failed to fix dynamic shapes: {e}")
+
     # 6. Квантование FP16
     final_precision = "fp32"
     if args.fp16:

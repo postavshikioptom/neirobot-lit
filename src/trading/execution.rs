@@ -423,7 +423,7 @@ impl ExecutionEngine {
         let divisor = Decimal::ONE + fee_rate + buffer;
         let effective_balance = available_balance / divisor;
 
-        // target_qty = min(effective_balance * leverage, bot_config.max_pos_size_usd) / current_price
+        // target_qty = min(effective_balance * leverage, bot_config.max_position_size) / current_price
         let mut target_val = effective_balance * leverage;
         if let Some(max_pos_dec) = self.bot_config.max_position_size {
             if target_val > max_pos_dec {
@@ -462,9 +462,15 @@ impl ExecutionEngine {
             );
         }
 
+        // Задача 065: Проверка риск-менеджера
+        if !self.risk_manager.can_open_position(scaled_qty) {
+            debug!("Order size rejected by risk manager: {}", scaled_qty);
+            return Decimal::ZERO;
+        }
+
         info!(
-            "Order size calculated: {} (base: {}, balance used: {})", 
-            scaled_qty, base_qty, effective_balance
+            "Order size calculated: {} (original target: {}, balance used: {})", 
+            scaled_qty, target_qty, effective_balance
         );
 
         scaled_qty
@@ -1544,7 +1550,21 @@ impl ExecutionEngine {
         }
 
         // 2. Проверка глобального риска (Drawdown) перед любыми действиями
-        self.risk_manager.check_global_risk(current_pnl)?;
+        if let Err(e) = self.risk_manager.check_global_risk(current_pnl) {
+            let error_msg = e.to_string();
+            if error_msg.contains("HardStop") || error_msg.contains("drawdown") {
+                // ЯВНЫЙ HARDSTOP TRIGGER — выполняем экстренные действия
+                critical!("[{}] HARD STOP TRIGGERED: {}", self.symbol, error_msg);
+                // 1. Отмена всех ордеров
+                let _ = self.order_manager.cancel_all_orders(rest_client, &mut self.risk_manager, &self.bot_config, exchange_config).await;
+                // 2. Экстренное закрытие позиции
+                let _ = self.order_manager.execute_emergency_close(rest_client, &mut self.risk_manager, &self.position_manager, &self.bot_config, exchange_config).await;
+                // 3. Система уже в режиме Blocked (is_blocked = true в risk_manager)
+                self.emergency_mode = true;
+                return Ok(());
+            }
+            return Err(e);
+        }
 
         // 2.0.5. Проверка периода блокировки после убытков (Lockout Period) (Задача 118)
         {
@@ -2650,7 +2670,13 @@ impl ExecutionEngine {
         self.risk_manager.update_equity(current_pnl);
         
         if let Err(e) = self.risk_manager.check_global_risk(current_pnl) {
-            warn!("[{}] Risk breach detected after order update: {}. Triggering emergency exit.", self.symbol, e);
+            let error_msg = e.to_string();
+            if error_msg.contains("HardStop") || error_msg.contains("drawdown") {
+                // ЯВНЫЙ HARDSTOP TRIGGER — выполняем экстренные действия
+                critical!("[{}] HARD STOP TRIGGERED: {}", self.symbol, error_msg);
+            } else {
+                warn!("[{}] Risk breach detected after order update: {}. Triggering emergency exit.", self.symbol, e);
+            }
             // Очищаем состояние нарезки при аварийном выходе
             self.pending_slice_qty = None;
             self.pending_slice_side = None;

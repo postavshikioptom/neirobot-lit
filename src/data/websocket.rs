@@ -231,7 +231,7 @@ impl BybitPrivateWsClient {
     }
 
     async fn connect_and_auth(&self, tx: &Sender<serde_json::Value>, token: CancellationToken) -> Result<()> {
-        let url = &self.config.websocket.private_url;
+        let url = &self.config.websocket.private_ws_url;
         
         // Создаём оптимизированный сокет с настройками TCP_NODELAY и буферов
         let tcp_stream = create_optimized_socket(
@@ -305,6 +305,7 @@ impl BybitPrivateWsClient {
         let timeout = Duration::from_secs(self.config.websocket.pong_timeout_sec);
         
         let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel(1);
+        let (ping_tx, mut ping_rx) = tokio::sync::mpsc::channel(1);
         
         let last_activity_clone = self.last_activity.clone();
         let last_ping_sent_at_clone = self.last_ping_sent_at.clone();
@@ -328,17 +329,13 @@ impl BybitPrivateWsClient {
                             *lock = Some(Instant::now());
                         }
 
-                        if let Err(e) = ws_sink.send(Message::Text(r#"{"op":"ping"}"#.into())).await {
-                            error!("Failed to send Private WS ping: {}", e);
+                        if let Err(_) = ping_tx.send(()).await {
+                            error!("Failed to send ping signal");
                             let _ = reconnect_tx.send(()).await;
                             break;
                         }
                     }
                     _ = token_heartbeat.cancelled() => {
-                        let _ = ws_sink.send(Message::Close(Some(CloseFrame {
-                            code: 1000.into(),
-                            reason: "Shutdown".into(),
-                        }))).await;
                         break;
                     }
                 }
@@ -355,6 +352,12 @@ impl BybitPrivateWsClient {
                         reason: "Graceful shutdown".into(),
                     }))).await;
                     return Ok(());
+                }
+                _ = ping_rx.recv() => {
+                    if let Err(e) = ws_sink.send(Message::Text(r#"{"op":"ping"}"#.into())).await {
+                        error!("Failed to send Private WS ping: {}", e);
+                        return Err(anyhow::anyhow!("Failed to send ping"));
+                    }
                 }
                 msg = ws_read.next() => {
                     match msg {
@@ -404,11 +407,6 @@ impl BybitPrivateWsClient {
                 }
                 _ = reconnect_rx.recv() => {
                     return Err(anyhow::anyhow!("Private Heartbeat watchdog triggered reconnect"));
-                }
-                Some(signal) = reconnect_rx.recv() => {
-                    if signal == ReconnectSignal::Immediate {
-                        return Err(anyhow::anyhow!("External Immediate reconnect signal received"));
-                    }
                 }
             }
         }

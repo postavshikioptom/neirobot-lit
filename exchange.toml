@@ -15,7 +15,7 @@ api_key_path = ".env"
 # Базовый публичный WebSocket (для linear).
 public_url = "wss://stream.bybit.com/v5/public/linear"
 # Приватный WebSocket (ордера, позиции) — общий для всех категорий
-private_url = "wss://stream.bybit.com/v5/public/linear"
+private_ws_url = "wss://stream.bybit.com/v5/private"
 # Интервал отправки ping (секунды) для поддержания соединения
 ping_interval_sec = 20
 # Таймаут ожидания pong (секунды). При превышении — реконнект
@@ -30,6 +30,10 @@ base_url = "https://api-demo.bybit.com"
 request_timeout_sec = 10
 
 [rate_limits]
+# Лимит для ордеров (order/create, order/cancel) в запросах в секунду
+order_rate = 20
+# Лимит для общих запросов (balance, position/list, market/time) в запросах в секунду
+private_rate = 50
 # Консервативный лимит REST-запросов в секунду (IP-based)
 rest_requests_per_second = 20
 # Лимит для приватных эндпоинтов (например, размещение ордеров) в минуту

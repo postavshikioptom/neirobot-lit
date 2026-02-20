@@ -83,7 +83,7 @@ api_key_path = ".env"
 
 [websocket]
 public_url = "wss://stream.bybit.com/v5/public/linear"
-private_url = "wss://stream.bybit.com/v5/public/linear"
+private_ws_url = "wss://stream.bybit.com/v5/public/linear"
 warn_rtt_ms = 500
 max_subscriptions_per_connection = 30
 base_delay_ms = 1000

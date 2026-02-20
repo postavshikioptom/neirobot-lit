@@ -14,7 +14,7 @@ fn create_test_config(ws_url: String) -> ExchangeConfig {
         name: "bybit".to_string(),
         websocket: WebSocketConfig {
             public_url: ws_url.clone(),
-            private_url: ws_url,
+            private_ws_url: ws_url,
             max_attempts: Some(3),
             warn_rtt_ms: 100,
         },
@@ -724,4 +724,138 @@ async fn test_private_auth_invalid_format() {
     
     token.cancel();
     server.shutdown();
+}
+
+
+#[test]
+fn test_generate_auth_message_prehash_format() {
+    use neirobot_lit::data::websocket::BybitPrivateWsClient;
+    use neirobot_lit::config::types::ExchangeConfig;
+    
+    // Устанавливаем переменные окружения для теста
+    std::env::set_var("BYBIT_API_KEY", "test_api_key_12345");
+    std::env::set_var("BYBIT_API_SECRET", "test_api_secret_67890");
+    
+    let config = ExchangeConfig::default();
+    let client = BybitPrivateWsClient::new(config);
+    
+    // Генерируем auth сообщение
+    let auth_msg = client.generate_auth_message().expect("Failed to generate auth message");
+    
+    // Парсим JSON из Message::Text
+    let msg_text = match auth_msg {
+        tokio_tungstenite::tungstenite::protocol::Message::Text(text) => text,
+        _ => panic!("Expected Text message"),
+    };
+    
+    let auth_json: serde_json::Value = serde_json::from_str(&msg_text)
+        .expect("Failed to parse auth message JSON");
+    
+    // Проверяем структуру
+    assert_eq!(auth_json["op"], "auth", "op должен быть 'auth'");
+    assert!(auth_json["args"].is_array(), "args должен быть массивом");
+    
+    let args = &auth_json["args"];
+    assert_eq!(args.len(), 3, "args должен содержать 3 элемента: [api_key, expires, signature]");
+    
+    // Проверяем API ключ
+    assert_eq!(args[0], "test_api_key_12345", "Первый элемент должен быть API ключом");
+    
+    // Проверяем expires (должен быть число)
+    let expires = args[1].as_u64().expect("expires должен быть числом");
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    
+    // expires должен быть в диапазоне [now, now + 15000] (с буфером 10 секунд)
+    assert!(expires >= now, "expires должен быть >= текущего времени");
+    assert!(expires <= now + 15000, "expires должен быть <= текущего времени + 15 секунд");
+    
+    // Проверяем signature (должна быть hex строка)
+    let signature = args[2].as_str().expect("signature должна быть строкой");
+    assert!(!signature.is_empty(), "signature не должна быть пустой");
+    
+    // Проверяем, что signature - это валидная hex строка (только 0-9, a-f)
+    assert!(
+        signature.chars().all(|c| c.is_ascii_hexdigit()),
+        "signature должна быть hex строкой, получено: {}",
+        signature
+    );
+    
+    // Проверяем длину signature (SHA256 = 32 байта = 64 hex символа)
+    assert_eq!(signature.len(), 64, "signature должна быть 64 символа (SHA256)");
+    
+    // Очищаем переменные окружения
+    std::env::remove_var("BYBIT_API_KEY");
+    std::env::remove_var("BYBIT_API_SECRET");
+}
+
+#[test]
+fn test_generate_auth_message_signature_consistency() {
+    use neirobot_lit::data::websocket::BybitPrivateWsClient;
+    use neirobot_lit::config::types::ExchangeConfig;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    
+    // Устанавливаем переменные окружения для теста
+    std::env::set_var("BYBIT_API_KEY", "test_api_key");
+    std::env::set_var("BYBIT_API_SECRET", "test_secret");
+    
+    let config = ExchangeConfig::default();
+    let client = BybitPrivateWsClient::new(config);
+    
+    // Генерируем auth сообщение
+    let auth_msg = client.generate_auth_message().expect("Failed to generate auth message");
+    
+    let msg_text = match auth_msg {
+        tokio_tungstenite::tungstenite::protocol::Message::Text(text) => text,
+        _ => panic!("Expected Text message"),
+    };
+    
+    let auth_json: serde_json::Value = serde_json::from_str(&msg_text)
+        .expect("Failed to parse auth message JSON");
+    
+    let args = &auth_json["args"];
+    let expires = args[1].as_u64().expect("expires должен быть числом");
+    let signature_from_client = args[2].as_str().expect("signature должна быть строкой");
+    
+    // Вычисляем ожидаемую подпись вручную
+    let prehash = format!("GET/realtime{}", expires);
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"test_secret")
+        .expect("HMAC can take key of any size");
+    mac.update(prehash.as_bytes());
+    let expected_signature = hex::encode(mac.finalize().into_bytes());
+    
+    // Проверяем, что подпись совпадает
+    assert_eq!(
+        signature_from_client, expected_signature,
+        "Подпись должна совпадать с ожидаемой"
+    );
+    
+    // Очищаем переменные окружения
+    std::env::remove_var("BYBIT_API_KEY");
+    std::env::remove_var("BYBIT_API_SECRET");
+}
+
+#[test]
+fn test_generate_auth_message_missing_credentials() {
+    use neirobot_lit::data::websocket::BybitPrivateWsClient;
+    use neirobot_lit::config::types::ExchangeConfig;
+    
+    // Убеждаемся, что переменные окружения не установлены
+    std::env::remove_var("BYBIT_API_KEY");
+    std::env::remove_var("BYBIT_API_SECRET");
+    
+    let config = ExchangeConfig::default();
+    let client = BybitPrivateWsClient::new(config);
+    
+    // Попытка генерировать auth сообщение должна вернуть ошибку
+    let result = client.generate_auth_message();
+    
+    assert!(result.is_err(), "Должна быть ошибка при отсутствии API ключей");
+    
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains("BYBIT_API_KEY") || error_msg.contains("not found"),
+        "Ошибка должна упоминать отсутствие API ключа, получено: {}",
+        error_msg
+    );
 }

@@ -31,6 +31,33 @@ from .labels import Labeler
 from .normalization import Normalizer
 from .utils import compute_metrics, FocalLoss, save_confusion_matrices, CalibrationMetrics, plot_reliability_diagram
 
+
+def _streaming_worker_init_fn(worker_id: int):
+    """
+    Worker initialization function for streaming mode DataLoader.
+    Each worker creates its own LazyFrame to avoid file descriptor conflicts.
+    
+    Args:
+        worker_id: ID of the current worker process
+    """
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is None:
+        return
+    
+    dataset = worker_info.dataset
+    
+    # Если это streaming режим, создаем новый LazyFrame для воркера
+    if hasattr(dataset, 'data_mode') and dataset.data_mode == "streaming":
+        if hasattr(dataset, 'file_path') and dataset.file_path is not None:
+            # Каждый воркер создает свой собственный LazyFrame
+            import polars as pl
+            dataset.lazy_df = pl.scan_parquet(dataset.file_path, low_memory=True)
+            # Переинициализируем row_offsets для нового LazyFrame
+            if hasattr(dataset, '_build_row_offsets'):
+                total_rows = dataset.lazy_df.select(pl.len()).collect(streaming=True).item()
+                dataset.row_offsets = dataset._build_row_offsets(dataset.file_path, total_rows)
+            print(f"[Worker {worker_id}] Initialized private LazyFrame for streaming mode")
+
 """
 Knowledge Distillation Support (Задача 151):
 
@@ -293,6 +320,10 @@ class LiTModule(pl.LightningModule):
         # Логируем текущий learning rate
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log("lr", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+        
+        # Получаем текущий momentum из optimizer
+        current_momentum = self.optimizers().param_groups[0].get('momentum', 0.0)
+        self.log("momentum", current_momentum, on_step=True, on_epoch=False, prog_bar=False, logger=True)
         
         return loss
 
@@ -729,6 +760,24 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     seq_len = trial.suggest_int("seq_len", 10, 100, step=10)
     print(f"\n[Optuna Trial] Testing seq_len={seq_len}")
     
+    # Предлагаем параметры scheduler через Optuna (Задача 093)
+    scheduler = trial.suggest_categorical("scheduler", ["onecycle", "plateau", "cosine", "step", "none"])
+    
+    # Параметры для OneCycleLR
+    div_factor = trial.suggest_float("div_factor", 10.0, 40.0, log=True)
+    final_div_factor = trial.suggest_float("final_div_factor", 1000.0, 10000.0, log=True)
+    pct_start = trial.suggest_float("pct_start", 0.1, 0.5)
+    
+    # Параметры для ReduceLROnPlateau
+    plateau_factor = trial.suggest_float("plateau_factor", 0.1, 0.9)
+    plateau_patience = trial.suggest_int("plateau_patience", 2, 10)
+    
+    # Параметры для StepLR
+    step_size = trial.suggest_int("step_size", 5, 30)
+    gamma = trial.suggest_float("gamma", 0.1, 0.9)
+    
+    print(f"[Optuna Trial] Scheduler: {scheduler}, div_factor={div_factor:.2f}, final_div_factor={final_div_factor:.0f}, pct_start={pct_start:.2f}")
+    
     # Пересоздаем датасеты с новой seq_len
     # ВАЖНО: Нужно пересоздать датасеты, так как seq_len влияет на размер окна
     try:
@@ -811,13 +860,16 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         
         # Создаем DataLoaders
         num_workers = 2 if args.data_mode == "streaming" else 4
+        worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+        
         trial_train_loader = DataLoader(
             trial_train_ds,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False
+            persistent_workers=True if num_workers > 0 else False,
+            worker_init_fn=worker_init_fn
         )
         trial_val_loader = DataLoader(
             trial_val_ds,
@@ -825,7 +877,8 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False
+            persistent_workers=True if num_workers > 0 else False,
+            worker_init_fn=worker_init_fn
         )
         
     except Exception as e:
@@ -871,14 +924,14 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         num_horizons=num_horizons,
         horizon_weights=horizon_weights,
         use_horizon_embedding=args.use_horizon_embedding,
-        scheduler=args.scheduler,
-        div_factor=args.div_factor,
-        final_div_factor=args.final_div_factor,
-        pct_start=args.pct_start,
-        plateau_factor=args.plateau_factor,
-        plateau_patience=args.plateau_patience,
-        step_size=args.step_size,
-        gamma=args.gamma,
+        scheduler=scheduler,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor,
+        pct_start=pct_start,
+        plateau_factor=plateau_factor,
+        plateau_patience=plateau_patience,
+        step_size=step_size,
+        gamma=gamma,
         weight_decay=args.weight_decay,
         clip_mode=args.clip_mode,
         clip_val=args.clip_val,
@@ -1344,6 +1397,7 @@ def train():
             df, 
             seq_len=args.seq_len, 
             n_past_returns=n_past_returns,
+            past_returns_lags=past_returns_lags,  # Задача 091
             data_mode="streaming",
             is_train=False,  # Будет переопределено для train_ds
             augment_prob=args.augment_prob,
@@ -1362,6 +1416,7 @@ def train():
             df,
             seq_len=args.seq_len,
             n_past_returns=n_past_returns,
+            past_returns_lags=past_returns_lags,  # Задача 091
             data_mode="memmap",
             cache_dir=cache_dir,
             is_train=False,  # Будет переопределено для train_ds
@@ -1381,6 +1436,7 @@ def train():
             df, 
             seq_len=args.seq_len, 
             n_past_returns=n_past_returns,
+            past_returns_lags=past_returns_lags,  # Задача 091
             data_mode="memory",
             is_train=False,  # Будет переопределено для train_ds
             augment_prob=args.augment_prob,
@@ -1576,13 +1632,17 @@ def train():
     # Для streaming режима используем меньше воркеров для thread safety
     num_workers = 2 if args.data_mode == "streaming" else 4
     
+    # Функция инициализации воркеров для streaming режима
+    worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+    
     train_loader = DataLoader(
         train_ds, 
         batch_size=args.batch_size, 
         shuffle=True,
         num_workers=num_workers, 
         pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        persistent_workers=True if num_workers > 0 else False,
+        worker_init_fn=worker_init_fn
     )
     val_loader = DataLoader(
         val_ds, 
@@ -1590,7 +1650,8 @@ def train():
         shuffle=False, 
         num_workers=num_workers, 
         pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        persistent_workers=True if num_workers > 0 else False,
+        worker_init_fn=worker_init_fn
     )
     test_loader = DataLoader(
         test_ds, 
@@ -1598,7 +1659,8 @@ def train():
         shuffle=False, 
         num_workers=num_workers, 
         pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        persistent_workers=True if num_workers > 0 else False,
+        worker_init_fn=worker_init_fn
     )
 
     # 8. Расчет весов классов на основе тренировочного набора
@@ -1963,6 +2025,7 @@ def train():
                 df,
                 seq_len=args.seq_len,
                 n_past_returns=n_past_returns,
+                past_returns_lags=past_returns_lags,  # Задача 091
                 data_mode="streaming",
                 is_train=False,
                 augment_prob=args.augment_prob,
@@ -1980,6 +2043,7 @@ def train():
                 df,
                 seq_len=args.seq_len,
                 n_past_returns=n_past_returns,
+                past_returns_lags=past_returns_lags,  # Задача 091
                 data_mode="memmap",
                 cache_dir=cache_dir,
                 is_train=False,
@@ -1998,6 +2062,7 @@ def train():
                 df,
                 seq_len=args.seq_len,
                 n_past_returns=n_past_returns,
+                past_returns_lags=past_returns_lags,  # Задача 091
                 data_mode="memory",
                 is_train=False,
                 augment_prob=args.augment_prob,
@@ -2019,13 +2084,16 @@ def train():
         train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
         
         # Пересоздаем DataLoaders
+        worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+        
         train_loader = DataLoader(
             train_ds,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False
+            persistent_workers=True if num_workers > 0 else False,
+            worker_init_fn=worker_init_fn
         )
         val_loader = DataLoader(
             val_ds,
@@ -2033,7 +2101,8 @@ def train():
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False
+            persistent_workers=True if num_workers > 0 else False,
+            worker_init_fn=worker_init_fn
         )
         
         print("Datasets recreated successfully\n")
@@ -2098,6 +2167,7 @@ def train():
             
             # Создаем DataLoaders для фолда
             num_workers = 2 if args.data_mode == "streaming" else 4
+            worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
             
             fold_train_loader = DataLoader(
                 fold_train_ds,
@@ -2105,7 +2175,8 @@ def train():
                 shuffle=True,
                 num_workers=num_workers,
                 pin_memory=True,
-                persistent_workers=True if num_workers > 0 else False
+                persistent_workers=True if num_workers > 0 else False,
+                worker_init_fn=worker_init_fn
             )
             
             fold_val_loader = DataLoader(
@@ -2608,7 +2679,7 @@ def train():
         
         # Сохранение матриц ошибок
         class_names = ["Flat", "Up", "Down"]
-        save_confusion_matrices(y_true, y_pred, class_names, base_path / "bots" / args.symbol / "models")
+        save_confusion_matrices(y_true, y_pred, class_names, base_path / "bots" / args.symbol / "model")
         
         # Отчет в консоль
         print("\nHoldout Classification Report:")

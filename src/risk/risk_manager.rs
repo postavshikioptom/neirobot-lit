@@ -119,6 +119,14 @@ impl RiskGate for NotionalLimitGate {
             if projected_notional > max_notional_dec {
                 return RiskResult::Reject(format!("MaxNotionalExceeded: {} > {}", projected_notional, max_notional_dec));
             }
+            
+            // 3. Max Margin Check (Задача 071)
+            if let Some(max_margin_dec) = config.max_margin_usd {
+                let projected_margin = projected_notional / config.leverage;
+                if projected_margin > max_margin_dec {
+                    return RiskResult::Reject(format!("MaxMarginExceeded: {} > {}", projected_margin, max_margin_dec));
+                }
+            }
         }
         
         RiskResult::Allow
@@ -1899,6 +1907,24 @@ impl RiskManager {
         
         let mark_dev = (mid_price - mark_price).abs() / mark_price;
         spread_bps < self.config.max_spread_bps_shock && mark_dev < self.config.max_mark_deviation
+    }
+
+    /// Задача 065: Проверка возможности открытия позиции
+    /// Проверяет, не заблокирован ли риск-менеджер и не превышает ли qty максимальный размер позиции
+    pub fn can_open_position(&self, qty: Decimal) -> bool {
+        // Проверка блокировки
+        if self.is_blocked {
+            return false;
+        }
+        
+        // Проверка максимального размера позиции
+        if let Some(max_size) = self.config.max_position_size {
+            if qty > max_size {
+                return false;
+            }
+        }
+        
+        true
     }
 }
 

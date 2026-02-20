@@ -259,8 +259,8 @@ impl BybitRestClient {
             api_secret,
             base_url: config.rest.base_url.clone(),
             recv_window: 5000,
-            orders_limiter: Arc::new(RateLimiter::new(config.rate_limits.rest_requests_per_second as u32)),
-            general_limiter: Arc::new(RateLimiter::new(((config.rate_limits.private_endpoint_per_minute / 60).max(1)) as u32)),
+            orders_limiter: Arc::new(RateLimiter::new(config.rate_limits.order_rate as u32)),
+            general_limiter: Arc::new(RateLimiter::new(config.rate_limits.private_rate as u32)),
             retry_initial_ms: config.rest_retry_initial_ms,
             retry_max_ms: config.rest_retry_max_ms,
             retry_multiplier: config.rest_retry_multiplier,
@@ -292,8 +292,8 @@ impl BybitRestClient {
             api_secret,
             base_url: config.rest.base_url.clone(),
             recv_window: 5000,
-            orders_limiter: Arc::new(RateLimiter::new(config.rate_limits.rest_requests_per_second as u32)),
-            general_limiter: Arc::new(RateLimiter::new(((config.rate_limits.private_endpoint_per_minute / 60).max(1)) as u32)),
+            orders_limiter: Arc::new(RateLimiter::new(config.rate_limits.order_rate as u32)),
+            general_limiter: Arc::new(RateLimiter::new(config.rate_limits.private_rate as u32)),
             retry_initial_ms: config.rest_retry_initial_ms,
             retry_max_ms: config.rest_retry_max_ms,
             retry_multiplier: config.rest_retry_multiplier,
@@ -303,6 +303,21 @@ impl BybitRestClient {
             rate_limit_threshold_pct,
             backoff_base_ms,
         })
+    }
+
+    /// Сортирует параметры запроса по алфавиту (требование Bybit V5)
+    fn sort_query_params(&self, params: &str) -> String {
+        if params.is_empty() {
+            return String::new();
+        }
+        
+        let mut pairs: Vec<&str> = params.split('&').collect();
+        pairs.sort_by(|a, b| {
+            let key_a = a.split('=').next().unwrap_or("");
+            let key_b = b.split('=').next().unwrap_or("");
+            key_a.cmp(key_b)
+        });
+        pairs.join("&")
     }
 
     /// Генерирует подпись для Bybit V5 API
@@ -493,6 +508,7 @@ impl BybitRestClient {
     pub async fn get_wallet_balance(&self) -> Result<WalletBalanceResponse> {
         let endpoint = "/v5/account/wallet-balance";
         let params = "accountType=UNIFIED";
+        let sorted_params = self.sort_query_params(params);
         
         self.wait_for_limiter(endpoint).await;
         
@@ -500,9 +516,9 @@ impl BybitRestClient {
             .duration_since(UNIX_EPOCH)?
             .as_millis() as u64;
         
-        let signature = self.generate_signature(timestamp, params);
+        let signature = self.generate_signature(timestamp, &sorted_params);
         
-        let url = format!("{}{}?{}", self.base_url, endpoint, params);
+        let url = format!("{}{}?{}", self.base_url, endpoint, sorted_params);
         let headers = self.build_headers(timestamp, &signature);
         let client = self.client.clone();
 
@@ -618,12 +634,13 @@ impl BybitRestClient {
             .duration_since(UNIX_EPOCH)?
             .as_millis() as u64;
         
-        let signature = self.generate_signature(timestamp, params);
+        let sorted_params = self.sort_query_params(params);
+        let signature = self.generate_signature(timestamp, &sorted_params);
         
-        let url = if params.is_empty() {
+        let url = if sorted_params.is_empty() {
             format!("{}{}", self.base_url, endpoint)
         } else {
-            format!("{}{}?{}", self.base_url, endpoint, params)
+            format!("{}{}?{}", self.base_url, endpoint, sorted_params)
         };
 
         let headers = self.build_headers(timestamp, &signature);
@@ -654,6 +671,7 @@ impl BybitRestClient {
     pub async fn get_position(&self, category: &str, symbol: &str, position_idx: i32) -> Result<Option<PositionInfo>> {
         let endpoint = "/v5/position/list";
         let params = format!("category={}&symbol={}", category, symbol);
+        let sorted_params = self.sort_query_params(&params);
         
         self.wait_for_limiter(endpoint).await;
         
@@ -661,9 +679,9 @@ impl BybitRestClient {
             .duration_since(UNIX_EPOCH)?
             .as_millis() as u64;
         
-        let signature = self.generate_signature(timestamp, &params);
+        let signature = self.generate_signature(timestamp, &sorted_params);
         
-        let url = format!("{}{}?{}", self.base_url, endpoint, params);
+        let url = format!("{}{}?{}", self.base_url, endpoint, sorted_params);
         let headers = self.build_headers(timestamp, &signature);
         let client = self.client.clone();
 
@@ -703,6 +721,7 @@ impl BybitRestClient {
     pub async fn get_open_orders(&self, category: &str, symbol: &str) -> Result<Vec<crate::trading::types::OrderInfo>> {
         let endpoint = "/v5/order/realtime";
         let params = format!("category={}&symbol={}", category, symbol);
+        let sorted_params = self.sort_query_params(&params);
         
         self.wait_for_limiter(endpoint).await;
         
@@ -710,9 +729,9 @@ impl BybitRestClient {
             .duration_since(UNIX_EPOCH)?
             .as_millis() as u64;
         
-        let signature = self.generate_signature(timestamp, &params);
+        let signature = self.generate_signature(timestamp, &sorted_params);
         
-        let url = format!("{}{}?{}", self.base_url, endpoint, params);
+        let url = format!("{}{}?{}", self.base_url, endpoint, sorted_params);
         let headers = self.build_headers(timestamp, &signature);
         let client = self.client.clone();
 

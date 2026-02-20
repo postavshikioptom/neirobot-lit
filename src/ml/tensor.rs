@@ -228,19 +228,51 @@ pub fn apply_normalization(tensor: &mut Array4<f32>, means: &[f32], inv_stds: &[
     apply_normalization_view(&mut tensor.view_mut(), means, inv_stds);
 }
 
+/// Тип для представления одного снимка данных стакана (Задача 097)
+/// Содержит 150 нормализованных признаков: 3 канала * 50 уровней
+pub type Snapshot = Vec<f32>;
 
+/// Структура для построения входного тензора фиксированной длины для ONNX-модели (Задача 097)
+/// 
+/// Реализует логику Left-Padding (заполнение нулями слева) и Truncation (отсечение старых данных)
+/// для обеспечения скользящего окна актуальных данных размером seq_len.
+/// 
+/// # Конкурентность (Задача 097)
+/// Если TensorBuilder доступен из нескольких потоков (например, чтение данных и инференс),
+/// рекомендуется обернуть его в Arc<RwLock<TensorBuilder>>:
+/// 
+/// ```rust
+/// let builder = TensorBuilder::from_metadata("metadata.json")?;
+/// let builder = Arc::new(RwLock::new(builder));
+/// 
+/// // В потоке 1: добавление данных
+/// let mut b = builder.write().unwrap();
+/// b.process_snapshot(&ob)?;
+/// 
+/// // В потоке 2: построение тензора
+/// let b = builder.read().unwrap();
+/// let tensor = b.build_tensor();
+/// ```
 pub struct TensorBuilder {
+    pub buffer: VecDeque<Snapshot>,         // История снимков (Задача 097)
+    pub seq_len: usize,                    // Размер скользящего окна (из metadata.json)
+    pub channels: usize,                   // Количество каналов (обычно 3: Price, Vol, Imbalance)
+    pub levels: usize,                     // Количество уровней стакана (обычно 50)
     normalizer: Normalizer,
-    history: VecDeque<Vec<f32>>, // История обработанных снимков (200 признаков каждый)
-    seq_len: usize,              // Размер скользящего окна
+    mid_price_history: VecDeque<Decimal>,  // Задача 091: История средних цен для расчета log-returns
+    past_returns_lags: Vec<usize>,         // Задача 091: Лаги для расчета Past Returns [10, 50, 100]
 }
 
 impl TensorBuilder {
     pub fn new(normalizer: Normalizer, seq_len: usize) -> Self {
         Self {
-            normalizer,
-            history: VecDeque::with_capacity(seq_len),
+            buffer: VecDeque::with_capacity(seq_len),
             seq_len,
+            channels: 3,  // По умолчанию 3 канала (Price, Vol, Imbalance)
+            levels: 50,   // По умолчанию 50 уровней
+            normalizer,
+            mid_price_history: VecDeque::with_capacity(seq_len),  // Задача 091
+            past_returns_lags: vec![10, 50, 100],  // Задача 091: Лаги по умолчанию
         }
     }
 
@@ -297,17 +329,125 @@ impl TensorBuilder {
             metadata.normalization.scaler_type
         );
 
-        Ok(Self::new(normalizer, seq_len))
+        // Задача 091: Загружаем лаги для Past Returns
+        let past_returns_lags = metadata.model_params.past_returns_lags
+            .unwrap_or_else(|| vec![10, 50, 100]);
+        
+        let mut builder = Self::new(normalizer, seq_len);
+        builder.past_returns_lags = past_returns_lags.clone();
+        
+        // Задача 097: Загружаем channels и levels из metadata
+        builder.channels = metadata.model_params.in_channels;
+        builder.levels = metadata.model_params.n_levels;
+        
+        tracing::info!(
+            "Loaded past_returns_lags: {:?}, channels: {}, levels: {}", 
+            past_returns_lags,
+            builder.channels,
+            builder.levels
+        );
+        
+        Ok(builder)
     }
 
     /// Добавляет новый снимок в историю с автоматическим truncation (скользящее окно)
-    /// При превышении seq_len удаляет самый старый снимок
-    fn add_snapshot(&mut self, snapshot: Vec<f32>) {
+    /// При превышении seq_len удаляет самый старый снимок (Задача 097)
+    fn add_snapshot(&mut self, snapshot: Snapshot) {
         // Truncation: если буфер полон, удаляем самый старый элемент
-        if self.history.len() >= self.seq_len {
-            self.history.pop_front();
+        if self.buffer.len() >= self.seq_len {
+            self.buffer.pop_front();
         }
-        self.history.push_back(snapshot);
+        self.buffer.push_back(snapshot);
+    }
+
+    /// Строит входной тензор фиксированной длины с Left-Padding (Задача 097)
+    /// 
+    /// Создает Array4<f32> формы (1, channels, levels, seq_len) с нулями слева
+    /// и свежими данными справа. Это обеспечивает, что самые актуальные данные
+    /// всегда находятся в правой части тензора (индексы ближе к seq_len - 1).
+    /// 
+    /// # Логика Left-Padding
+    /// - Если buffer содержит N снимков, где N < seq_len:
+    ///   - Первые (seq_len - N) временных шагов заполняются нулями
+    ///   - Последние N временных шагов содержат данные из buffer
+    /// - Если buffer содержит seq_len снимков:
+    ///   - Все временные шаги содержат данные (нет padding)
+    /// 
+    /// # Возвращаемое значение
+    /// Array4<f32> с формой (1, channels, levels, seq_len)
+    pub fn build_tensor(&self) -> Array4<f32> {
+        // Создаем пустой тензор (Batch=1, Channels, Levels, Time)
+        let mut tensor = Array4::<f32>::zeros((1, self.channels, self.levels, self.seq_len));
+        
+        // Рассчитываем смещение для вставки (если данных < seq_len)
+        // offset показывает, с какого временного шага начинать вставку данных
+        let offset = self.seq_len.saturating_sub(self.buffer.len());
+        
+        // Вставляем каждый снимок в тензор со смещением
+        for (i, snap) in self.buffer.iter().enumerate() {
+            // Проверяем размер снимка
+            if snap.len() != self.channels * self.levels {
+                tracing::warn!(
+                    "Snapshot size mismatch: expected {}, got {}",
+                    self.channels * self.levels,
+                    snap.len()
+                );
+                continue;
+            }
+            
+            // Преобразуем плоский вектор в Array2 (channels, levels)
+            // Структура snap: [channel_0_level_0, ..., channel_0_level_49, 
+            //                   channel_1_level_0, ..., channel_1_level_49,
+            //                   channel_2_level_0, ..., channel_2_level_49]
+            if let Ok(features) = Array2::from_shape_vec(
+                (self.channels, self.levels),
+                snap.clone()
+            ) {
+                // Вставляем в тензор со смещением offset
+                // tensor.slice_mut(s![0, .., .., i + offset]) выбирает временной шаг (i + offset)
+                tensor.slice_mut(s![0, .., .., i + offset])
+                    .assign(&features);
+            } else {
+                tracing::warn!(
+                    "Failed to reshape snapshot into ({}, {})",
+                    self.channels,
+                    self.levels
+                );
+            }
+        }
+        
+        tensor
+    }
+
+    /// Задача 091: Рассчитывает log-returns для заданного лага
+    /// Формула: ln(current_mid) - ln(old_mid)
+    /// Если буфер еще не заполнен до нужного лага, возвращает 0.0
+    fn calculate_log_returns(&self, lag: usize) -> f32 {
+        if self.mid_price_history.len() < lag + 1 {
+            // Буфер еще не заполнен, возвращаем 0.0 (нейтральный сигнал)
+            return 0.0;
+        }
+        
+        let current_idx = self.mid_price_history.len() - 1;
+        let old_idx = current_idx - lag;
+        
+        if let (Some(current_mid), Some(old_mid)) = (
+            self.mid_price_history.get(current_idx),
+            self.mid_price_history.get(old_idx),
+        ) {
+            if *old_mid > Decimal::ZERO {
+                // Конвертируем в f64 для расчета логарифма
+                let current_f64 = current_mid.to_f64().unwrap_or(0.0);
+                let old_f64 = old_mid.to_f64().unwrap_or(0.0);
+                
+                if current_f64 > 0.0 && old_f64 > 0.0 {
+                    let log_return = (current_f64.ln() - old_f64.ln()) as f32;
+                    return log_return;
+                }
+            }
+        }
+        
+        0.0
     }
 
     /// Добавляет новый снимок стакана в историю и возвращает полный тензор
@@ -321,6 +461,7 @@ impl TensorBuilder {
     /// 6. Возвращаем Some(Vec<f32>) только если окно заполнено полностью
     pub fn process_snapshot(&mut self, ob: &crate::data::orderbook::OrderBookSnapshot) -> Result<Option<Vec<f32>>> {
         let mid = ob.get_mid_price() as f32;
+        let mid_dec = ob.get_mid_price_dec();  // Задача 091: Получаем mid_price для расчета log-returns
         
         if mid <= 0.0 {
             return Ok(None); // Недостаточно данных в стакане
@@ -383,11 +524,141 @@ impl TensorBuilder {
 
         // 6. Обновляем скользящее окно
         self.add_snapshot(features);
+        
+        // Задача 091: Обновляем mid_price_history для расчета log-returns
+        if self.mid_price_history.len() >= self.past_returns_lags.iter().max().copied().unwrap_or(100) {
+            self.mid_price_history.pop_front();
+        }
+        self.mid_price_history.push_back(mid_dec);
 
         // 7. Возвращаем тензор только если окно заполнено
-        if self.history.len() == self.seq_len {
+        if self.buffer.len() == self.seq_len {
             // Плоский вектор: [snapshot_0 (150), snapshot_1 (150), ..., snapshot_N (150)]
-            let flattened: Vec<f32> = self.history.iter().flatten().cloned().collect();
+            let mut flattened: Vec<f32> = self.buffer.iter().flatten().cloned().collect();
+            
+            // Задача 091: Добавляем каналы Past Returns
+            if !self.past_returns_lags.is_empty() {
+                for lag in &self.past_returns_lags {
+                    let log_return = self.calculate_log_returns(*lag);
+                    // Broadcast на 50 уровней
+                    for _ in 0..50 {
+                        flattened.push(log_return);
+                    }
+                }
+            }
+            
+            Ok(Some(flattened))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Zero-copy версия process_snapshot (Задача 078.3)
+    /// Пишет нормализованные фичи напрямую в переданный буфер без промежуточных Vec
+    /// 
+    /// Требование: Без создания промежуточных Vec для ask_p, ask_v, bid_p, bid_v, features
+    /// Нормализация применяется на лету в цикле
+    pub fn process_snapshot_to_buffer(
+        &mut self,
+        ob: &crate::data::orderbook::OrderBookSnapshot,
+        buffer: &mut [f32],
+    ) -> Result<Option<Vec<f32>>> {
+        // Проверяем размер буфера
+        if buffer.len() != 150 {
+            anyhow::bail!("Buffer size must be 150, got {}", buffer.len());
+        }
+
+        let mid = ob.get_mid_price() as f32;
+        let mid_dec = ob.get_mid_price_dec();  // Задача 091
+        
+        if mid <= 0.0 {
+            return Ok(None); // Недостаточно данных в стакане
+        }
+
+        // Получаем raw данные (это единственный Vec, который нельзя избежать)
+        let raw = ob.get_flat_snapshot();
+        if raw.len() != 200 {
+            anyhow::bail!("Expected 200 raw features, got {}", raw.len());
+        }
+
+        // Zero-copy: Вычисляем 3 канала на лету и пишем напрямую в буфер
+        // Структура raw: [ask_p_0, ask_v_0, ask_p_1, ask_v_1, ..., ask_p_49, ask_v_49,
+        //                 bid_p_0, bid_v_0, bid_p_1, bid_v_1, ..., bid_p_49, bid_v_49]
+        
+        for i in 0..50 {
+            // Извлекаем компоненты напрямую из raw без промежуточных Vec
+            let ask_p = raw[i * 2];
+            let ask_v = raw[i * 2 + 1];
+            let bid_p = raw[100 + i * 2];
+            let bid_v = raw[100 + i * 2 + 1];
+
+            // Канал 0: Normalized Price
+            let price_ch = (ask_p + bid_p) / 2.0;
+            
+            // Канал 1: Log Volume
+            let vol_ch = ask_v + bid_v;
+            
+            // Канал 2: Static Level Imbalance
+            let imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7);
+
+            // Применяем нормализацию на лету в зависимости от типа скейлера
+            match self.normalizer.scaler_type {
+                crate::ml::normalization::ScalerType::ZScore => {
+                    buffer[i] = (price_ch - self.normalizer.means[i]) * self.normalizer.inv_stds[i];
+                    buffer[50 + i] = (vol_ch - self.normalizer.means[50 + i]) * self.normalizer.inv_stds[50 + i];
+                    buffer[100 + i] = (imb_ch - self.normalizer.means[100 + i]) * self.normalizer.inv_stds[100 + i];
+                }
+                crate::ml::normalization::ScalerType::Robust => {
+                    buffer[i] = (price_ch - self.normalizer.medians[i]) * self.normalizer.inv_iqrs[i];
+                    buffer[50 + i] = (vol_ch - self.normalizer.medians[50 + i]) * self.normalizer.inv_iqrs[50 + i];
+                    buffer[100 + i] = (imb_ch - self.normalizer.medians[100 + i]) * self.normalizer.inv_iqrs[100 + i];
+                }
+                crate::ml::normalization::ScalerType::WinsorRobust => {
+                    // 1. Клиппинг (винзоризация)
+                    let price_clipped = price_ch.clamp(self.normalizer.winsor_low[i], self.normalizer.winsor_high[i]);
+                    let vol_clipped = vol_ch.clamp(self.normalizer.winsor_low[50 + i], self.normalizer.winsor_high[50 + i]);
+                    let imb_clipped = imb_ch.clamp(self.normalizer.winsor_low[100 + i], self.normalizer.winsor_high[100 + i]);
+                    
+                    // 2. Robust масштабирование
+                    buffer[i] = (price_clipped - self.normalizer.medians[i]) * self.normalizer.inv_iqrs[i];
+                    buffer[50 + i] = (vol_clipped - self.normalizer.medians[50 + i]) * self.normalizer.inv_iqrs[50 + i];
+                    buffer[100 + i] = (imb_clipped - self.normalizer.medians[100 + i]) * self.normalizer.inv_iqrs[100 + i];
+                }
+            }
+        }
+
+        // Валидация (NaN/Inf check) ПОСЛЕ нормализации
+        for val in buffer.iter() {
+            if !val.is_finite() {
+                anyhow::bail!("Invalid feature value detected (NaN or Inf) after normalization");
+            }
+        }
+
+        // Добавляем в историю (копируем 150 f32 = 600 байт, это приемлемо)
+        let snapshot: Vec<f32> = buffer.to_vec();
+        self.add_snapshot(snapshot);
+        
+        // Задача 091: Обновляем mid_price_history для расчета log-returns
+        if self.mid_price_history.len() >= self.past_returns_lags.iter().max().copied().unwrap_or(100) {
+            self.mid_price_history.pop_front();
+        }
+        self.mid_price_history.push_back(mid_dec);
+
+        // Возвращаем тензор только если окно заполнено
+        if self.buffer.len() == self.seq_len {
+            let mut flattened: Vec<f32> = self.buffer.iter().flatten().cloned().collect();
+            
+            // Задача 091: Добавляем каналы Past Returns
+            if !self.past_returns_lags.is_empty() {
+                for lag in &self.past_returns_lags {
+                    let log_return = self.calculate_log_returns(*lag);
+                    // Broadcast на 50 уровней
+                    for _ in 0..50 {
+                        flattened.push(log_return);
+                    }
+                }
+            }
+            
             Ok(Some(flattened))
         } else {
             Ok(None)
@@ -964,5 +1235,82 @@ mod time_slice_simd_tests {
         println!("Time Slice SIMD: {:?}, Scalar: {:?}, Speedup: {:.2}x", 
                  simd_duration, scalar_duration, 
                  scalar_duration.as_nanos() as f64 / simd_duration.as_nanos() as f64);
+    }
+
+    /// Test: Проверяем build_tensor() с Left-Padding (Задача 097)
+    #[test]
+    fn test_build_tensor_with_left_padding() {
+        let mean = vec![0.0; 150];
+        let std = vec![1.0; 150];
+        let normalizer = Normalizer::new(mean, std);
+        
+        let seq_len = 10;
+        let mut builder = TensorBuilder::new(normalizer, seq_len);
+        builder.channels = 3;
+        builder.levels = 50;
+        
+        // Добавляем только 1 снимок (вместо 10)
+        let snapshot = vec![1.0; 150]; // 3 канала * 50 уровней
+        builder.buffer.push_back(snapshot);
+        
+        // Строим тензор
+        let tensor = builder.build_tensor();
+        
+        // Проверяем форму
+        assert_eq!(tensor.shape(), &[1, 3, 50, 10]);
+        
+        // Проверяем Left-Padding: первые 9 временных шагов должны быть нулями
+        for t in 0..9 {
+            for c in 0..3 {
+                for l in 0..50 {
+                    assert_eq!(tensor[[0, c, l, t]], 0.0, 
+                        "Expected zero at time step {}, channel {}, level {}", t, c, l);
+                }
+            }
+        }
+        
+        // Проверяем, что последний временной шаг содержит данные (1.0)
+        for c in 0..3 {
+            for l in 0..50 {
+                assert_eq!(tensor[[0, c, l, 9]], 1.0, 
+                    "Expected 1.0 at time step 9, channel {}, level {}", c, l);
+            }
+        }
+    }
+
+    /// Test: Проверяем build_tensor() без padding (буфер полный)
+    #[test]
+    fn test_build_tensor_without_padding() {
+        let mean = vec![0.0; 150];
+        let std = vec![1.0; 150];
+        let normalizer = Normalizer::new(mean, std);
+        
+        let seq_len = 3;
+        let mut builder = TensorBuilder::new(normalizer, seq_len);
+        builder.channels = 3;
+        builder.levels = 50;
+        
+        // Добавляем 3 снимка (полный буфер)
+        for i in 0..3 {
+            let snapshot = vec![(i as f32) + 1.0; 150];
+            builder.buffer.push_back(snapshot);
+        }
+        
+        // Строим тензор
+        let tensor = builder.build_tensor();
+        
+        // Проверяем форму
+        assert_eq!(tensor.shape(), &[1, 3, 50, 3]);
+        
+        // Проверяем, что все временные шаги содержат данные (без padding)
+        for t in 0..3 {
+            for c in 0..3 {
+                for l in 0..50 {
+                    let expected = (t as f32) + 1.0;
+                    assert_eq!(tensor[[0, c, l, t]], expected, 
+                        "Expected {} at time step {}, channel {}, level {}", expected, t, c, l);
+                }
+            }
+        }
     }
 }

@@ -38,7 +38,7 @@ diffy = "0.4.2"
 hex = "0.4.3"
 rust_decimal = { version = "1.40.0", features = ["serde-float"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
-ort = { version = "2.0.0-rc.11", features = ["ndarray", "load-dynamic", "cuda", "tensorrt"] }
+ort = { version = "2.0.0-rc.6", features = ["ndarray", "cuda", "tensorrt"] }
 polars = { version = "0.53.0", features = ["parquet", "lazy", "new_streaming", "regex", "temporal", "dtype-datetime", "dtype-date", "dtype-duration"] }
 ndarray = "0.17.2"
 ordered-float = "5.1.0"

@@ -15,6 +15,7 @@ use crate::config::types::{BotConfig, ExchangeConfig, RiskConfig};
 use crate::risk::risk_manager::RiskManager;
 use crate::utils::timestamp_ms;
 use crate::utils::logger::MarketImpactLog;
+use crate::utils::rate_limiter::RateLimiter;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use tokio::sync::mpsc;
@@ -26,6 +27,7 @@ pub struct OrderManager {
     nonce: AtomicU64, // Задача 176: Атомарный счетчик для уникальности order_link_id
     market_impact_tx: Option<mpsc::Sender<MarketImpactLog>>, // Задача 204: Sender для логирования влияния на цену
     is_price_shock: bool, // Задача 233: Флаг режима шока при ошибке Price Band
+    rate_limiter: RateLimiter, // Задача 063: Rate limiter для REST API запросов
 }
 
 impl OrderManager {
@@ -37,6 +39,7 @@ impl OrderManager {
             nonce: AtomicU64::new(0),
             market_impact_tx: None,
             is_price_shock: false,
+            rate_limiter: RateLimiter::new(10), // Задача 063: 10 запросов в секунду
         }
     }
 
@@ -525,6 +528,9 @@ impl OrderManager {
             order_id: None,
         };
 
+        // Rate limiting перед REST API запросом (Задача 063)
+        self.rate_limiter.wait().await;
+        
         // Отправка запроса
         let result: Result<serde_json::Value> = rest_client.post("/v5/order/cancel", &request).await;
 
@@ -725,18 +731,18 @@ impl OrderManager {
 
         info!("Sending cancel-all orders for {}", bot_config.symbol);
         
+        // Rate limiting перед REST API запросом (Задача 063)
+        self.rate_limiter.wait().await;
+        
         // Отправка запроса на массовую отмену
         let result: Result<serde_json::Value> = rest_client.post("/v5/order/cancel-all", &request).await;
 
         match result {
             Ok(_) => {
                 risk_manager.report_success();
-                // Очистка локального реестра активных ордеров
-                let ids: Vec<String> = self.active_orders.keys().cloned().collect();
-                let count = ids.len();
-                for id in ids {
-                    self.update_order(&id, None, OrderState::Cancelled, None);
-                }
+                // Очистка локального реестра активных ордеров (Задача 063)
+                let count = self.active_orders.len();
+                self.active_orders.clear();
                 info!("Successfully cancelled all {} active orders for {}", count, bot_config.symbol);
                 Ok(())
             }

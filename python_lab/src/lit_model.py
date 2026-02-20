@@ -173,7 +173,8 @@ class LiTModel(nn.Module):
             seq_len=seq_len, 
             n_levels=N_LEVELS, 
             in_channels=in_channels, 
-            d_model=d_model
+            d_model=d_model,
+            activation=activation
         )
         
         # 1.5. Positional Encoding (Задача 055)
@@ -370,6 +371,7 @@ class LiTModel(nn.Module):
         else:
             # Стандартный подход: отдельные головы (через один Linear)
             bottleneck_out = self.bottleneck_act(self.class_bottleneck(pooled))  # (batch, d_model)
+            bottleneck_out = self.bottleneck_act(bottleneck_out)  # Активация перед classifier
             logits_flat = self.classifier(bottleneck_out)  # (batch, 3 * num_horizons)
             
             if self.num_horizons > 1:

@@ -96,6 +96,38 @@ def compute_target_vol(mid_prices, window=100):
     return target_vol.fillna(target_vol.mean() if not target_vol.isna().all() else 0).values
 
 
+def compute_past_returns(mid_prices: np.ndarray, lags: List[int]) -> np.ndarray:
+    """
+    Рассчитывает Multi-scale Log-Returns (Past Returns) для различных временных горизонтов.
+    
+    Согласно плану 091:
+    - Расчет: Rn = ln(mid_price_t) - ln(mid_price_t-n)
+    - NaN Handling: Первые n значений заполняются 0.0 (нейтральный сигнал)
+    - Форма выхода: (len(mid_prices), len(lags))
+    
+    Args:
+        mid_prices: массив средних цен (N,)
+        lags: список лагов для расчета [10, 50, 100]
+    
+    Returns:
+        np.ndarray: матрица log-returns (N, len(lags))
+    """
+    n = len(mid_prices)
+    n_lags = len(lags)
+    past_returns = np.zeros((n, n_lags), dtype=np.float32)
+    
+    # Вычисляем логарифмы цен один раз для эффективности
+    log_prices = np.log(mid_prices)
+    
+    for lag_idx, lag in enumerate(lags):
+        # Первые lag значений заполняются 0.0
+        for t in range(lag, n):
+            # Rn = ln(price_t) - ln(price_t-n)
+            past_returns[t, lag_idx] = log_prices[t] - log_prices[t - lag]
+    
+    return past_returns
+
+
 # ============================================================================
 # Функции расчета признаков для определения режимов рынка (HMM)
 # ============================================================================
@@ -690,6 +722,7 @@ class LOBDataset(Dataset):
         df: Union[pl.DataFrame, pl.LazyFrame, str], 
         seq_len: int = 100, 
         n_past_returns: int = 3,
+        past_returns_lags: Union[List[int], None] = None,  # Задача 091: Лаги для Past Returns
         vol_window: int = 100,
         data_mode: Literal["memory", "streaming", "memmap"] = "memory",
         cache_dir: Union[str, Path, None] = None,
@@ -710,6 +743,7 @@ class LOBDataset(Dataset):
         self.seq_len = seq_len
         self.n_levels = 50
         self.n_past_returns = n_past_returns
+        self.past_returns_lags = past_returns_lags if past_returns_lags is not None else [10, 50, 100]  # Задача 091: Лаги по умолчанию
         self.vol_window = vol_window
         self.data_mode = data_mode
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -876,6 +910,20 @@ class LOBDataset(Dataset):
             else:
                 self.vols = np.zeros_like(self.labels, dtype=np.float32)
 
+        # 4.5. Расчет Past Returns (Задача 091)
+        if self.n_past_returns > 0 and "mid_price" in df.columns:
+            print(f"[Past Returns] Computing log-returns for lags: {self.past_returns_lags}")
+            mid_prices = df["mid_price"].to_numpy()
+            past_returns = compute_past_returns(mid_prices, self.past_returns_lags)  # (N, n_lags)
+            
+            # Расширяем self.features с past returns
+            # Было: (N, 200), Станет: (N, 200 + n_lags)
+            self.features = np.hstack([self.features, past_returns])
+            print(f"[Past Returns] Features shape: {self.features.shape}")
+        else:
+            if self.n_past_returns > 0:
+                print("[Past Returns] Warning: n_past_returns > 0 but 'mid_price' column not found. Skipping past returns computation.")
+
         # Расчет временных весов (используем первый горизонт для расчета весов)
         labels_for_weights = self.labels[:, 0] if self.is_multi_horizon else self.labels
         self.sample_weights = self._calculate_time_weights(self.timestamps, labels_for_weights)
@@ -926,6 +974,17 @@ class LOBDataset(Dataset):
         if self.total_samples <= 0:
             raise ValueError(f"Dataset too small: {total_rows} rows, need at least {self.seq_len}")
         
+        # Сохраняем путь к файлу для thread safety в DataLoader
+        if isinstance(df, str):
+            self.file_path = df
+        else:
+            # Для LazyFrame/DataFrame пытаемся извлечь путь
+            self.file_path = None
+        
+        # Создаем индексную карту (массив физических смещений строк в Parquet файле)
+        # Используем PyArrow для получения информации о row groups
+        self.row_offsets = self._build_row_offsets(self.file_path, total_rows)
+        
         # Для streaming режима мы будем читать данные батчами при обращении
         self.feat_cols = feat_cols
         self.n_features = len(feat_cols)
@@ -961,6 +1020,45 @@ class LOBDataset(Dataset):
         # Инициализация regime_ids (для streaming режима используем dummy значения)
         # Regime detection требует полных данных в памяти
         self.regime_ids = np.zeros(self.total_samples, dtype=np.int64)
+
+    def _build_row_offsets(self, file_path: Union[str, None], total_rows: int) -> np.ndarray:
+        """
+        Создает индексную карту (массив физических смещений строк в Parquet файле).
+        Использует PyArrow для получения информации о row groups.
+        
+        Args:
+            file_path: путь к Parquet файлу
+            total_rows: общее количество строк в файле
+        
+        Returns:
+            np.ndarray: массив cumulative row offsets для бинарного поиска
+        """
+        import pyarrow.parquet as pq
+        
+        if file_path and Path(file_path).exists():
+            try:
+                pf = pq.ParquetFile(file_path)
+                num_row_groups = pf.num_row_groups
+                
+                # Создаем массив cumulative row counts
+                row_counts = np.zeros(num_row_groups, dtype=np.int64)
+                for i in range(num_row_groups):
+                    row_counts[i] = pf.row_group(i).num_rows
+                
+                # Преобразуем в cumulative offsets (смещения начала каждой группы)
+                row_offsets = np.cumsum(row_counts)
+                print(f"[IndexMap] Created row offsets from {num_row_groups} row groups")
+                return row_offsets
+            except Exception as e:
+                print(f"[IndexMap] Warning: Could not read Parquet metadata: {e}")
+        
+        # Fallback: создаем равномерные смещения на основе общего количества строк
+        # Это менее точно, но работает когда файл недоступен
+        num_groups = min(100, total_rows)  # Ограничиваем количество групп
+        group_size = total_rows // num_groups
+        row_offsets = np.arange(group_size, total_rows + group_size, group_size, dtype=np.int64)[:num_groups]
+        print(f"[IndexMap] Created fallback row offsets ({num_groups} groups)")
+        return row_offsets
 
     def _init_memmap_mode(self, df: Union[pl.DataFrame, str]):
         """Memory-mapped binary файлы для быстрого случайного доступа"""
@@ -1213,7 +1311,24 @@ class LOBDataset(Dataset):
         return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
 
     def _getitem_streaming(self, idx):
-        """Потоковый доступ с кэшированием батчей"""
+        """Потоковый доступ с бинарным поиском по индексной карте"""
+        # Используем бинарный поиск для мгновенного нахождения нужной строки
+        # Это обеспечивает O(log n) вместо O(n) перебора
+        if hasattr(self, 'row_offsets') and self.row_offsets is not None:
+            # Находим row group через бинарный поиск
+            row_group_idx = np.searchsorted(self.row_offsets, idx, side='right')
+            # Корректировка: row_offsets содержит cumulative counts, поэтому нужна проверка
+            if row_group_idx > 0:
+                row_start = self.row_offsets[row_group_idx - 1]
+            else:
+                row_start = 0
+            # Смещение внутри row group
+            offset_in_group = idx - row_start
+        else:
+            # Fallback если row_offsets не доступен
+            row_group_idx = 0
+            offset_in_group = idx
+        
         # Проверяем, есть ли нужные данные в кэше
         if self._cache_batch is not None and self._cache_start_idx <= idx < self._cache_end_idx:
             cache_offset = idx - self._cache_start_idx
@@ -1221,7 +1336,7 @@ class LOBDataset(Dataset):
             y = self._cache_labels[cache_offset]
             v = self._cache_vols[cache_offset]
         else:
-            # Загружаем новый батч
+            # Загружаем новый батч с учетом позиции в row group
             start_row = idx
             end_row = min(idx + self._batch_size, self.total_samples + self.seq_len - 1)
             

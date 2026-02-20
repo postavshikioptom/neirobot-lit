@@ -109,15 +109,33 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
         .with_optimization_level(GraphOptimizationLevel::All)?
         .with_log_level(LoggingLevel::Warning)?;
 
-    // Настройка пулов потоков и режима исполнения (Задача №196)
-    builder = builder
-        .with_intra_threads(config.intra_threads as usize)?
-        .with_inter_threads(config.inter_threads as usize)?
+    // Настройка пулов потоков и режима исполнения (Задача №100)
+    let mut builder = builder
         .with_execution_mode(config.execution_mode.into())?;
     
+    // Расчёт intra_threads: физические ядра / количество_активных_ботов (минимум 1)
+    let intra = config.intra_threads.unwrap_or_else(|| {
+        let cp_total = num_cpus::get_physical();
+        // Получаем количество активных ботов из переменной окружения или используем консервативный дефолт (2)
+        let active_bots = std::env::var("NUM_ACTIVE_BOTS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(2); // Консервативный дефолт: 2 бота
+        (cp_total / active_bots).max(1)
+    });
+    builder = builder.with_intra_op_num_threads(intra as i32)?;
+    
+    // Расчёт inter_threads: 1 для небольших LOB моделей (избегаем переключений контекста)
+    let inter = config.inter_threads.unwrap_or(1);
+    builder = builder.with_inter_op_num_threads(inter as i32)?;
+    
     info!(
-        "[ML] ONNX Runtime configured: intra={}, inter={}, mode={:?}",
-        config.intra_threads, config.inter_threads, config.execution_mode
+        "[ML] ONNX Runtime configured: intra={}, inter={}, mode={:?}, active_bots={}",
+        intra, inter, config.execution_mode,
+        std::env::var("NUM_ACTIVE_BOTS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(2)
     );
 
     match config.execution_provider.as_str() {
@@ -140,6 +158,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
                 Err(e) => {
                     warn!("Failed to initialize CUDA: {}. Falling back to CPU.", e);
                     builder = builder.with_execution_providers([ep::CPU::default().build()])?;
+                    info!("Using CPU execution provider (CUDA fallback)");
                 }
             }
         }
@@ -193,6 +212,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
                 Err(e) => {
                     warn!("Failed to initialize TensorRT: {}. Falling back to CPU.", e);
                     builder = builder.with_execution_providers([ep::CPU::default().build()])?;
+                    info!("Using CPU execution provider (TensorRT fallback)");
                 }
             }
         }
@@ -434,7 +454,7 @@ impl OnnxEngine {
                     bail!("Model batch_size must be 1 for optimal performance, got {}", fixed);
                 }
             } else {
-                warn!("Dynamic batch size detected, performance might be sub-optimal. TensorRT requires fixed batch_size=1.");
+                bail!("Dynamic batch size detected. TensorRT requires fixed batch_size=1 for optimal performance. Please re-export the model with fixed batch dimension.");
             }
         }
 
@@ -698,12 +718,23 @@ impl OnnxEngine {
         let start_build = Instant::now();
 
         // 1. Валидация размера входных данных (должен соответствовать batch=1)
+        // Задача 098: Явная проверка batch size
         let expected_size = self.seq_len * self.input_features;
         if input_data.len() != expected_size {
-            bail!(
-                "Input data size mismatch: expected {} (batch=1, seq_len={}, features={}), got {}",
-                expected_size, self.seq_len, self.input_features, input_data.len()
-            );
+            // Проверяем, не пытается ли пользователь подать batch > 1
+            if input_data.len() % expected_size == 0 {
+                let batch_size = input_data.len() / expected_size;
+                bail!(
+                    "Input data size suggests batch > 1: expected {} elements (batch=1, seq_len={}, features={}), got {} elements (batch={}). \
+                    Dynamic batching is disabled for TensorRT optimization. Only batch_size=1 is supported.",
+                    expected_size, self.seq_len, self.input_features, input_data.len(), batch_size
+                );
+            } else {
+                bail!(
+                    "Input data size mismatch: expected {} (batch=1, seq_len={}, features={}), got {}",
+                    expected_size, self.seq_len, self.input_features, input_data.len()
+                );
+            }
         }
         
         // 2. Валидация regime_id если модель использует regime embedding

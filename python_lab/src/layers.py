@@ -1,12 +1,34 @@
 import torch
 import torch.nn as nn
 
+def get_activation(activation_type: str):
+    """
+    Возвращает функцию активации по имени.
+    Поддерживаемые типы:
+    - 'relu': Стандартная ReLU
+    - 'gelu_exact': GELU с точным вычислением через erf
+    - 'gelu_tanh': GELU с аппроксимацией через tanh (быстрее)
+    - 'silu': SiLU (Swish) активация
+    """
+    activation_map = {
+        'relu': nn.ReLU(),
+        'gelu_exact': nn.GELU(approximate='none'),
+        'gelu_tanh': nn.GELU(approximate='tanh'),
+        'silu': nn.SiLU()
+    }
+    
+    if activation_type not in activation_map:
+        raise ValueError(f"Unsupported activation type: {activation_type}. "
+                        f"Supported: {list(activation_map.keys())}")
+    
+    return activation_map[activation_type]
+
 class LOBPatching(nn.Module):
     """
     Продвинутый слой патчинга для стакана (LOB).
     Группирует уровни стакана и добавляет уровневое и временное позиционное кодирование.
     """
-    def __init__(self, seq_len=100, n_levels=50, in_channels=3, d_model=64):
+    def __init__(self, seq_len=100, n_levels=50, in_channels=3, d_model=64, activation='gelu_exact'):
         super().__init__()
         self.d_model = d_model
         self.in_channels = in_channels
@@ -23,6 +45,7 @@ class LOBPatching(nn.Module):
         # Вход: (Batch*Seq, 1, num_features) -> Выход: (Batch*Seq, d_model, num_patches)
         # kernel_size=in_channels, stride=in_channels объединяет все каналы одного уровня в один токен
         self.patch_conv = nn.Conv1d(1, d_model, kernel_size=in_channels, stride=in_channels)
+        self.act = get_activation(activation)  # Активация после patch_conv
         
         # 2. Level Positional Embedding (динамический размер по плану 026)
         # После Conv1d(kernel=in_channels, stride=in_channels) получаем num_patches токенов
@@ -53,6 +76,7 @@ class LOBPatching(nn.Module):
         # Reshape в (B*S, 1, num_features) для применения Conv1d с kernel=2, stride=2
         x_flat = x_flat_seq.view(b * s, 1, self.num_features)  # (B*S, 1, num_features)
         x_patched = self.patch_conv(x_flat)  # (B*S, d_model, num_patches)
+        x_patched = self.act(x_patched)  # Применяем активацию
         x_patched = x_patched.permute(0, 2, 1)  # (B*S, num_patches, d_model)
         
         # Reshape обратно в батч: (B, S, num_patches, d_model)

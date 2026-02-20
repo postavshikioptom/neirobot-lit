@@ -43,6 +43,7 @@ class OrderData:
     amount: float
     order_type: str  # 'limit', 'market'
     post_only: bool = False
+    created_at_ms: int = 0  # Время создания ордера (для проверки таймаутов)
 
 @dataclass
 class FillData:
@@ -188,6 +189,9 @@ class SymbolState:
     # Задача 215: Метрики ошибок
     lost_trades_count: int = 0  # Количество пропущенных сигналов из-за ошибок
     
+    # Задача 058: Метрики Limit-then-Market
+    timeout_orders: int = 0  # Счётчик ордеров, конвертированных в Market по таймауту
+    
     def __post_init__(self):
         """Инициализация состояния после создания"""
         self.balance = self.config.initial_balance
@@ -310,6 +314,9 @@ class EventEngine:
         state = self.get_state(symbol)
         state.last_market_data = data
         
+        # Задача 058: Проверка таймаутов лимитных ордеров (Limit-then-Market)
+        self._check_limit_timeouts(symbol)
+        
         # 1. Матчинг существующих лимитных ордеров
         if self.execution_mode == "ideal":
             # Идеальное исполнение: если mid_price коснулся или пересек цену
@@ -403,6 +410,66 @@ class EventEngine:
         )
         self.push_event(fill_event)
 
+    def _check_limit_timeouts(self, symbol: str = ""):
+        """
+        Задача 058: Проверка таймаутов лимитных ордеров.
+        Если лимитный ордер не исполнен за отведённое время, конвертируем его в маркет.
+        """
+        state = self.get_state(symbol)
+        
+        # Проверяем каждый лимитный ордер на таймаут
+        orders_to_convert = []
+        for oid, order in list(state.orders.items()):
+            if order.order_type == "limit":
+                # Проверяем, превышен ли таймаут
+                time_elapsed = self.current_time - order.created_at_ms
+                if time_elapsed >= state.config.limit_timeout_ms:
+                    orders_to_convert.append((oid, order))
+        
+        # Конвертируем таймаутные ордера в маркет
+        for oid, order in orders_to_convert:
+            self._convert_to_market(oid, order, symbol)
+
+    def _convert_to_market(self, oid: str, order: OrderData, symbol: str = ""):
+        """
+        Задача 058: Конвертация лимитного ордера в маркет при таймауте.
+        Отменяем лимит и создаём маркет ордер.
+        """
+        state = self.get_state(symbol)
+        
+        # Удаляем лимитный ордер
+        if oid in state.orders:
+            del state.orders[oid]
+        
+        # Увеличиваем счётчик таймаутных ордеров
+        state.timeout_orders += 1
+        
+        # Создаём маркет ордер с тем же ID (или новым)
+        market_order_id = f"{oid}_market"
+        
+        # Сохраняем мид для расчета проскальзывания маркет ордера
+        if oid in state.signal_mids:
+            state.signal_mids[market_order_id] = state.signal_mids[oid]
+            del state.signal_mids[oid]
+        elif state.last_market_data:
+            state.signal_mids[market_order_id] = state.last_market_data.mid_price
+        
+        # Генерируем ORDER событие для маркет ордера
+        market_event = Event(
+            timestamp=self.current_time,
+            type=EventType.ORDER,
+            data=OrderData(
+                order_id=market_order_id,
+                side=order.side,
+                price=0.0,  # Маркет ордер не имеет цены
+                amount=order.amount,
+                order_type="market",
+                created_at_ms=self.current_time
+            ),
+            symbol=symbol
+        )
+        self.push_event(market_event)
+
     def _on_signal(self, data: SignalData, symbol: str = ""):
         """Обработка сигнала с поддержкой мульти-инструментальности"""
         state = self.get_state(symbol)
@@ -472,7 +539,8 @@ class EventEngine:
                         side=data.side,
                         price=price,
                         amount=current_slice,
-                        order_type=order_type
+                        order_type=order_type,
+                        created_at_ms=slice_ts  # Задача 058: Сохраняем время создания для проверки таймаутов
                     ),
                     symbol=symbol
                 )
@@ -610,7 +678,11 @@ class EventEngine:
             maker_fills = len([t for t in state.trades if t.fill_type == "maker"])
             maker_rate = maker_fills / fills_count if fills_count > 0 else 0
 
-            total_fees = sum(t.fee_usd for t in state.trades)
+            # Задача 059: Разбивка комиссий по типам (Maker/Taker)
+            maker_fees = sum(t.fee_usd for t in state.trades if t.fill_type == "maker")
+            taker_fees = sum(t.fee_usd for t in state.trades if t.fill_type == "taker")
+            total_fees = maker_fees + taker_fees
+            
             avg_slippage = np.mean(state.slippages) if state.slippages else 0.0
             unexecuted_rate = state.total_orders_cancelled / state.total_orders_placed if state.total_orders_placed > 0 else 0.0
 
@@ -618,11 +690,18 @@ class EventEngine:
                 "total_trades": fills_count,
                 "maker_rate": maker_rate,
                 "total_fees_usd": total_fees,
+                # Задача 059: Метрики комиссий по типам
+                "maker_fees_usd": maker_fees,
+                "taker_fees_usd": taker_fees,
                 "final_balance": state.balance,
                 "net_pnl": state.balance - state.config.initial_balance,
+                # Задача 059: Gross PnL (разница цен без учета комиссий)
+                "gross_pnl": state.gross_pnl,
                 "avg_slippage_bps": avg_slippage,
                 "unexecuted_rate": unexecuted_rate,
-                "total_orders": state.total_orders_placed
+                "total_orders": state.total_orders_placed,
+                # Задача 058: Метрика Market Fallback Rate
+                "market_fallback_rate": state.timeout_orders / state.total_orders_placed if state.total_orders_placed > 0 else 0.0
             }
         
         # Задача 215: Добавляем метрики ошибок

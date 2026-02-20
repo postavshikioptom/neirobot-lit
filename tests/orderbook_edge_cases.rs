@@ -14,7 +14,7 @@ fn create_test_config(ws_url: String) -> ExchangeConfig {
         name: "bybit".to_string(),
         websocket: WebSocketConfig {
             public_url: ws_url.clone(),
-            private_url: ws_url,
+            private_ws_url: ws_url,
             max_attempts: Some(3),
             warn_rtt_ms: 100,
             chaos: None,

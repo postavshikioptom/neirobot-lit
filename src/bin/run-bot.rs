@@ -1191,6 +1191,22 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     
     info!("[CommandServer] Started on port {}", command_port);
     
+    // Задача 066: Initial Sync перед запуском основного цикла
+    info!("Performing initial position sync for {}...", args.symbol);
+    if let Ok((remote_qty, remote_avg_price, remote_leverage, remote_pnl)) = 
+        rest_client.get_position_signed(&full_config.exchange.bybit.category, &args.symbol, full_config.bot.position_idx).await {
+        execution.position_manager.sync_from_remote(
+            remote_qty, 
+            remote_avg_price, 
+            remote_leverage, 
+            remote_pnl,
+            &ob.market_info
+        );
+        info!("Initial position sync completed. Local qty: {}", execution.position_manager.get_position().qty);
+    } else {
+        warn!("Initial position sync failed, continuing with local state");
+    }
+    
     let loop_result = run_bot_loop(
         rx_stream,
         private_rx,
@@ -1353,6 +1369,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
     let mut stale_order_check_interval = tokio::time::interval(Duration::from_millis(config.bot.stale_check_interval_ms)); // Задача 179
     let mut log_archival_interval = tokio::time::interval(Duration::from_secs(3600)); // Задача 182: Архивация логов раз в час
     let mut data_cleanup_interval = tokio::time::interval(Duration::from_secs(config.bot.risk.cleanup_interval_hours as u64 * 3600)); // Задача 187: Очистка данных
+    let mut position_sync_interval = tokio::time::interval(Duration::from_secs(config.bot.position_sync_interval_secs)); // Задача 066: Синхронизация позиции
     let mut last_chase_time = 0u64;
     let chase_interval_ms = config.bot.chase_interval_ms.max(200);
     
@@ -1443,6 +1460,22 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                 debug!("Periodic reconciliation triggered for {}", symbol);
                 if let Err(e) = execution.perform_reconciliation(rest_client, &config.exchange).await {
                     error!("Reconciliation failed for {}: {}", symbol, e);
+                }
+            }
+            _ = position_sync_interval.tick() => {
+                // Задача 066: Периодическая синхронизация позиции с биржей
+                debug!("Periodic position sync triggered for {}", symbol);
+                if let Ok((remote_qty, remote_avg_price, remote_leverage, remote_pnl)) = 
+                    rest_client.get_position_signed(&config.exchange.bybit.category, symbol, config.bot.position_idx).await {
+                    execution.position_manager.sync_from_remote(
+                        remote_qty, 
+                        remote_avg_price, 
+                        remote_leverage, 
+                        remote_pnl,
+                        &ob.market_info
+                    );
+                } else {
+                    debug!("Position sync failed for {}, will retry on next interval", symbol);
                 }
             }
             _ = snapshot_interval.tick() => {
@@ -1873,9 +1906,10 @@ async fn handle_market_update(
         .map(|d| d.detect() as usize)
         .unwrap_or(0);
     
-    // Заполняем буфер признаками из стакана и нормализуем их на месте
+    // Заполняем буфер признаками из стакана и нормализуем их на месте (Zero-copy версия, Задача 078.3)
     let start_feature = std::time::Instant::now();
-    let feature_res = tensor_builder.process_snapshot(&snapshot);
+    let mut buffer = vec![0.0f32; 150];
+    let feature_res = tensor_builder.process_snapshot_to_buffer(&snapshot, &mut buffer);
     HOT_PATH_STATS.record_feature(start_feature.elapsed().as_micros() as u64);
     
     if let Some(tensor_data) = feature_res.context("Tensor building failed")? {

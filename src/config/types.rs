@@ -60,10 +60,12 @@ fn default_base_delay_ms() -> u64 { 1000 }
 fn default_rest_requests_per_second() -> u64 { 20 }
 fn default_private_endpoint_per_minute() -> u64 { 600 }
 fn default_backoff_base_ms() -> u64 { 500 }
+fn default_order_rate() -> u64 { 20 }
+fn default_private_rate() -> u64 { 50 }
 fn default_max_delay_ms() -> u64 { 60000 }
 fn default_max_price_deviation() -> Decimal { Decimal::from_f64(0.02).unwrap() } // 2% по умолчанию
 fn default_ping_interval_sec() -> u64 { 20 }
-fn default_pong_timeout_sec() -> u64 { 10 }
+fn default_pong_timeout_sec() -> u64 { 30 }
 fn default_warn_rtt_ms() -> u64 { 500 }
 fn default_ws_retry_initial_ms() -> u64 { 1000 }
 fn default_ws_retry_max_ms() -> u64 { 60000 }
@@ -102,7 +104,7 @@ fn default_desync_tolerance() -> f64 { 0.01 } // 1%
 fn default_bybit_category() -> String { "linear".to_string() }
 fn default_bybit_api_key_path() -> String { "api_key".to_string() }
 fn default_public_url() -> String { "wss://stream.bybit.com/v5/public/linear".to_string() }
-fn default_private_url() -> String { "wss://stream.bybit.com/v5/private".to_string() }
+fn default_private_ws_url() -> String { "wss://stream.bybit.com/v5/private".to_string() }
 fn default_base_url() -> String { "https://api.bybit.com".to_string() }
 fn default_request_timeout_sec() -> u64 { 30 }
 
@@ -584,6 +586,8 @@ pub struct RiskDefaultsConfig {
     pub max_position_size: Option<Decimal>,
     pub max_notional_usd: Option<Decimal>,
     pub max_margin_usd: Option<Decimal>,
+    #[serde(default = "default_leverage")]
+    pub leverage: Decimal,
     pub max_daily_drawdown_usd: Option<Decimal>,
     pub max_daily_drawdown_pct: Option<Decimal>,
     pub auto_reset_at_midnight: bool,
@@ -753,8 +757,8 @@ impl Default for RiskDefaultsConfig {
 
 // --- Конфигурация ONNX ---
 
-fn default_intra_threads() -> u32 { 1 }
-fn default_inter_threads() -> u32 { 1 }
+fn default_intra_threads() -> Option<usize> { None }
+fn default_inter_threads() -> Option<usize> { None }
 fn default_execution_mode() -> OnnxExecutionMode { OnnxExecutionMode::Sequential }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,10 +774,8 @@ pub struct OnnxConfig {
     pub execution_provider: String, // "cpu", "cuda", "tensorrt"
     #[serde(default = "default_device_id")]
     pub device_id: i32,             // ID GPU (по умолчанию 0)
-    #[serde(default = "default_intra_threads")]
-    pub intra_threads: u32,         // Потоки внутри операторов (для CPU-оптимизации)
-    #[serde(default = "default_inter_threads")]
-    pub inter_threads: u32,         // Потоки между операторами (для CPU-оптимизации)
+    pub intra_threads: Option<usize>, // Для CPU-оптимизации
+    pub inter_threads: Option<usize>, // Для CPU-оптимизации
     #[serde(default = "default_execution_mode")]
     pub execution_mode: OnnxExecutionMode,
 }
@@ -882,8 +884,8 @@ fn default_mean_latency_ms() -> u64 { 0 }
 pub struct WebsocketConfig {
     #[serde(default = "default_public_url")]
     pub public_url: String,
-    #[serde(default = "default_private_url")]
-    pub private_url: String,
+    #[serde(default = "default_private_ws_url")]
+    pub private_ws_url: String,
     #[serde(default = "default_ping_interval_sec")]
     pub ping_interval_sec: u64,
     #[serde(default = "default_pong_timeout_sec")]
@@ -918,6 +920,10 @@ pub struct RestConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct RateLimitsConfig {
+    #[serde(default = "default_order_rate")]
+    pub order_rate: u64,
+    #[serde(default = "default_private_rate")]
+    pub private_rate: u64,
     #[serde(default = "default_rest_requests_per_second")]
     pub rest_requests_per_second: u64,
     #[serde(default = "default_private_endpoint_per_minute")]
