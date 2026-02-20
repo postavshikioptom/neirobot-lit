@@ -166,6 +166,7 @@ class LiTModel(nn.Module):
         self.num_heads = nhead
         self.head_dim = d_model // nhead
         self.use_gqa = use_gqa
+        self.seq_len = seq_len
         
         # 1. Продвинутый слой патчинга (с уровневым и временным позиционированием)
         self.patching = LOBPatching(
@@ -174,6 +175,21 @@ class LiTModel(nn.Module):
             in_channels=in_channels, 
             d_model=d_model
         )
+        
+        # 1.5. Positional Encoding (Задача 055)
+        # Поддерживает динамическое слicing до текущей seq_len
+        # Используем sinusoidal PE (не требует обучения)
+        max_seq_len = seq_len + 1  # +1 для [CLS] токена
+        pe = torch.zeros(max_seq_len, d_model)
+        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        if d_model % 2 == 1:
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        # Регистрируем как буфер (не параметр, не требует градиентов)
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_seq_len, d_model)
         
         # 2. [CLS] Токен (сохраняем для совместимости, но будем использовать GAP)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -294,7 +310,12 @@ class LiTModel(nn.Module):
         b, s, c, l = x.shape
         
         # Шаг 1: Патчинг и позиционное кодирование
-        x = self.patching(x)
+        x = self.patching(x)  # (Batch, num_patches, d_model)
+        
+        # Шаг 1.5: Добавляем Positional Encoding (Задача 055)
+        # Срезаем PE до текущей seq_len и добавляем к патчам
+        pe_slice = self.pe[:, :x.shape[1], :]  # (1, num_patches, d_model)
+        x = x + pe_slice  # (Batch, num_patches, d_model)
         
         # Шаг 2: Добавляем Regime Embedding (если включено)
         if self.regime_embedding is not None and regime_id is not None:
@@ -312,14 +333,17 @@ class LiTModel(nn.Module):
         cls_tokens = self.cls_token.expand(b, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
         
-        # Шаг 4: Подготовка маски
-        full_mask = None
+        # Шаг 4: Подготовка маски для Transformer (Задача 055)
+        src_key_padding_mask = None
         if mask is not None:
+            # mask: (Batch, Seq) - True для padding, False для valid
+            # Добавляем False для [CLS] токена (он всегда valid)
             cls_mask = torch.zeros((b, 1), dtype=torch.bool, device=x.device)
-            full_mask = torch.cat([cls_mask, mask], dim=1)
+            src_key_padding_mask = torch.cat([cls_mask, mask], dim=1)  # (Batch, Seq+1)
         
-        # Шаг 5: Transformer Encoder (Стандартный вызов использует все веса и nhead автоматически)
-        x_trans = self.transformer(x)
+        # Шаг 5: Transformer Encoder с поддержкой src_key_padding_mask
+        # src_key_padding_mask: True для позиций, которые нужно игнорировать
+        x_trans = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
         
         # Шаг 6: Прогноз строго по CLS токену согласно плану 025
         cls_output = x_trans[:, 0, :]

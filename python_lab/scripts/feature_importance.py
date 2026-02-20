@@ -158,11 +158,12 @@ def compute_feature_importance(model, X_val, y_val, device, n_repeats=5, seed=42
     # Словарь для хранения результатов
     importance_results = {}
     
-    # Названия каналов
-    channel_names = ['ask_p', 'ask_v', 'bid_p', 'bid_v']
-    if channels > 4:
+    # Названия каналов согласно плану 053
+    # Канал 0: Normalized Price, Канал 1: Log Volume, Канал 2: Static Level Imbalance
+    channel_names = ['price', 'volume', 'imbalance']
+    if channels > 3:
         # Добавляем past returns каналы
-        for i in range(channels - 4):
+        for i in range(channels - 3):
             channel_names.append(f'past_return_{i+1}')
     
     print(f"\nАнализ важности {channels * levels} признаков...")
@@ -234,42 +235,31 @@ def compute_group_importance(model, X_val, y_val, device, n_repeats=5, seed=42):
     
     N, seq_len, channels, levels = X_val.shape
     
-    # Определяем группы признаков
+    # Определяем группы признаков согласно плану 053
     groups = {}
     
-    # Группа 1: Price Levels (ask_p и bid_p для всех уровней)
+    # Группа 1: Price Channel (Канал 0: Normalized Price для всех уровней)
     price_indices = []
     for level_idx in range(levels):
-        price_indices.append((0, level_idx))  # ask_p
-        price_indices.append((2, level_idx))  # bid_p
-    groups['Price Levels'] = price_indices
+        price_indices.append((0, level_idx))
+    groups['Price'] = price_indices
     
-    # Группа 2: Volume Levels (ask_v и bid_v для всех уровней)
+    # Группа 2: Volume Channel (Канал 1: Log Volume для всех уровней)
     volume_indices = []
     for level_idx in range(levels):
-        volume_indices.append((1, level_idx))  # ask_v
-        volume_indices.append((3, level_idx))  # bid_v
-    groups['Volume Levels'] = volume_indices
+        volume_indices.append((1, level_idx))
+    groups['Volume'] = volume_indices
     
-    # Группа 3: Spread/Imbalance (первые уровни + дополнительные признаки)
-    # Spread = ask_p_0 - bid_p_0, Imbalance = (bid_v_0 - ask_v_0) / (bid_v_0 + ask_v_0)
-    spread_imbalance_indices = [
-        (0, 0),  # ask_p_0
-        (1, 0),  # ask_v_0
-        (2, 0),  # bid_p_0
-        (3, 0),  # bid_v_0
-    ]
-    
-    # Если есть дополнительные каналы (past returns или другие признаки),
-    # проверяем наличие spread/imbalance признаков
-    # Примечание: В текущей архитектуре spread/imbalance вычисляются из Level 0,
-    # но если в будущем они будут отдельными каналами, они будут автоматически включены
-    groups['Spread/Imbalance'] = spread_imbalance_indices
+    # Группа 3: Imbalance Channel (Канал 2: Static Level Imbalance для всех уровней)
+    imbalance_indices = []
+    for level_idx in range(levels):
+        imbalance_indices.append((2, level_idx))
+    groups['Imbalance'] = imbalance_indices
     
     # Если есть past returns, добавляем их как отдельную группу
-    if channels > 4:
+    if channels > 3:
         past_returns_indices = []
-        for channel_idx in range(4, channels):
+        for channel_idx in range(3, channels):
             for level_idx in range(levels):
                 past_returns_indices.append((channel_idx, level_idx))
         groups['Past Returns'] = past_returns_indices

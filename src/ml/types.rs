@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ndarray::Array2;
+use std::collections::HashMap;
 
 /// Параметры нормализации модели (mean и std для Z-score, или median и iqr для Robust Scaler)
 /// Задача 240: Поддержка разных типов скейлеров
@@ -30,12 +31,48 @@ fn default_scaler_type() -> String {
     "zscore".to_string()
 }
 
+/// Параметры модели (вложенная структура для metadata.json)
+/// Задача 056: Содержит все параметры архитектуры и конфигурации модели
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelParams {
+    pub architecture: String,
+    pub seq_len: usize,
+    pub n_levels: usize,
+    pub in_channels: usize,
+    pub d_model: usize,
+    pub nhead: usize,
+    pub num_layers: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_size: Option<usize>,
+    pub feature_order: Vec<String>,
+    pub output_classes: usize,
+    pub label_map: HashMap<String, String>,
+    pub precision: String,
+    pub quantized: bool,
+    pub onnx_opset: usize,
+}
+
 /// Метаданные текущей активной модели (metadata.json)
+/// Задача 056: Расширенная структура для полной поддержки всех полей из Python metadata.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMetadata {
-    pub onnx_hash: String,
-    pub version: String,
+    pub metadata_version: String,
+    pub git_hash: String,
+    pub export_timestamp: String,
+    pub model_name: String,
+    pub model_params: ModelParams,
     pub normalization: NormalizationParams,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_embedded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onnx_file: Option<String>,
+    // Поля для обратной совместимости со старыми версиями
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onnx_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcc_score: Option<f32>,
     /// Среднее значение энтропии предсказаний на валидационной выборке (задача 224)

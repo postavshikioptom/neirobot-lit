@@ -5,6 +5,7 @@ import polars as pl_pol
 import numpy as np
 import argparse
 import psutil
+import json
 from tqdm import tqdm
 from sklearn.metrics import classification_report, matthews_corrcoef
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
@@ -19,6 +20,9 @@ from torchmetrics.classification import (
     MulticlassConfusionMatrix
 )
 from pathlib import Path
+import optuna
+from optuna.pruners import MedianPruner, HyperbandPruner, PatientPruner
+from optuna.exceptions import TrialPruned
 
 from .lit_model import LiTModel
 from .dataset import LOBDataset, LOBDataLoader, balance_dataset, apply_symmetric_flip, apply_volume_jitter
@@ -96,6 +100,10 @@ class LiTModule(pl.LightningModule):
             regime_weights = torch.tensor(regime_weights, dtype=torch.float32)
         self.regime_weights = regime_weights
 
+        # Логика взаимного исключения: Focal Loss и Label Smoothing - альтернативы
+        # Если используется Focal Loss, отключаем label_smoothing
+        effective_label_smoothing = 0.0 if loss_type == "focal" else label_smoothing
+
         # Выбор функции потерь для классификации (только если не distillation)
         if not self.is_distillation:
             if self.is_multi_horizon:
@@ -105,21 +113,21 @@ class LiTModule(pl.LightningModule):
                     num_horizons=num_horizons,
                     horizon_weights=horizon_weights,
                     class_weights=class_weights,
-                    label_smoothing=label_smoothing,
+                    label_smoothing=effective_label_smoothing,
                     reduction='mean'  # MultiHorizonLoss внутренне обрабатывает sample_weights
                 )
             else:
                 # Single horizon - обычный loss
                 if use_time_weighting or use_regime_weighting:
                     if loss_type == "focal":
-                        self.criterion = FocalLoss(alpha=class_weights, gamma=focal_gamma, label_smoothing=label_smoothing, reduction='none')
+                        self.criterion = FocalLoss(alpha=class_weights, gamma=focal_gamma, label_smoothing=effective_label_smoothing, reduction='none')
                     else:
-                        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing, reduction='none')
+                        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=effective_label_smoothing, reduction='none')
                 else:
                     if loss_type == "focal":
-                        self.criterion = FocalLoss(alpha=class_weights, gamma=focal_gamma, label_smoothing=label_smoothing)
+                        self.criterion = FocalLoss(alpha=class_weights, gamma=focal_gamma, label_smoothing=effective_label_smoothing)
                     else:
-                        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing)
+                        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=effective_label_smoothing)
         
         # Лосс для волатильности (Регрессия)
         self.vol_criterion = nn.MSELoss(reduction='none' if (use_time_weighting or use_regime_weighting) else 'mean')
@@ -692,6 +700,287 @@ def enable_dropout(m):
     if isinstance(m, nn.Dropout):
         m.train()
 
+def objective_seq_len_search(trial, args, base_path, data_path, df, 
+                              in_channels, past_returns_lags, num_horizons, horizon_weights, 
+                              weights, normalizer, regime_detector, regime_weights, num_regimes, cache_dir=None):
+    """
+    Optuna objective для поиска оптимальной seq_len (Задача 055).
+    
+    Параметры:
+    - trial: Optuna Trial объект
+    - args: аргументы командной строки
+    - base_path, data_path: пути к данным
+    - df: исходный DataFrame или LazyFrame с данными
+    - in_channels: количество входных каналов
+    - past_returns_lags: лаги past returns
+    - num_horizons: количество горизонтов
+    - horizon_weights: веса горизонтов
+    - weights: веса классов
+    - normalizer: нормализатор
+    - regime_detector: детектор режимов
+    - regime_weights: веса режимов
+    - num_regimes: количество режимов
+    - cache_dir: директория кэша для memmap режима
+    
+    Возвращает:
+    - val_mcc: MCC на валидационном наборе
+    """
+    # Предлагаем seq_len для поиска (Задача 055, пункт 3)
+    seq_len = trial.suggest_int("seq_len", 10, 100, step=10)
+    print(f"\n[Optuna Trial] Testing seq_len={seq_len}")
+    
+    # Пересоздаем датасеты с новой seq_len
+    # ВАЖНО: Нужно пересоздать датасеты, так как seq_len влияет на размер окна
+    try:
+        # Подготовка параметров для временного взвешивания
+        time_weighting_params = {}
+        if args.use_time_weighting:
+            time_weighting_params = {
+                'half_life_hours': args.half_life_hours,
+                'min_weight': args.min_sample_weight,
+                'class_weights': weights
+            }
+        else:
+            time_weighting_params = {
+                'half_life_hours': 24.0,
+                'min_weight': 1.0,
+                'class_weights': None
+            }
+        
+        # Пересоздаем датасет с новой seq_len
+        if args.data_mode == "streaming":
+            trial_dataset = LOBDataset(
+                df,
+                seq_len=seq_len,
+                n_past_returns=len(past_returns_lags),
+                data_mode="streaming",
+                is_train=False,
+                augment_prob=args.augment_prob,
+                use_symmetric_flip=args.use_symmetric_flip,
+                volume_jitter_range=args.volume_jitter_range,
+                aug_seed=args.aug_seed,
+                regime_detector=regime_detector,
+                regime_window=1000,
+                scaler_type=args.scaler_type,
+                winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+                **time_weighting_params
+            )
+        elif args.data_mode == "memmap":
+            trial_dataset = LOBDataset(
+                df,
+                seq_len=seq_len,
+                n_past_returns=len(past_returns_lags),
+                data_mode="memmap",
+                cache_dir=cache_dir,
+                is_train=False,
+                augment_prob=args.augment_prob,
+                use_symmetric_flip=args.use_symmetric_flip,
+                volume_jitter_range=args.volume_jitter_range,
+                aug_seed=args.aug_seed,
+                regime_detector=regime_detector,
+                regime_window=1000,
+                scaler_type=args.scaler_type,
+                winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+                **time_weighting_params
+            )
+        else:
+            # Memory mode (по умолчанию)
+            trial_dataset = LOBDataset(
+                df,
+                seq_len=seq_len,
+                n_past_returns=len(past_returns_lags),
+                data_mode="memory",
+                is_train=False,
+                augment_prob=args.augment_prob,
+                use_symmetric_flip=args.use_symmetric_flip,
+                volume_jitter_range=args.volume_jitter_range,
+                aug_seed=args.aug_seed,
+                regime_detector=regime_detector,
+                regime_window=1000,
+                scaler_type=args.scaler_type,
+                winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+                **time_weighting_params
+            )
+        
+        # Разделяем на train/val
+        total_len = len(trial_dataset)
+        train_size = int(0.8 * total_len)
+        val_size = total_len - train_size
+        
+        trial_train_ds, trial_val_ds = random_split(trial_dataset, [train_size, val_size])
+        
+        # Создаем DataLoaders
+        num_workers = 2 if args.data_mode == "streaming" else 4
+        trial_train_loader = DataLoader(
+            trial_train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers > 0 else False
+        )
+        trial_val_loader = DataLoader(
+            trial_val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers > 0 else False
+        )
+        
+    except Exception as e:
+        print(f"[Optuna Trial] Error creating dataset with seq_len={seq_len}: {e}")
+        raise TrialPruned()
+    
+    # Создаем модель с текущей seq_len
+    from .lit_model import LiTConfig
+    
+    trial_config = LiTConfig(
+        seq_len=seq_len,
+        in_channels=in_channels,
+        d_model=args.d_model,
+        nhead=args.nhead,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        activation=args.activation,
+        multi_task=True,
+        num_horizons=num_horizons,
+        use_horizon_embedding=args.use_horizon_embedding
+    )
+    
+    trial_model = LiTModule(
+        seq_len=trial_config.seq_len,
+        lr=1e-4,
+        class_weights=weights,
+        label_smoothing=args.label_smoothing,
+        loss_type=args.loss_type,
+        focal_gamma=args.focal_gamma,
+        activation=trial_config.activation,
+        use_time_weighting=args.use_time_weighting,
+        use_regime_weighting=(regime_detector is not None),
+        regime_weights=regime_weights,
+        in_channels=trial_config.in_channels,
+        past_returns_lags=past_returns_lags,
+        d_model=trial_config.d_model,
+        nhead=trial_config.nhead,
+        num_layers=trial_config.num_layers,
+        dropout=trial_config.dropout,
+        multi_task=trial_config.multi_task,
+        num_regimes=num_regimes,
+        regime_embedding_dim=16,
+        num_horizons=num_horizons,
+        horizon_weights=horizon_weights,
+        use_horizon_embedding=args.use_horizon_embedding,
+        scheduler=args.scheduler,
+        div_factor=args.div_factor,
+        final_div_factor=args.final_div_factor,
+        pct_start=args.pct_start,
+        plateau_factor=args.plateau_factor,
+        plateau_patience=args.plateau_patience,
+        step_size=args.step_size,
+        gamma=args.gamma,
+        weight_decay=args.weight_decay,
+        clip_mode=args.clip_mode,
+        clip_val=args.clip_val,
+        tb_hist_freq=args.tb_hist_freq,
+        tb_embedding_samples=args.tb_embedding_samples,
+        use_curvature_reg=args.use_curvature_reg,
+        curvature_lambda=args.curvature_lambda,
+        input_noise_std=args.input_noise_std,
+        scaler_type=args.scaler_type,
+        winsor_limits=list(tuple([float(x.strip()) for x in args.winsor_limits.split(",")])) if args.winsor_limits else None
+    )
+    
+    # Создаем Trainer с EarlyStopping (Задача 055, пункт 3)
+    trial_checkpoint_callback = ModelCheckpoint(
+        dirpath=base_path / "bots" / args.symbol / "models" / "optuna_checkpoints" / f"seq_len_{seq_len}",
+        filename="lit-{epoch:02d}-{val_mcc:.4f}",
+        save_top_k=1,
+        monitor="val_mcc",
+        mode="max"
+    )
+    
+    trial_callbacks = [
+        EarlyStopping(monitor="val_mcc", patience=5, mode="max"),  # Ранняя остановка для каждого trial
+        trial_checkpoint_callback,
+        LearningRateMonitor(logging_interval="epoch")
+    ]
+    
+    trial_logger = TensorBoardLogger(
+        f"runs/{args.symbol}/optuna",
+        name=f"seq_len_{seq_len}"
+    )
+    
+    trial_trainer = pl.Trainer(
+        max_epochs=min(20, args.epochs),  # Ограничиваем эпохи для быстрого поиска
+        callbacks=trial_callbacks,
+        logger=trial_logger,
+        accelerator="auto",
+        devices=1,
+        precision="16-mixed" if torch.cuda.is_available() else 32,
+        enable_progress_bar=False,  # Отключаем прогресс-бар для чистоты вывода
+    )
+    
+    # Обучаем модель
+    try:
+        trial_trainer.fit(trial_model, trial_train_loader, trial_val_loader)
+    except Exception as e:
+        print(f"[Optuna Trial] Training failed for seq_len={seq_len}: {e}")
+        raise TrialPruned()
+    
+    # Вычисляем MCC на валидационном наборе
+    trial_model.eval()
+    all_preds = []
+    all_labels = []
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    trial_model.to(device)
+    
+    with torch.no_grad():
+        for batch in trial_val_loader:
+            x = batch[0].to(device)
+            y = batch[1].to(device)
+            regime_id = batch[4].to(device) if len(batch) > 4 else None
+            
+            # Вызываем forward() модели
+            output = trial_model(x, regime_id=regime_id)
+            
+            # Обрабатываем вывод (может быть кортеж или тензор)
+            if isinstance(output, tuple):
+                logits = output[0]
+            else:
+                logits = output
+            
+            # Для multi-horizon берем первый горизонт
+            if logits.dim() == 3:
+                logits = logits[:, 0, :]  # (batch, 3)
+            
+            preds = torch.argmax(logits, dim=1)
+            
+            all_preds.append(preds.cpu())
+            all_labels.append(y.cpu())
+    
+    val_preds = torch.cat(all_preds).numpy()
+    val_labels_tensor = torch.cat(all_labels)
+    
+    # Обрабатываем multi-horizon метки
+    if val_labels_tensor.dim() == 2:
+        # Multi-horizon: берем первый горизонт
+        val_labels = val_labels_tensor[:, 0].numpy()
+    else:
+        # Single horizon
+        val_labels = val_labels_tensor.numpy()
+    
+    val_mcc = matthews_corrcoef(val_labels, val_preds)
+    
+    print(f"[Optuna Trial] seq_len={seq_len}, val_mcc={val_mcc:.4f}")
+    
+    return val_mcc
+
+def enable_dropout(m):
+    if isinstance(m, nn.Dropout):
+        m.train()
+
 def train():
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
@@ -798,6 +1087,11 @@ def train():
     # Параметры Robust Scaling (Задача 240)
     parser.add_argument("--scaler_type", type=str, default="zscore", choices=["zscore", "robust", "winsor_robust"], help="Scaler type: zscore (default), robust (median/IQR), or winsor_robust (clipping + robust)")
     parser.add_argument("--winsor_limits", type=str, default="0.01,0.99", help="Winsorization limits as comma-separated floats (e.g., '0.01,0.99' for 1st and 99th percentiles)")
+    
+    # Параметры Optuna поиска seq_len (Задача 055)
+    parser.add_argument("--optuna_seq_len_search", action="store_true", help="Enable Optuna hyperparameter search for seq_len")
+    parser.add_argument("--optuna_n_trials", type=int, default=10, help="Number of Optuna trials for seq_len search (default: 10)")
+    parser.add_argument("--optuna_pruner", type=str, default="median", choices=["median", "hyperband", "patient"], help="Optuna pruner type")
     
     args = parser.parse_args()
     
@@ -1198,10 +1492,24 @@ def train():
                     n_past_returns = self.original_ds.n_past_returns
                     seq_len = x.shape[0]
                     
-                    # Разделяем LOB и past returns
-                    lob_features_flat = x[:, :200]
-                    # (Seq, 200) -> (Seq, 4, 50)
-                    x_reshaped = lob_features_flat.reshape(seq_len, 4, n_levels)
+                    # Реализуем расчет 3-канального тензора согласно плану 053
+                    # Структура x: [ask_p_0..49, ask_v_0..49, bid_p_0..49, bid_v_0..49] (seq_len, 200)
+                    ask_p = x[:, 0:50]      # (seq_len, 50)
+                    ask_v = x[:, 50:100]    # (seq_len, 50)
+                    bid_p = x[:, 100:150]   # (seq_len, 50)
+                    bid_v = x[:, 150:200]   # (seq_len, 50)
+                    
+                    # Канал 0: Normalized Price (среднее отклонение)
+                    price_ch = (ask_p + bid_p) / 2.0  # (seq_len, 50)
+                    
+                    # Канал 1: Log Volume
+                    vol_ch = ask_v + bid_v  # (seq_len, 50)
+                    
+                    # Канал 2: Static Level Imbalance
+                    imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)  # (seq_len, 50)
+                    
+                    # Собираем 3-канальный тензор: (seq_len, 3, 50)
+                    x_reshaped = torch.stack([price_ch, vol_ch, imb_ch], dim=1)
                     
                     if n_past_returns > 0:
                         past_returns = x[:, 200:200+n_past_returns]
@@ -1554,6 +1862,182 @@ def train():
     # Добавляем symbol в trainer для доступа из LiTModule
     trainer.symbol = args.symbol
 
+    # 11.5. Optuna поиск seq_len (Задача 055)
+    if args.optuna_seq_len_search:
+        print("\n" + "=" * 70)
+        print("OPTUNA HYPERPARAMETER SEARCH FOR seq_len")
+        print("=" * 70)
+        print(f"Number of trials: {args.optuna_n_trials}")
+        print(f"Pruner type: {args.optuna_pruner}")
+        print("=" * 70 + "\n")
+        
+        # Создаем Optuna study
+        if args.optuna_pruner == "hyperband":
+            pruner = HyperbandPruner(
+                min_resource=1,
+                max_resource=min(20, args.epochs),
+                reduction_factor=3
+            )
+        elif args.optuna_pruner == "patient":
+            pruner = PatientPruner(patience=3)
+        else:
+            pruner = MedianPruner()
+        
+        study = optuna.create_study(
+            direction="maximize",
+            pruner=pruner,
+            sampler=optuna.samplers.TPESampler(seed=42)
+        )
+        
+        # Запускаем поиск
+        study.optimize(
+            lambda trial: objective_seq_len_search(
+                trial, args, base_path, data_path, df,
+                in_channels, past_returns_lags, num_horizons, horizon_weights,
+                weights, normalizer, regime_detector, regime_weights, num_regimes, cache_dir
+            ),
+            n_trials=args.optuna_n_trials,
+            show_progress_bar=True
+        )
+        
+        # Получаем лучший seq_len
+        best_trial = study.best_trial
+        best_seq_len = best_trial.params["seq_len"]
+        best_mcc = best_trial.value
+        
+        print(f"\n{'='*70}")
+        print(f"OPTUNA SEARCH COMPLETED")
+        print(f"{'='*70}")
+        print(f"Best seq_len: {best_seq_len}")
+        print(f"Best MCC: {best_mcc:.4f}")
+        print(f"{'='*70}\n")
+        
+        # Сохраняем best_seq_len в конфиг эксперимента (Задача 055, пункт 3)
+        config_path = base_path / "bots" / args.symbol / "models" / "optuna_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        optuna_config = {
+            "best_seq_len": int(best_seq_len),
+            "best_mcc": float(best_mcc),
+            "n_trials": args.optuna_n_trials,
+            "pruner_type": args.optuna_pruner,
+            "all_trials": [
+                {
+                    "seq_len": int(trial.params["seq_len"]),
+                    "mcc": float(trial.value) if trial.value is not None else None,
+                    "state": str(trial.state)
+                }
+                for trial in study.trials
+            ]
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(optuna_config, f, indent=2)
+        
+        print(f"Optuna config saved to: {config_path}")
+        
+        # Обновляем args.seq_len на best_seq_len для дальнейшего обучения
+        print(f"\nUpdating seq_len from {args.seq_len} to {best_seq_len} for training")
+        args.seq_len = best_seq_len
+        
+        # Пересоздаем датасеты с best_seq_len
+        print("Recreating datasets with best seq_len...")
+        
+        # Подготовка параметров для временного взвешивания
+        time_weighting_params_final = {}
+        if args.use_time_weighting:
+            time_weighting_params_final = {
+                'half_life_hours': args.half_life_hours,
+                'min_weight': args.min_sample_weight,
+                'class_weights': weights
+            }
+        else:
+            time_weighting_params_final = {
+                'half_life_hours': 24.0,
+                'min_weight': 1.0,
+                'class_weights': None
+            }
+        
+        if args.data_mode == "streaming":
+            full_dataset = LOBDataset(
+                df,
+                seq_len=args.seq_len,
+                n_past_returns=n_past_returns,
+                data_mode="streaming",
+                is_train=False,
+                augment_prob=args.augment_prob,
+                use_symmetric_flip=args.use_symmetric_flip,
+                volume_jitter_range=args.volume_jitter_range,
+                aug_seed=args.aug_seed,
+                regime_detector=regime_detector,
+                regime_window=1000,
+                scaler_type=args.scaler_type,
+                winsor_limits=winsor_limits,
+                **time_weighting_params_final
+            )
+        elif args.data_mode == "memmap":
+            full_dataset = LOBDataset(
+                df,
+                seq_len=args.seq_len,
+                n_past_returns=n_past_returns,
+                data_mode="memmap",
+                cache_dir=cache_dir,
+                is_train=False,
+                augment_prob=args.augment_prob,
+                use_symmetric_flip=args.use_symmetric_flip,
+                volume_jitter_range=args.volume_jitter_range,
+                aug_seed=args.aug_seed,
+                regime_detector=regime_detector,
+                regime_window=1000,
+                scaler_type=args.scaler_type,
+                winsor_limits=winsor_limits,
+                **time_weighting_params_final
+            )
+        else:
+            full_dataset = LOBDataset(
+                df,
+                seq_len=args.seq_len,
+                n_past_returns=n_past_returns,
+                data_mode="memory",
+                is_train=False,
+                augment_prob=args.augment_prob,
+                use_symmetric_flip=args.use_symmetric_flip,
+                volume_jitter_range=args.volume_jitter_range,
+                aug_seed=args.aug_seed,
+                regime_detector=regime_detector,
+                regime_window=1000,
+                scaler_type=args.scaler_type,
+                winsor_limits=winsor_limits,
+                **time_weighting_params_final
+            )
+        
+        # Пересоздаем train/val разделение (80/20)
+        total_len = len(full_dataset)
+        train_size = int(0.8 * total_len)
+        val_size = total_len - train_size
+        
+        train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
+        
+        # Пересоздаем DataLoaders
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers > 0 else False
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers > 0 else False
+        )
+        
+        print("Datasets recreated successfully\n")
+
     # 12. Обучение
     if args.mode == "cv":
         # ============================================================================
@@ -1893,7 +2377,17 @@ def train():
             'activation': args.activation,
             'scheduler': args.scheduler,
             'loss_type': args.loss_type,
+            'label_smoothing': args.label_smoothing,
         }
+        
+        # Выводим финальное значение label_smoothing (с учетом логики взаимного исключения)
+        effective_label_smoothing = 0.0 if args.loss_type == "focal" else args.label_smoothing
+        print(f"Label smoothing configuration:")
+        print(f"  - Requested: {args.label_smoothing}")
+        print(f"  - Effective (after Focal Loss check): {effective_label_smoothing}")
+        if args.loss_type == "focal":
+            print(f"  - Note: Label smoothing disabled because Focal Loss is used (they are alternatives)")
+        print()
         
         trainer.fit(model, train_loader, val_loader)
         
@@ -2216,7 +2710,7 @@ def train():
     else:
         print("No best model found, skipping evaluation.")
     
-    # 15. Автоматическое сохранение модели (Задача 151, пункты 1 и 6)
+    # 14. Автоматическое сохранение модели (Задача 151, пункты 1 и 6)
     # Только для режимов train и distill
     if args.mode != "cv" and best_model_path:
         import shutil

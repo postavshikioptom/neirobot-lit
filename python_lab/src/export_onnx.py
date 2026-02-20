@@ -30,11 +30,11 @@ except ImportError:
 
 class ExportWrapper(nn.Module):
     """
-    Обертка для экспорта модели с входом формы (B, S, 200).
-    Преобразует плоский вход (B, S, 200) в (B, S, in_channels, n_levels)
+    Обертка для экспорта модели с входом формы (B, S, 150).
+    Преобразует плоский вход (B, S, 150) в (B, S, in_channels, n_levels)
     для совместимости с LOBPatching внутри модели.
     
-    200 = 50 уровней * 2 стороны * 2 параметра (price, volume)
+    150 = 50 уровней * 3 канала (Price, Volume, Imbalance)
     """
     def __init__(self, model, in_channels=3, n_levels=50):
         super().__init__()
@@ -44,23 +44,23 @@ class ExportWrapper(nn.Module):
         
     def forward(self, x):
         """
-        x: (Batch, Seq, 200) - плоский входной тензор
-        Преобразуем в (Batch, Seq, 4, 50) для LOBPatching
+        x: (Batch, Seq, 150) - плоский входной тензор
+        Преобразуем в (Batch, Seq, 3, 50) для LOBPatching
         
-        Согласно плану 031:
-        - 200 = 50 уровней * 2 стороны * 2 параметра (price, volume)
-        - Это ровно 4 канала по 50 уровней
+        Согласно плану 053:
+        - 150 = 50 уровней * 3 канала (Price, Volume, Imbalance)
+        - Это ровно 3 канала по 50 уровней
         - LOBPatching должен быть внутри графа и обработать этот вход целиком
         """
         b, s, f = x.shape
         
-        # Reshape (B, S, 200) -> (B, S, 4, 50)
-        # 4 канала: 2 стороны (ask/bid) * 2 параметра (price/volume)
+        # Reshape (B, S, 150) -> (B, S, 3, 50)
+        # 3 канала: Price, Volume, Imbalance
         # 50 уровней стакана
-        x_reshaped = x.view(b, s, 4, self.n_levels)  # (B, S, 4, 50)
+        x_reshaped = x.view(b, s, 3, self.n_levels)  # (B, S, 3, 50)
         
         # Передаем в модель БЕЗ потери данных
-        # LOBPatching внутри модели обработает (B, S, 4, 50)
+        # LOBPatching внутри модели обработает (B, S, 3, 50)
         return self.model(x_reshaped)
 
 def convert_to_fp16(onnx_path, output_path):
@@ -165,6 +165,16 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
     else:
         metadata = {}
     
+    # Проверяем, есть ли optuna_config.json с best_seq_len (Задача 055)
+    optuna_config_path = Path(output_path).parent / "optuna_config.json"
+    if optuna_config_path.exists():
+        with open(optuna_config_path, 'r') as f:
+            optuna_config = json.load(f)
+            best_seq_len = optuna_config.get('best_seq_len', seq_len)
+            if best_seq_len != seq_len:
+                print(f"Found Optuna best_seq_len: {best_seq_len} (overriding default {seq_len})")
+                seq_len = best_seq_len
+    
     # 3. Температура
     if embed_temperature and temperature is not None:
         print(f"Embedding temperature scaling (T={temperature:.4f}) into ONNX graph...")
@@ -179,15 +189,15 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         
         model = ModelWithTemperature(model, temperature)
     
-    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 200) -> (B, S, 4, 50)
-    # Согласно плану 031: 200 = 50 уровней * 2 стороны * 2 параметра = 4 канала
-    in_channels = 4  # Жестко 4 канала согласно плану
+    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 150) -> (B, S, 3, 50)
+    # Согласно плану 053: 150 = 50 уровней * 3 канала (Price, Volume, Imbalance)
+    in_channels = 3  # 3 канала согласно плану 053
     n_levels = 50  # Стандартное значение
     export_model = ExportWrapper(model, in_channels=in_channels, n_levels=n_levels)
     export_model.eval()
     
-    # 5. Dummy input - форма (1, 100, 200) согласно плану
-    dummy_input = torch.randn(1, seq_len, 200)
+    # 5. Dummy input - форма (1, 100, 150) согласно плану 053
+    dummy_input = torch.randn(1, seq_len, 150)
     
     # Проверяем, использует ли модель regime embedding
     num_regimes = getattr(model, 'num_regimes', 0)
@@ -282,16 +292,21 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
     num_horizons = getattr(model, 'num_horizons', 1)
     use_horizon_embedding = getattr(model, 'use_horizon_embedding', False)
     
-    # Согласно плану 031: входной формат (B, S, 200) = (B, S, 4, 50)
-    # где 4 = 2 стороны * 2 параметра (price, volume)
+    # Согласно плану 053: входной формат (B, S, 150) = (B, S, 3, 50)
+    # где 3 = каналы (Price, Volume, Imbalance)
     # 50 = уровни стакана
     
-    metadata.update({
-        "model_name": "LiT",
+    # Структурируем metadata для совместимости с Rust кодом (Задача 055)
+    model_params = {
         "seq_len": seq_len,
         "n_levels": n_levels,
-        "in_channels": in_channels,  # 4 канала согласно плану
+        "in_channels": in_channels,  # 3 канала согласно плану 053
         "past_returns_lags": past_returns_lags,
+    }
+    
+    # Сохраняем дополнительные метаданные для отладки и мониторинга
+    export_metadata = {
+        "model_name": "LiT",
         "activation": activation,
         "onnx_file": Path(output_path).name,
         "temperature_embedded": embed_temperature,
@@ -304,10 +319,14 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         "num_horizons": num_horizons,
         "use_horizon_embedding": use_horizon_embedding,
         "multi_horizon": num_horizons > 1,
-        "input_shape": [1, seq_len, 200],
-        "input_format": "flat_lob",
-        "input_description": "Flat LOB buffer: 50 levels * 2 sides * 2 params (price, volume) = 200 features"
-    })
+        "input_shape": [1, seq_len, 150],
+        "input_format": "flat_lob_3ch",
+        "input_description": "Flat LOB buffer: 50 levels * 3 channels (Price, Volume, Imbalance) = 150 features"
+    }
+    
+    # Объединяем с существующей metadata (если есть)
+    metadata.update(export_metadata)
+    metadata["model_params"] = model_params
     
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=4)

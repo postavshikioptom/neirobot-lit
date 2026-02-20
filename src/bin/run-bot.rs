@@ -1029,7 +1029,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     });
 
     // 6. Основной цикл обработки
-    let ob = OrderBook::new(&args.symbol);
+    let mut ob = OrderBook::new(&args.symbol);
     info!("Bot is ready and waiting for market data for {}...", args.symbol);
 
     // Задача 174: Канал для периодической проверки прав API
@@ -1524,6 +1524,11 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                         );
                         
                         if let Err(e) = handle_market_update(update, &mut ob, &mut tensor_builder, engine, execution, rest_client, &config.exchange, ws_reconnect_tx.clone()).await {
+                            if e.to_string().contains("Checksum mismatch") {
+                                // При ошибке checksum — выходим из цикла, чтобы сработал реконнект
+                                error!("[{}] Checksum error, restarting loop...", symbol);
+                                break;
+                            }
                             if execution.risk_manager.is_blocked {
                                 error!("[{}] HARD STOP: RiskManager blocked. Triggering emergency market close...", symbol);
                                 if let Err(he) = execution.emergency_market_close(rest_client, &config.exchange).await {
@@ -1767,7 +1772,16 @@ async fn handle_market_update(
     };
 
     // 2. Валидация Checksum (Задача 049)
-    // if !validate_checksum(ob, &update) { bail!("Checksum mismatch"); }
+    if exchange_config.websocket.verify_checksum {
+        if let Some(expected_cs) = update.checksum {
+            if !ob.verify_checksum(expected_cs) {
+                tracing::error!("[{}] Checksum mismatch! Triggering reconnect...", execution.symbol);
+                // Отправляем сигнал на немедленный реконнект в WebSocket
+                let _ = ws_reconnect_tx.send(crate::data::websocket::ReconnectSignal::Immediate).await;
+                return Err(anyhow::anyhow!("Checksum mismatch"));
+            }
+        }
+    }
 
     // 3. Применяем обновление в стакан
     let start_lob = std::time::Instant::now();
@@ -1778,63 +1792,6 @@ async fn handle_market_update(
     // Задача 191: Получаем lock-free снапшот для чтения данных
     // Это гарантирует, что весь цикл Inference -> Execution работает с одним неизменным срезом данных
     let snapshot = ob.current_snapshot.load();
-    
-    // 3.1. Проверка контрольной суммы (Задача 180)
-    if execution.bot_config.risk.checksum_validation_enabled {
-        if let Some(expected_cs) = update.checksum {
-            if snapshot.checksum != expected_cs {
-                tracing::error!(
-                    "[{}] Checksum mismatch! Expected: {}, Calculated: {}",
-                    execution.symbol, expected_cs, snapshot.checksum
-                );
-                
-                // Вызываем обработчик несоответствия в HealthMonitor
-                if execution.risk_manager.health_monitor.checksum_mismatch() {
-                    // Достигнут лимит ошибок - требуется полный ресинк
-                    tracing::warn!("[{}] Max checksum mismatches reached. Initiating Full Recovery Cycle...", execution.symbol);
-                    
-                    // 1. Блокируем торговлю
-                    execution.risk_manager.is_blocked = true;
-                    
-                    // 2. Очищаем стакан
-                    ob.clear();
-                    
-                    // 3. Запрос нового снимка через REST
-                    match rest_client.fetch_orderbook(
-                        &exchange_config.bybit.category,
-                        &execution.symbol,
-                        50
-                    ).await {
-                        Ok(snapshot) => {
-                            // 4. Применяем снимок
-                            ob.apply_update(&snapshot);
-                            
-                            // 5. Сброс флага коррупции и счетчика checksum
-                            execution.risk_manager.health_monitor.reset_corruption();
-                            execution.risk_manager.is_blocked = false;
-                            
-                            tracing::info!(
-                                "[{}] Full Recovery Cycle completed successfully after checksum mismatches. New last_update_id: {}", 
-                                execution.symbol, snapshot.last_update_id
-                            );
-                            
-                            // 6. Переподключение WebSocket (задача 048)
-                            // Отправляем сигнал на переподключение
-                            if let Err(e) = ws_reconnect_tx.send(crate::data::websocket::ReconnectSignal::Immediate).await {
-                                tracing::error!("[{}] Failed to send reconnect signal: {}", execution.symbol, e);
-                            }
-                            
-                            return Ok(());
-                        },
-                        Err(e) => {
-                            tracing::error!("[{}] Full Recovery Cycle failed after checksum mismatches: {}. Critical shutdown.", execution.symbol, e);
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-    }
     
     // 3.2. Проверка последовательности обновлений (Задача 171)
     if execution.risk_manager.health_monitor.check_u(update.last_update_id) {

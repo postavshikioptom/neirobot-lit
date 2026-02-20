@@ -93,38 +93,38 @@ def validate_precision(fp32_path, fp16_path, dummy_input):
 
 def export():
     parser = argparse.ArgumentParser(description="Export LiT model to ONNX with FP16 support")
-    parser.add_argument("--symbol", type=str, required=True, help="Symbol of the model")
-    parser.add_argument("--checkpoint", type=str, help="Path to specific checkpoint")
-    parser.add_argument("--output_dir", type=str, help="Directory to save exported files")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to model checkpoint file")
+    parser.add_argument("--config_path", type=str, required=True, help="Path to config file (YAML/TOML)")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save exported files")
     parser.add_argument("--fp16", action="store_true", help="Convert model to FP16 for faster inference")
     parser.add_argument("--signal_only", action="store_true", default=True, help="Export only logits head (exclude volatility)")
     args = parser.parse_args()
 
-    base_path = Path(__file__).parent.parent.parent
-    symbol_dir = base_path / "bots" / args.symbol
+    model_path = Path(args.model_path)
+    config_path = Path(args.config_path)
+    models_dir = Path(args.output_dir)
     
-    models_dir = Path(args.output_dir) if args.output_dir else symbol_dir / "models"
-    checkpoint_dir = models_dir / "checkpoints"
+    # Создаем директорию вывода, если её нет
+    models_dir.mkdir(parents=True, exist_ok=True)
+    
     norm_params_path = models_dir / "norm_params.json"
-    
     output_onnx = models_dir / "model.onnx"
     output_metadata = models_dir / "metadata.json"
 
-    # 1. Поиск чекпоинта
-    ckpt_path = args.checkpoint
-    if not ckpt_path:
-        ckpts = list(checkpoint_dir.glob("*.ckpt"))
-        if not ckpts:
-            print(f"No checkpoints found in {checkpoint_dir}")
-            return
-        ckpts.sort(key=lambda x: x.name, reverse=True)
-        ckpt_path = str(ckpts[0])
+    # 1. Проверка существования файлов
+    if not model_path.exists():
+        print(f"Error: Model checkpoint not found at {model_path}")
+        return
+    
+    if not config_path.exists():
+        print(f"Error: Config file not found at {config_path}")
+        return
 
-    print(f"Loading checkpoint: {ckpt_path}")
+    print(f"Loading checkpoint: {model_path}")
 
     # 2. Загрузка модели
     try:
-        module = LiTModule.load_from_checkpoint(ckpt_path, map_location="cpu")
+        module = LiTModule.load_from_checkpoint(str(model_path), map_location="cpu")
         module.eval()
         module.freeze()
     except Exception as e:
@@ -138,6 +138,15 @@ def export():
     num_layers = hparams.get("num_layers", 2)
     past_returns_lags = hparams.get("past_returns_lags", [])
     n_channels = 3 + len(past_returns_lags)
+    
+    # Динамически извлекаем n_levels из модели (подзадача 2)
+    n_levels = hparams.get("n_levels", 50)
+    
+    # Динамически извлекаем patch_size из модели (подзадача 3)
+    patch_size = hparams.get("patch_size", None)
+    
+    # Динамически определяем output_classes (подзадача 4)
+    output_classes = hparams.get("num_classes", hparams.get("output_classes", 3))
 
     # 3. Загрузка параметров нормализации
     if not norm_params_path.exists():
@@ -154,7 +163,6 @@ def export():
         return
 
     # 4. Формирование списков mean/std и robust параметров (Задача 240)
-    n_levels = 50
     means = []
     stds = []
     medians = []  # Задача 240
@@ -262,16 +270,16 @@ def export():
         "model_name": "LiT",
         "model_params": {
             "architecture": "LiT-Transformer",
-            "symbol": args.symbol,
             "seq_len": seq_len,
             "n_levels": n_levels,
             "in_channels": n_channels,
             "d_model": d_model,
             "nhead": nhead,
             "num_layers": num_layers,
+            "patch_size": patch_size,
             "feature_order": ["price", "volume", "imbalance"],
-            "output_classes": 3,
-            "label_map": {"0": "Up", "1": "Down", "2": "Flat"},
+            "output_classes": output_classes,
+            "label_map": {"0": "Flat", "1": "Up", "2": "Down"},
             "precision": final_precision,
             "quantized": args.fp16,
             "onnx_opset": 18

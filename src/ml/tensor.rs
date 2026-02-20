@@ -332,34 +332,61 @@ impl TensorBuilder {
             anyhow::bail!("Expected 200 raw features, got {}", raw.len());
         }
 
-        // 2. Feature Engineering (как в плане 035)
-        let mut features = raw.clone();
-        for i in (0..features.len()).step_by(2) {
-            let price = features[i];
-            let vol = features[i+1];
+        // TODO: Зеркальная реализация 053. Канал 2: (Vbid - Vask) / (Vbid + Vask + 1e-7).
+        // Консистентность с Python dataset.py должна быть 100%.
+        // Структура: [ask_p_0..49, ask_v_0..49, bid_p_0..49, bid_v_0..49]
+        // Выход: [price_0..49, vol_0..49, imb_0..49] (3 канала * 50 уровней = 150 фич)
 
-            // Relative Price: (p - mid) / mid
-            features[i] = if mid > 0.0 { (price - mid) / mid } else { 0.0 };
-            // Log Volume: ln(1 + vol)
-            features[i+1] = (1.0 + vol).ln();
+        // 2. Разделяем на компоненты согласно плану 053
+        // ВАЖНО: Формат данных из get_flat_snapshot() - чередующийся (interleaved):
+        // Индексы 0-99: [ask_p_0, ask_v_0, ask_p_1, ask_v_1, ..., ask_p_49, ask_v_49]
+        // Индексы 100-199: [bid_p_0, bid_v_0, bid_p_1, bid_v_1, ..., bid_p_49, bid_v_49]
+        let mut ask_p = vec![0.0; 50];
+        let mut ask_v = vec![0.0; 50];
+        let mut bid_p = vec![0.0; 50];
+        let mut bid_v = vec![0.0; 50];
+        
+        for i in 0..50 {
+            ask_p[i] = raw[i * 2];           // Индексы: 0, 2, 4, ..., 98
+            ask_v[i] = raw[i * 2 + 1];       // Индексы: 1, 3, 5, ..., 99
+            bid_p[i] = raw[100 + i * 2];     // Индексы: 100, 102, ..., 198
+            bid_v[i] = raw[100 + i * 2 + 1]; // Индексы: 101, 103, ..., 199
         }
 
-        // 3. Нормализация (Z-score)
+        // 3. Вычисляем 3 канала согласно плану 053
+        let mut features = vec![0.0; 150]; // 3 канала * 50 уровней
+        
+        for i in 0..50 {
+            // Канал 0: Normalized Price (среднее отклонение)
+            let price_ch = (ask_p[i] + bid_p[i]) / 2.0;
+            features[i] = price_ch;
+            
+            // Канал 1: Log Volume
+            let vol_ch = ask_v[i] + bid_v[i];
+            features[50 + i] = vol_ch;
+            
+            // Канал 2: Static Level Imbalance
+            // Формула: (Vbid - Vask) / (Vbid + Vask + eps)
+            let imb_ch = (bid_v[i] - ask_v[i]) / (bid_v[i] + ask_v[i] + 1e-7);
+            features[100 + i] = imb_ch;
+        }
+
+        // 4. Нормализация (Z-score)
         self.normalizer.normalize(&mut features);
 
-        // 4. Валидация (NaN/Inf check) ПОСЛЕ нормализации
+        // 5. Валидация (NaN/Inf check) ПОСЛЕ нормализации
         for val in &features {
             if !val.is_finite() {
                 anyhow::bail!("Invalid feature value detected (NaN or Inf) after normalization");
             }
         }
 
-        // 5. Обновляем скользящее окно
+        // 6. Обновляем скользящее окно
         self.add_snapshot(features);
 
-        // 6. Возвращаем тензор только если окно заполнено
+        // 7. Возвращаем тензор только если окно заполнено
         if self.history.len() == self.seq_len {
-            // Плоский вектор: [snapshot_0 (200), snapshot_1 (200), ..., snapshot_N]
+            // Плоский вектор: [snapshot_0 (150), snapshot_1 (150), ..., snapshot_N (150)]
             let flattened: Vec<f32> = self.history.iter().flatten().cloned().collect();
             Ok(Some(flattened))
         } else {
@@ -378,8 +405,8 @@ mod tests {
     /// Unit Test: Проверяем, что process_snapshot возвращает None пока окно не заполнено
     #[test]
     fn test_returns_none_until_window_full() {
-        let mean = vec![0.0; 200];
-        let std = vec![1.0; 200];
+        let mean = vec![0.0; 150];
+        let std = vec![1.0; 150];
         let normalizer = Normalizer::new(mean, std);
         
         let seq_len = 3;
@@ -427,15 +454,15 @@ mod tests {
         assert!(result.is_some(), "Expected Some for third snapshot");
         
         let tensor = result.unwrap();
-        // Проверяем размер: seq_len * 200
-        assert_eq!(tensor.len(), seq_len * 200);
+        // Проверяем размер: seq_len * 150 (3 канала * 50 уровней)
+        assert_eq!(tensor.len(), seq_len * 150);
     }
 
-    /// Test: Проверяем, что возвращается плоский вектор размером seq_len * 200
+    /// Test: Проверяем, что возвращается плоский вектор размером seq_len * 150
     #[test]
     fn test_returns_flat_vector() {
-        let mean = vec![0.0; 200];
-        let std = vec![1.0; 200];
+        let mean = vec![0.0; 150];
+        let std = vec![1.0; 150];
         let normalizer = Normalizer::new(mean, std);
         
         let seq_len = 2;
@@ -476,15 +503,15 @@ mod tests {
         assert!(result.is_some());
         let tensor = result.unwrap();
         
-        // Проверяем размер
-        assert_eq!(tensor.len(), seq_len * 200, "Expected flat vector of size {}", seq_len * 200);
+        // Проверяем размер: seq_len * 150 (3 канала * 50 уровней)
+        assert_eq!(tensor.len(), seq_len * 150, "Expected flat vector of size {}", seq_len * 150);
     }
 
     /// Test: Проверяем, что валидация работает ПОСЛЕ нормализации
     #[test]
     fn test_validation_after_normalization() {
-        let mean = vec![0.0; 200];
-        let std = vec![1.0; 200];
+        let mean = vec![0.0; 150];
+        let std = vec![1.0; 150];
         let normalizer = Normalizer::new(mean, std);
         
         let seq_len = 1;

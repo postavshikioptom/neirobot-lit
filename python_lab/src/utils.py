@@ -675,7 +675,7 @@ def plot_feature_importance_bar(importance_dict, top_k=20, save_path=None):
 def plot_lob_importance_heatmap(importance_dict, n_levels=50, save_path=None):
     """
     Строит heatmap важности признаков для LOB данных.
-    Матрица: 50 уровней (Y-ось) × 4 канала (X-ось: Ask_P, Ask_V, Bid_P, Bid_V).
+    Матрица: 50 уровней (Y-ось) × 3 канала (X-ось: Price, Volume, Imbalance).
     
     Args:
         importance_dict: словарь с результатами важности признаков
@@ -683,9 +683,9 @@ def plot_lob_importance_heatmap(importance_dict, n_levels=50, save_path=None):
         save_path: путь для сохранения графика
     """
     # Создаем матрицу важности
-    # Строки: уровни (0-49), Столбцы: каналы (ask_p, ask_v, bid_p, bid_v)
-    channel_names = ['ask_p', 'ask_v', 'bid_p', 'bid_v']
-    importance_matrix = np.zeros((n_levels, 4))
+    # Строки: уровни (0-49), Столбцы: каналы (price, volume, imbalance)
+    channel_names = ['price', 'volume', 'imbalance']
+    importance_matrix = np.zeros((n_levels, 3))
     
     # Заполняем матрицу
     for feature_name, data in importance_dict.items():

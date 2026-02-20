@@ -16,16 +16,16 @@ class LOBPatching(nn.Module):
         # Динамический расчет размерностей на основе параметров
         # Согласно плану 026: num_features = in_channels * n_levels
         self.num_features = in_channels * n_levels
-        # После Conv1d(kernel=2, stride=2): num_patches = num_features // 2
-        self.num_patches = self.num_features // 2
+        # После Conv1d(kernel=in_channels, stride=in_channels): num_patches = num_features // in_channels = n_levels
+        self.num_patches = self.num_features // in_channels
         
-        # 1. Vertical Patching: Объединяем пары (цена, объем) через Conv1d
+        # 1. Vertical Patching: Объединяем все каналы одного уровня через Conv1d
         # Вход: (Batch*Seq, 1, num_features) -> Выход: (Batch*Seq, d_model, num_patches)
-        # kernel_size=2, stride=2 объединяет каждые 2 фичи в один токен
-        self.patch_conv = nn.Conv1d(1, d_model, kernel_size=2, stride=2)
+        # kernel_size=in_channels, stride=in_channels объединяет все каналы одного уровня в один токен
+        self.patch_conv = nn.Conv1d(1, d_model, kernel_size=in_channels, stride=in_channels)
         
         # 2. Level Positional Embedding (динамический размер по плану 026)
-        # После Conv1d(kernel=2, stride=2) получаем num_patches токенов
+        # После Conv1d(kernel=in_channels, stride=in_channels) получаем num_patches токенов
         self.level_pos_emb = nn.Parameter(torch.randn(1, self.num_patches, d_model) * 0.02)
         
         # 3. Temporal Positional Embedding (строго seq_len по плану 026)

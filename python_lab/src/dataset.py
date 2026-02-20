@@ -1176,18 +1176,36 @@ class LOBDataset(Dataset):
             if x_aug[0, 100] < x_aug[0, 0]:  # bid_p_0 < ask_p_0
                 x, y = x_aug, y_aug
         
+        # Реализуем расчет 3-канального тензора согласно плану 053
+        # Структура x: [ask_p_0..49, ask_v_0..49, bid_p_0..49, bid_v_0..49] (seq_len, 200)
+        ask_p = x[:, 0:50]      # (seq_len, 50)
+        ask_v = x[:, 50:100]    # (seq_len, 50)
+        bid_p = x[:, 100:150]   # (seq_len, 50)
+        bid_v = x[:, 150:200]   # (seq_len, 50)
+        
+        # Канал 0: Normalized Price (среднее отклонение)
+        # Используем уже нормализованные цены (p-mid)/mid
+        price_ch = (ask_p + bid_p) / 2.0  # (seq_len, 50)
+        
+        # Канал 1: Log Volume
+        vol_ch = ask_v + bid_v  # (seq_len, 50)
+        
+        # Канал 2: Static Level Imbalance
+        # Формула: (Vbid - Vask) / (Vbid + Vask + eps)
+        imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)  # (seq_len, 50)
+        
+        # Собираем 3-канальный тензор: (seq_len, 3, 50)
+        x_reshaped = torch.stack([price_ch, vol_ch, imb_ch], dim=1)
+        
         # Добавляем past returns если есть
         if self.n_past_returns > 0:
             past_returns = torch.from_numpy(x_raw[:, 200:200+self.n_past_returns].copy())
             # Broadcast на 50 уровней: (seq_len, n_past_returns, 50)
             past_returns_broadcast = past_returns.unsqueeze(-1).repeat(1, 1, self.n_levels)
-            # Reshape LOB features: (seq_len, 200) -> (seq_len, 4, 50)
-            x_reshaped = x.reshape(self.seq_len, 4, self.n_levels)
-            # Объединяем: (seq_len, 4+n_past_returns, 50)
+            # Объединяем: (seq_len, 3+n_past_returns, 50)
             x_final = torch.cat([x_reshaped, past_returns_broadcast], dim=1)
         else:
-            # Reshape LOB features: (seq_len, 200) -> (seq_len, 4, 50)
-            x_final = x.reshape(self.seq_len, 4, self.n_levels)
+            x_final = x_reshaped
         
         # Получаем regime_id
         regime_id = torch.tensor(self.regime_ids[idx]).long()
@@ -1288,18 +1306,36 @@ class LOBDataset(Dataset):
             if x_aug[0, 100] < x_aug[0, 0]:  # bid_p_0 < ask_p_0
                 x, y = x_aug, y_aug
         
+        # Реализуем расчет 3-канального тензора согласно плану 053
+        # Структура x: [ask_p_0..49, ask_v_0..49, bid_p_0..49, bid_v_0..49] (seq_len, 200)
+        ask_p = x[:, 0:50]      # (seq_len, 50)
+        ask_v = x[:, 50:100]    # (seq_len, 50)
+        bid_p = x[:, 100:150]   # (seq_len, 50)
+        bid_v = x[:, 150:200]   # (seq_len, 50)
+        
+        # Канал 0: Normalized Price (среднее отклонение)
+        # Используем уже нормализованные цены (p-mid)/mid
+        price_ch = (ask_p + bid_p) / 2.0  # (seq_len, 50)
+        
+        # Канал 1: Log Volume
+        vol_ch = ask_v + bid_v  # (seq_len, 50)
+        
+        # Канал 2: Static Level Imbalance
+        # Формула: (Vbid - Vask) / (Vbid + Vask + eps)
+        imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)  # (seq_len, 50)
+        
+        # Собираем 3-канальный тензор: (seq_len, 3, 50)
+        x_reshaped = torch.stack([price_ch, vol_ch, imb_ch], dim=1)
+        
         # Добавляем past returns если есть
         if self.n_past_returns > 0:
             past_returns = torch.from_numpy(x_raw[:, 200:200+self.n_past_returns].copy())
             # Broadcast на 50 уровней: (seq_len, n_past_returns, 50)
             past_returns_broadcast = past_returns.unsqueeze(-1).repeat(1, 1, self.n_levels)
-            # Reshape LOB features: (seq_len, 200) -> (seq_len, 4, 50)
-            x_reshaped = x.reshape(self.seq_len, 4, self.n_levels)
-            # Объединяем: (seq_len, 4+n_past_returns, 50)
+            # Объединяем: (seq_len, 3+n_past_returns, 50)
             x_final = torch.cat([x_reshaped, past_returns_broadcast], dim=1)
         else:
-            # Reshape LOB features: (seq_len, 200) -> (seq_len, 4, 50)
-            x_final = x.reshape(self.seq_len, 4, self.n_levels)
+            x_final = x_reshaped
         
         # Получаем вес для этого примера
         w = self.sample_weights[idx]

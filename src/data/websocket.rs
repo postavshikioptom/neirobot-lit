@@ -646,6 +646,14 @@ impl BybitWsClient {
                                             if !is_synced {
                                                 if update.is_snapshot {
                                                     info!("[{}] Received Snapshot (u={}). Synchronizing buffer...", self.symbol, update.last_update_id);
+                                                    
+                                                    // Логирование checksum для отладки (Задача 049)
+                                                    if self.config.websocket.verify_checksum {
+                                                        if let Some(remote_cs) = update.checksum {
+                                                            debug!("[{}] Snapshot received with checksum: {} (will be verified in main loop)", self.symbol, remote_cs);
+                                                        }
+                                                    }
+                                                    
                                                     is_synced = true;
                                                     last_u = update.last_update_id;
                                                     
@@ -665,6 +673,7 @@ impl BybitWsClient {
                                                             error!("[{}] Gap detected in init buffer: {} -> {}. Reconnecting...", self.symbol, last_u, delta.last_update_id);
                                                             return Err(anyhow::anyhow!("Init buffer sequence gap"));
                                                         }
+                                                        
                                                         last_u = delta.last_update_id;
                                                         if let Err(e) = tx.try_send(WsData::OrderBook(delta)) {
                                                             error!("[{}] Failed to send buffered delta to channel: {}", self.symbol, e);
@@ -686,6 +695,7 @@ impl BybitWsClient {
                                                     error!("[{}] Sequence gap: {} -> {}. Reconnecting...", self.symbol, last_u, update.last_update_id);
                                                     return Err(anyhow::anyhow!("Sequence gap"));
                                                 }
+                                                
                                                 last_u = update.last_update_id;
                                                 if let Err(e) = tx.try_send(WsData::OrderBook(update)) {
                                                     error!("[{}] Channel overflow or closed for {}: {}", self.symbol, self.symbol, e);
