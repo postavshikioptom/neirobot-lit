@@ -1605,7 +1605,7 @@ impl ExecutionEngine {
         debug!("[{}] Current OBI: {:.4}", self.symbol, current_obi);
 
         // 4. Фильтрация сигнала по порогам вероятности (Задача 044)
-        let effective_signal = self.filter_signal(&output);
+        let effective_signal = self.filter_signal(&fused_probs);
         
         // Задача 201: Создаем SignalWithTimestamp для замера latency
         let signal_with_ts = crate::ml::types::SignalWithTimestamp {
@@ -1802,11 +1802,11 @@ impl ExecutionEngine {
 
     /// Превращает вероятности в сигнал на основе асимметричных порогов
     /// Задача 101: Использование long_threshold и short_threshold вместо единых порогов
-    fn filter_signal(&self, output: &InferenceOutput) -> Signal {
+    fn filter_signal(&self, probs: &[f32; 3]) -> Signal {
         // Индексы: [0] = Flat, [1] = Up, [2] = Down
-        let prob_flat = output.probabilities[0];
-        let prob_up = output.probabilities[1];
-        let prob_down = output.probabilities[2];
+        let prob_flat = probs[0];
+        let prob_up = probs[1];
+        let prob_down = probs[2];
 
         // Конвертируем Decimal в f32 с безопасными дефолтами (Задача 101)
         let long_th = self.bot_config.long_threshold.to_f32().unwrap_or(0.6);
