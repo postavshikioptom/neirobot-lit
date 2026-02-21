@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub struct RateLimiter {
-    limiter: GovernorLimiter<NotKeyed, governor::state::direct::InMemoryState, governor::clock::DefaultClock>,
+    limiter: GovernorLimiter<NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
 }
 
 impl RateLimiter {

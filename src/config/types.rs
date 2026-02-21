@@ -454,7 +454,7 @@ pub struct GlobalConfig {
     pub default_chat_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GeneralConfig {
     #[serde(default = "default_env")]
     pub env: String,
@@ -468,7 +468,7 @@ impl Default for GeneralConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -514,7 +514,7 @@ fn default_latency_report_interval() -> u64 { 60 }
 fn default_logger_queue_size() -> usize { 10_000 }
 fn default_log_retention_days() -> u64 { 7 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TradingDefaultsConfig {
     #[serde(default = "default_max_latency")]
     pub max_latency_ms: u64,

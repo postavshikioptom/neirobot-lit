@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
+use rand::thread_rng;
 
 #[inline(always)]
 pub fn now_ms() -> u64 {
@@ -425,7 +426,7 @@ mod clock_skew_tests {
 pub async fn apply_backoff(attempt: u32, base_ms: u64) {
     use rand::Rng;
     
-    let mut rng = rand::thread_rng();
+    let mut rng = thread_rng();
     let jitter = rng.gen_range(0..100);
     
     // Экспоненциальный расчет: base_ms * 2^attempt

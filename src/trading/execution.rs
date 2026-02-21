@@ -3,7 +3,7 @@ use crate::trading::order_manager::OrderManager;
 use crate::trading::position_manager::{PositionManager, Position};
 use crate::trading::rest_client::BybitRestClient;
 use crate::risk::risk_manager::RiskManager;
-use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState};
+use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus};
 use crate::config::types::{BotConfig, ExchangeConfig};
 use crate::utils::trade_logger::TradeRecord;
 use crate::data::orderbook::OrderBook;
@@ -1525,7 +1525,7 @@ impl ExecutionEngine {
         }
 
         // 0. Слияние предсказаний для разных горизонтов
-        let fused_probs = self.fuse_probs(&output)?;
+        let fused_probs = self.fuse_probs(&output).await?;
         self.last_probabilities = fused_probs;
         
         let mid_price = (best_bid + best_ask) / Decimal::from(2);
@@ -1739,7 +1739,7 @@ impl ExecutionEngine {
     }
 
     /// Слияние предсказаний для разных временных горизонтов
-    fn fuse_probs(&self, output: &InferenceOutput) -> Result<[f32; 3]> {
+    async fn fuse_probs(&self, output: &InferenceOutput) -> Result<[f32; 3]> {
         use crate::config::types::FusionMethod;
         
         let num_horizons = output.probs.shape()[0];
@@ -2077,6 +2077,8 @@ impl ExecutionEngine {
             );
             return Ok(());
         }
+
+        let mut final_qty = qty;
 
         // Задача №198: Консолидированная проверка рисков через статическую диспетчеризацию
         let intent = crate::risk::risk_manager::OrderIntent {

@@ -181,6 +181,18 @@ pub struct RiskOrderInfo {
     pub link_id: Option<String>,
 }
 
+/// Информация об ордере для REST API (упрощенная версия)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderInfo {
+    pub side: OrderSide,
+    pub price: Decimal,
+    pub qty: Decimal,
+    pub status: OrderStatus,
+    pub chase_count: usize,
+    pub last_chase_ts: i64,
+    pub link_id: Option<String>,
+}
+
 /// Type alias для обратной совместимости
 pub type BotState = RiskState;
 
