@@ -424,8 +424,6 @@ mod clock_skew_tests {
 /// - Добавляет случайный джиттер (0..100 мс) для предотвращения "thundering herd"
 /// - Ограничивает максимальное время ожидания 60 секундами
 pub async fn apply_backoff(attempt: u32, base_ms: u64) {
-    use rand::Rng;
-    
     let mut rng = thread_rng();
     let jitter = rng.gen_range(0..100);
     

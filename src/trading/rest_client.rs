@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::sync::Arc;
 use std::str::FromStr;
-use anyhow::{Result, Context, bail};
+use anyhow::{Result, Context};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use secrecy::{Secret, ExposeSecret};
@@ -27,7 +26,7 @@ impl std::fmt::Display for BybitError {
 
 impl std::error::Error for BybitError {}
 
-use crate::trading::types::{ExchangeConfig, MarketInfo, OrderSide, AmendOrderResult, SymbolInfo, LotFilter, PriceFilter};
+use crate::trading::types::{ExchangeConfig, MarketInfo, AmendOrderResult, SymbolInfo, LotFilter};
 use crate::utils::rate_limiter::{RateLimiter, RateLimitTracker, LimitCategory};
 use crate::utils::backoff::ExponentialBackoff;
 

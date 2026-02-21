@@ -1,9 +1,10 @@
 use crate::ml::types::{Signal, InferenceOutput};
 use crate::trading::order_manager::OrderManager;
 use crate::trading::position_manager::{PositionManager, Position};
-use crate::trading::rest_client::BybitRestClient;
+use crate::trading::rest_client::{BybitRestClient, BybitRestClientTrait};
 use crate::risk::risk_manager::RiskManager;
-use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus};
+use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest};
+use crate::trading::types::BotState;
 use crate::config::types::{BotConfig, ExchangeConfig};
 use crate::utils::trade_logger::TradeRecord;
 use crate::data::orderbook::OrderBook;

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::sync::mpsc;
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};

@@ -1440,7 +1440,7 @@ impl OrderManager {
                 format!(
                     "🚨 CRITICAL: Margin error {} on {}. All orders cancelled, position size reduced to {:.1}%",
                     error_code,
-                    symbol,
+                    bot_config.symbol,
                     bot_config.risk.margin_penalty_multiplier * 100.0
                 ),
                 "MarginErrorRecovery".to_string(),

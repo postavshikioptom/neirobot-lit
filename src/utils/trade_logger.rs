@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use std::path::PathBuf;
 use std::fs::OpenOptions;
 use tracing::{info, error};
-use anyhow::{Result, Context};
+use anyhow::Result;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct TradeRecord {

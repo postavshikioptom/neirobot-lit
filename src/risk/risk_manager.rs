@@ -10,6 +10,9 @@ use std::time::Instant;
 use std::path::{Path, PathBuf};
 use crate::risk::health_monitor::HealthMonitor;
 use crate::risk::pnl_stats::PnlStats;
+use crate::config::types::{PriceReferenceSource, RiskConfig};
+use crate::trading::types::OrderSide;
+use crate::trading::position_manager::Position;
 
 use tracing::{info, warn, debug, error};
 

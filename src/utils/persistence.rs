@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::trading::position_manager::Position;
 use crate::trading::types::OrderSide;

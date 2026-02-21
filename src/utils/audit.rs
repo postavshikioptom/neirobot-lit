@@ -3,16 +3,16 @@
 //! Реализует систему логирования с криптографической цепочкой HMAC-SHA256.
 //! Каждая запись связана с предыдущей через хеш, образуя неизменяемую цепочку.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use csv::Writer;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, warn};
+use tracing::info;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
