@@ -7,7 +7,7 @@ pub mod execution;
 pub mod rest_client;
 pub mod emergency;
 pub mod regime_detector;
-pub mod state_persistence;
+pub mod state;
 
 pub use types::*;
 // Экспортируем новую Order как основную
@@ -19,4 +19,5 @@ pub use position_manager::*;
 pub use execution::*;
 pub use rest_client::{BybitRestClient, BybitRestClientTrait, BybitOrderListResponse, RemoteOrder};
 pub use regime_detector::RegimeDetector;
-pub use state_persistence::{BotState, BotStateData, StatePersistenceManager};
+pub use state::{BotStateData, PersistentState, StatePersistenceManager, save_state, load_state};
+// BotState берется из types.rs (pub type BotState = RiskState)

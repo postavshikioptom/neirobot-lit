@@ -7,7 +7,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
 
-/// Структура для хранения данных состояния бота
+// Импортируем BotState из types.rs (pub type BotState = RiskState)
+use crate::trading::types::BotState;
+
+/// Структура для хранения данных состояния бота (для StatePersistenceManager)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotStateData {
     /// Текущая позиция (в контрактах или базовых единицах)
@@ -31,9 +34,9 @@ impl Default for BotStateData {
     }
 }
 
-/// Полная структура состояния с версией, временем и чексуммой
+/// Полная структура состояния с версией, временем и чексуммой (для StatePersistenceManager)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BotState {
+pub struct PersistentState {
     /// Версия схемы для миграций
     pub version: u32,
     /// Время сохранения (Unix timestamp в миллисекундах)
@@ -44,7 +47,7 @@ pub struct BotState {
     pub checksum: String,
 }
 
-impl BotState {
+impl PersistentState {
     /// Создать новое состояние с вычислением чексуммы
     pub fn new(data: BotStateData) -> Result<Self> {
         let checksum = Self::compute_checksum(&data)?;
@@ -97,7 +100,7 @@ impl StatePersistenceManager {
     }
 
     /// Сохранить состояние атомарно с ротацией бэкапов
-    pub fn save_state(&self, state: &BotState) -> Result<()> {
+    pub fn save_state(&self, state: &PersistentState) -> Result<()> {
         // Захватить эксклюзивную блокировку на файл состояния
         let lock_file = self.state_dir.join("state.lock");
         let mut lock = OpenOptions::new()
@@ -116,7 +119,7 @@ impl StatePersistenceManager {
     }
 
     /// Внутренняя функция сохранения (вызывается с захватанной блокировкой)
-    fn _save_state_locked(&self, state: &BotState) -> Result<()> {
+    fn _save_state_locked(&self, state: &PersistentState) -> Result<()> {
         // Выполнить ротацию бэкапов перед записью нового состояния
         self._rotate_backups()?;
 
@@ -180,7 +183,7 @@ impl StatePersistenceManager {
     }
 
     /// Загрузить состояние с блокировкой и проверкой целостности
-    pub fn load_state(&self) -> Result<BotState> {
+    pub fn load_state(&self) -> Result<PersistentState> {
         // Захватить эксклюзивную блокировку на файл состояния
         let lock_file = self.state_dir.join("state.lock");
         let mut lock = OpenOptions::new()
@@ -199,7 +202,7 @@ impl StatePersistenceManager {
     }
 
     /// Внутренняя функция загрузки (вызывается с захватанной блокировкой)
-    fn _load_state_locked(&self) -> Result<BotState> {
+    fn _load_state_locked(&self) -> Result<PersistentState> {
         // Попытаться загрузить основной файл состояния
         if self.state_file.exists() {
             match self._load_and_verify_state(&self.state_file) {
@@ -237,16 +240,16 @@ impl StatePersistenceManager {
 
         // Все копии повреждены или отсутствуют
         error!("All state files are corrupted or missing. Initializing empty state.");
-        Ok(BotState::new(BotStateData::default())?)
+        Ok(PersistentState::new(BotStateData::default())?)
     }
 
     /// Загрузить и проверить целостность файла состояния
-    fn _load_and_verify_state(&self, path: &Path) -> Result<BotState> {
+    fn _load_and_verify_state(&self, path: &Path) -> Result<PersistentState> {
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
 
-        let state: BotState = serde_json::from_str(&contents)?;
+        let state: PersistentState = serde_json::from_str(&contents)?;
 
         // Проверить целостность
         if !state.verify_checksum()? {
@@ -285,13 +288,51 @@ impl StatePersistenceManager {
     }
 }
 
+// ============================================================================
+// Функции для работы с BotState из types.rs (Задача 107)
+// ============================================================================
+
+/// Сохранить состояние бота в файл атомарно
+/// 
+/// Использует паттерн write-to-temp + rename для обеспечения атомарности.
+/// Это предотвращает повреждение файла при внезапном отключении питания.
+pub fn save_state(state: &BotState, path: &Path) -> Result<()> {
+    let tmp_path = path.with_extension("tmp");
+    
+    // Создаем директории, если их нет
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| anyhow!("Failed to create directories: {}", e))?;
+    }
+    
+    let file = File::create(&tmp_path).map_err(|e| anyhow!("Failed to create tmp file: {}", e))?;
+    
+    // Пишем красиво для дебага
+    serde_json::to_writer_pretty(file, state)?;
+    
+    // Атомарный перенос
+    fs::rename(tmp_path, path).map_err(|e| anyhow!("Failed to rename state file: {}", e))?;
+    Ok(())
+}
+
+/// Загрузить состояние бота из файла
+/// 
+/// Если файл не существует, возвращает состояние по умолчанию.
+pub fn load_state(path: &Path) -> Result<BotState> {
+    if !path.exists() {
+        return Ok(BotState::default());
+    }
+    let file = File::open(path)?;
+    let state = serde_json::from_reader(file)?;
+    Ok(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
     #[test]
-    fn test_state_checksum_verification() -> Result<()> {
+    fn test_persistent_state_checksum_verification() -> Result<()> {
         let data = BotStateData {
             position: 1.5,
             pnl: 100.0,
@@ -299,14 +340,14 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         };
 
-        let state = BotState::new(data)?;
+        let state = PersistentState::new(data)?;
         assert!(state.verify_checksum()?);
 
         Ok(())
     }
 
     #[test]
-    fn test_state_checksum_corruption_detection() -> Result<()> {
+    fn test_persistent_state_checksum_corruption_detection() -> Result<()> {
         let data = BotStateData {
             position: 1.5,
             pnl: 100.0,
@@ -314,7 +355,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         };
 
-        let mut state = BotState::new(data)?;
+        let mut state = PersistentState::new(data)?;
         // Испортить чексумму
         state.checksum = "corrupted_checksum".to_string();
         assert!(!state.verify_checksum()?);
@@ -328,7 +369,7 @@ mod tests {
         let manager = StatePersistenceManager::new(temp_dir.path(), 3)?;
 
         // Сохранить первое состояние
-        let state1 = BotState::new(BotStateData {
+        let state1 = PersistentState::new(BotStateData {
             position: 1.0,
             pnl: 50.0,
             active_order_ids: vec!["order1".to_string()],
@@ -337,7 +378,7 @@ mod tests {
         manager.save_state(&state1)?;
 
         // Сохранить второе состояние
-        let state2 = BotState::new(BotStateData {
+        let state2 = PersistentState::new(BotStateData {
             position: 2.0,
             pnl: 100.0,
             active_order_ids: vec!["order1".to_string(), "order2".to_string()],
@@ -363,7 +404,7 @@ mod tests {
         let manager = StatePersistenceManager::new(temp_dir.path(), 3)?;
 
         // Сохранить валидное состояние
-        let state1 = BotState::new(BotStateData {
+        let state1 = PersistentState::new(BotStateData {
             position: 1.0,
             pnl: 50.0,
             active_order_ids: vec!["order1".to_string()],
@@ -372,7 +413,7 @@ mod tests {
         manager.save_state(&state1)?;
 
         // Сохранить второе состояние
-        let state2 = BotState::new(BotStateData {
+        let state2 = PersistentState::new(BotStateData {
             position: 2.0,
             pnl: 100.0,
             active_order_ids: vec!["order2".to_string()],
@@ -381,7 +422,7 @@ mod tests {
         manager.save_state(&state2)?;
 
         // Испортить основной файл
-        let mut corrupted_json = serde_json::json!({
+        let corrupted_json = serde_json::json!({
             "version": 1,
             "timestamp": 0,
             "data": {
@@ -412,7 +453,7 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let manager = StatePersistenceManager::new(temp_dir.path(), 3)?;
 
-        let state = BotState::new(BotStateData {
+        let state = PersistentState::new(BotStateData {
             position: 1.0,
             pnl: 50.0,
             active_order_ids: vec!["order1".to_string()],
@@ -433,6 +474,72 @@ mod tests {
         // Должны быть в состоянии захватить блокировку
         lock.lock_exclusive()?;
         lock.unlock()?;
+
+        Ok(())
+    }
+
+    // Тесты для функций save_state/load_state (Задача 107)
+    #[test]
+    fn test_save_and_load_bot_state() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let state_path = temp_dir.path().join("bot_state.json");
+
+        // Создаем состояние
+        let state = BotState {
+            symbol: "BTCUSDT".to_string(),
+            position_size: rust_decimal::Decimal::from_f64(1.5).unwrap(),
+            avg_price: rust_decimal::Decimal::from_f64(50000.0).unwrap(),
+            cumulative_pnl: rust_decimal::Decimal::from_f64(100.0).unwrap(),
+            active_orders: std::collections::HashMap::new(),
+            day_start_pnl: rust_decimal::Decimal::ZERO,
+            last_pnl_reset_ts: 0,
+            recent_trade_timestamps: vec![],
+            last_update_ts: 1234567890,
+            loss_streak: 0,
+            last_loss_timestamp_ms: 0,
+            pending_slice_qty: None,
+            pending_slice_side: None,
+            pending_slice_signal: None,
+            pending_slice_probs: None,
+        };
+
+        // Сохраняем
+        save_state(&state, &state_path)?;
+        assert!(state_path.exists());
+
+        // Загружаем
+        let loaded = load_state(&state_path)?;
+        assert_eq!(loaded.symbol, "BTCUSDT");
+        assert_eq!(loaded.position_size, rust_decimal::Decimal::from_f64(1.5).unwrap());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_state_nonexistent() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let state_path = temp_dir.path().join("nonexistent.json");
+
+        // Загружаем несуществующий файл - должно вернуть Default
+        let loaded = load_state(&state_path)?;
+        assert_eq!(loaded.symbol, ""); // Default для String
+        assert!(loaded.position_size.is_zero());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_state_atomic() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let state_path = temp_dir.path().join("atomic_state.json");
+
+        let state = BotState::default();
+        save_state(&state, &state_path)?;
+
+        // Проверяем, что tmp файл не остался
+        let tmp_path = state_path.with_extension("tmp");
+        assert!(!tmp_path.exists());
+        assert!(state_path.exists());
 
         Ok(())
     }

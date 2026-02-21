@@ -166,14 +166,7 @@ impl ExecutionEngine {
             waiting_mode: false,
             last_book_update: None,
             state_path: state_path.clone(),
-            state: Arc::new(Mutex::new(crate::trading::BotState::new(crate::trading::BotStateData::default()).unwrap_or_else(|_| {
-                crate::trading::BotState {
-                    version: 1,
-                    timestamp: 0,
-                    data: crate::trading::BotStateData::default(),
-                    checksum: String::new(),
-                }
-            }))),
+            state: Arc::new(Mutex::new(crate::trading::BotState::default())),
             state_persistence,
             last_overtrade_warn_ts: 0,
             last_flip_ts: 0,
@@ -770,8 +763,8 @@ impl ExecutionEngine {
             metadata,
         };
 
-        // Создать BotState с чексуммой
-        let bot_state = crate::trading::BotState::new(state_data)?;
+        // Создать PersistentState с чексуммой
+        let bot_state = crate::trading::PersistentState::new(state_data)?;
 
         // Сохранить состояние через StatePersistenceManager
         self.state_persistence.save_state(&bot_state)?;
