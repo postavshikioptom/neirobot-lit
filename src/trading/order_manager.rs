@@ -9,7 +9,7 @@ use crate::trading::types::{
     CancelOrderRequest, CancelAllOrdersRequest, OrderUpdate, FillEvent, AmendOrderRequest,
     OrderState, OrderEvent, // Задача 136: State Machine types
 };
-use crate::trading::rest_client::{BybitRestClient, BybitRestClientTrait, BybitOrderListResponse, RemoteOrder, BybitError};
+use crate::trading::rest_client::{BybitRestClientTrait, BybitOrderListResponse, RemoteOrder, BybitError};
 use crate::trading::position_manager::PositionManager;
 use crate::config::types::{BotConfig, ExchangeConfig, RiskConfig};
 use crate::risk::risk_manager::RiskManager;

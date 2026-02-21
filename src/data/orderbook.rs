@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::time::Instant;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
-use tracing::{warn, error};
+use tracing::warn;
 use crate::data::types::OrderBookUpdateOwned;
 use crate::monitoring::latency::PROC_LATENCY;
 use serde::{Serialize, Deserialize};

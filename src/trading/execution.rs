@@ -17,7 +17,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use crate::utils::timestamp_ms;
-use std::collections::{VecDeque, HashMap};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use crate::utils::helpers::RollingPriceStats;
 use crate::data::types::PublicTrade;

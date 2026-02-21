@@ -1,6 +1,6 @@
 use crate::data::orderbook::{OrderBook, OrderBookSnapshot};
 use crate::data::types::Side;
-use anyhow::{Result, bail, Context};
+use anyhow::{Result, bail};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{ToPrimitive, FromPrimitive};
 use chrono::{Utc, NaiveDate, DateTime, Timelike};
@@ -10,7 +10,7 @@ use std::time::Instant;
 use std::path::{Path, PathBuf};
 use crate::risk::health_monitor::HealthMonitor;
 use crate::risk::pnl_stats::PnlStats;
-use crate::config::types::{PriceReferenceSource, RiskConfig};
+use crate::config::types::{BotConfig, PriceReferenceSource, RiskConfig};
 use crate::trading::types::OrderSide;
 use crate::trading::position_manager::Position;
 

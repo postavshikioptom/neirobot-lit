@@ -1,8 +1,5 @@
 use anyhow::{Result, Context};
 use futures_util::{SinkExt, StreamExt};
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 #[cfg(feature = "chaos")]
 use rand_distr::{Exponential, Distribution};
 use std::sync::Arc;
@@ -15,12 +12,12 @@ use tokio_tungstenite::{client_async, tungstenite::protocol::Message, tungstenit
 use socket2::{Socket, Domain, Type, Protocol};
 use tracing::{info, warn, error, debug};
 use url::Url;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use native_tls::TlsConnector;
 use tokio_native_tls::TlsConnector as TokioTlsConnector;
-use secrecy::{Secret, ExposeSecret};
+use secrecy::Secret;
 use tokio::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,7 +25,7 @@ pub enum ReconnectSignal {
     Immediate,
 }
 
-use crate::config::types::{ExchangeConfig, ChaosConfig};
+use crate::config::types::ExchangeConfig;
 
 #[cfg(feature = "chaos")]
 pub async fn inject_chaos(config: &ChaosConfig, rng: &mut StdRng) -> bool {
@@ -47,7 +44,7 @@ pub async fn inject_chaos(config: &ChaosConfig, rng: &mut StdRng) -> bool {
     }
     false
 }
-use crate::data::types::{OrderBookUpdate, WsData};
+use crate::data::types::WsData;
 use crate::data::parser::{parse_orderbook_msg, parse_public_trade_msg, parse_ticker_msg, parse_mark_price_msg};
 use crate::utils::helpers::now_secs;
 use crate::utils::backoff::ExponentialBackoff;

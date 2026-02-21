@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 
 // ============================================================================
 // State Machine Types (Задача 136)

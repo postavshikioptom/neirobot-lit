@@ -4,10 +4,10 @@ use tokio::signal;
 use crate::data::orderbook::OrderBook;
 use crate::data::dump::ParquetDumper;
 use crate::data::websocket::BybitWsClient;
-use crate::data::types::{OrderBookUpdateOwned, WsData};
+use crate::data::types::WsData;
 use crate::config::types::FullConfig;
 use anyhow::Result;
-use tracing::{info, warn, error};
+use tracing::{info, error};
 
 /// Основной пайплайн для сбора данных в реальном времени и записи снапшотов стакана.
 pub async fn run_snapshot_pipeline(config: FullConfig) -> Result<()> {

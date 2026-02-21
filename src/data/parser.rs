@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use crate::data::types::{OrderBookUpdate, PriceLevel, Ticker};
+use crate::data::types::PriceLevel;
 use crate::trading::types::{OrderUpdate, OrderStatus};
 use anyhow::{Result, Context};
 use rust_decimal::Decimal;
@@ -156,7 +156,7 @@ pub fn parse_orderbook_msg(json_str: &str) -> Result<Option<crate::data::types::
     }))
 }
 
-use crate::data::types::{PublicTrade, PublicTradeOwned, Side};
+use crate::data::types::{PublicTradeOwned, Side};
 
 #[derive(Debug, Deserialize)]
 pub struct BybitPublicTradeMsg<'a> {

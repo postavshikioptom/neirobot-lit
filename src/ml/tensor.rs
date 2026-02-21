@@ -1,14 +1,12 @@
 use crate::data::orderbook::OrderBook;
 use crate::ml::normalization::Normalizer;
-use crate::ml::types::{ModelMetadata, NormalizationParams};
+use crate::ml::types::NormalizationParams;
 use std::collections::VecDeque;
 use anyhow::{Result, Context};
 use serde::Deserialize;
 use rust_decimal::Decimal;
 use ndarray::{Array2, Array4, s};
-use std::sync::{Arc, RwLock};
 use wide::f32x8;
-use aligned_vec::{AVec, ConstAlign};
 
 /// Константа для защиты от деления на 0 при нормализации
 const EPSILON: f32 = 1e-8;

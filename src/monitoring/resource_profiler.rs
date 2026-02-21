@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Networks, Pid, ProcessRefreshKind, RefreshKind, System};
 use tokio::sync::broadcast;
