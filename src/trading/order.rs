@@ -68,6 +68,9 @@ pub struct Order {
     pub switch_count: u8,          // Количество переключений на один сигнал
     // Задача 208: Urgency сигнала для модуляции параметров переключения
     pub urgency: f32,              // Уровень агрессивности (0.0 - 1.0)
+    // Задача 108: Order Chasing tracking
+    pub chase_count: usize,        // Счетчик попыток переставления ордера
+    pub last_chase_ts: i64,        // Timestamp последней попытки погони (в миллисекундах)
 }
 
 impl Order {
@@ -107,6 +110,8 @@ impl Order {
             iceberg_filled_total: 0.0,
             switch_count: 0,           // Задача 208: Инициализируем счетчик переключений
             urgency: 0.5,              // Задача 208: Default urgency
+            chase_count: 0,                // Задача 108: Инициализируем счетчик погони
+            last_chase_ts: 0,              // Задача 108: Инициализируем timestamp
         }
     }
 
@@ -684,6 +689,9 @@ impl Order {
             switch_count: 0,
             // Задача 208: Default urgency для восстановленных ордеров
             urgency: 0.5,
+            // Задача 108: Order Chasing tracking для восстановленных ордеров
+            chase_count: 0,
+            last_chase_ts: 0,
         }
     }
 

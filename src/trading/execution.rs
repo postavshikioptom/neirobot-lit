@@ -3240,9 +3240,12 @@ impl ExecutionEngine {
             let th_amount = mid * th_bps / Decimal::from(10000);
             let mut needs_chase = false;
 
-            if order.side == OrderSide::Buy && order.price < (best_bid - th_amount) {
+            // Конвертируем цену ордера в Decimal для сравнения
+            let order_price_decimal = Decimal::from_f64(order.price).unwrap_or(Decimal::ZERO);
+
+            if order.side == OrderSide::Buy && order_price_decimal < (best_bid - th_amount) {
                 needs_chase = true;
-            } else if order.side == OrderSide::Sell && order.price > (best_ask + th_amount) {
+            } else if order.side == OrderSide::Sell && order_price_decimal > (best_ask + th_amount) {
                 needs_chase = true;
             }
 
