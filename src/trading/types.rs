@@ -313,38 +313,5 @@ pub type AmendedResponse = AmendOrderResult;
 
 
 // ============================================================================
-// Функции для сохранения/загрузки RiskState (для обратной совместимости)
+// Функции save_state/load_state перенесены в state.rs (Задача 107)
 // ============================================================================
-
-use std::fs::{self, File};
-use std::path::Path;
-use anyhow::{anyhow, Result};
-
-/// Сохранить RiskState на диск
-pub fn save_state(state: &RiskState, path: &Path) -> Result<()> {
-    let tmp_path = path.with_extension("tmp");
-    
-    // Создаем директории, если их нет
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| anyhow!("Failed to create directories: {}", e))?;
-    }
-
-    let file = File::create(&tmp_path).map_err(|e| anyhow!("Failed to create tmp file: {}", e))?;
-    
-    // Пишем красиво для дебага
-    serde_json::to_writer_pretty(file, state)?;
-    
-    // Атомарный перенос
-    fs::rename(tmp_path, path).map_err(|e| anyhow!("Failed to rename state file: {}", e))?;
-    Ok(())
-}
-
-/// Загрузить RiskState с диска
-pub fn load_state(path: &Path) -> Result<RiskState> {
-    if !path.exists() {
-        return Ok(RiskState::default());
-    }
-    let file = File::open(path)?;
-    let state = serde_json::from_reader(file)?;
-    Ok(state)
-}
