@@ -1938,6 +1938,24 @@ def train():
     from .utils import setup_custom_scalars_layout
     setup_custom_scalars_layout(logger.experiment)
 
+    # Логируем начальные гиперпараметры в начале запуска (Задача 158)
+    from .utils import log_hparams
+    hparams_dict = {
+        'lr': 1e-4,
+        'd_model': args.d_model if args.mode != 'distill' else args.student_d_model,
+        'nhead': args.nhead if args.mode != 'distill' else args.student_nhead,
+        'num_layers': args.num_layers if args.mode != 'distill' else args.student_num_layers,
+        'batch_size': args.batch_size,
+        'seq_len': args.seq_len,
+        'activation': args.activation,
+        'scheduler': args.scheduler,
+        'loss_type': args.loss_type,
+        'label_smoothing': args.label_smoothing,
+    }
+    
+    # Инициализируем с пустыми метриками (будут обновлены в конце)
+    log_hparams(logger.experiment, hparams_dict, {})
+
     # 11. Trainer
     trainer = pl.Trainer(
         max_epochs=args.epochs,
@@ -2463,21 +2481,7 @@ def train():
         # Обычный режим обучения (train или distill)
         print("Starting training...")
         
-        # Логируем гиперпараметры в начале обучения
-        from .utils import log_hparams
-        hparams_dict = {
-            'lr': 1e-4,
-            'd_model': args.d_model if args.mode != 'distill' else args.student_d_model,
-            'nhead': args.nhead if args.mode != 'distill' else args.student_nhead,
-            'num_layers': args.num_layers if args.mode != 'distill' else args.student_num_layers,
-            'batch_size': args.batch_size,
-            'seq_len': args.seq_len,
-            'activation': args.activation,
-            'scheduler': args.scheduler,
-            'loss_type': args.loss_type,
-            'label_smoothing': args.label_smoothing,
-        }
-        
+        # Гиперпараметры уже логированы в начале (Задача 158)
         # Выводим финальное значение label_smoothing (с учетом логики взаимного исключения)
         effective_label_smoothing = 0.0 if args.loss_type == "focal" else args.label_smoothing
         print(f"Label smoothing configuration:")
@@ -2607,26 +2611,11 @@ def train():
             # Загружаем лучшую модель для прунинга
             if checkpoint_callback.best_model_path:
                 print(f"Loading best model for pruning: {checkpoint_callback.best_model_path}")
-                model = LiTModel.load_from_checkpoint(
+                model_module = LiTModule.load_from_checkpoint(
                     checkpoint_callback.best_model_path,
-                    in_channels=in_channels,
-                    seq_len=args.seq_len,
-                    d_model=args.d_model if args.mode != 'distill' else args.student_d_model,
-                    nhead=args.nhead if args.mode != 'distill' else args.student_nhead,
-                    num_layers=args.num_layers if args.mode != 'distill' else args.student_num_layers,
-                    dropout=args.dropout,
-                    class_weights=model_class_weights,
-                    loss_type=args.loss_type,
-                    focal_gamma=args.focal_gamma,
-                    label_smoothing=args.label_smoothing,
-                    activation=args.activation,
-                    clip_mode=args.clip_mode,
-                    clip_val=args.clip_val,
-                    num_regimes=num_regimes,
-                    teacher_model=teacher_model,
-                    alpha=args.alpha if args.mode == 'distill' else 0.0,
-                    temperature=args.temperature if args.mode == 'distill' else 1.0
+                    map_location="cpu"
                 )
+                model = model_module.model
             
             # Вычисляем baseline MCC для сравнения
             model.eval()
