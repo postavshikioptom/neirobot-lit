@@ -13,6 +13,8 @@ use crate::risk::pnl_stats::PnlStats;
 use crate::config::types::{BotConfig, PriceReferenceSource, RiskConfig};
 use crate::trading::types::OrderSide;
 use crate::trading::position_manager::Position;
+use crate::trading::RiskState;
+use crate::trading::PositionManager;
 
 use tracing::{info, warn, debug, error};
 

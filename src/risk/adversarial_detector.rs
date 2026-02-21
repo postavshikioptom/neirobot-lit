@@ -298,7 +298,7 @@ impl AdversarialDetector {
         let is_toxic = vpin > 0.5 || is_layering || is_spoofing;
 
         if is_toxic {
-            log::warn!(
+            tracing::warn!(
                 "[Adversarial] Toxic flow detected: VPIN={:.4}, Layering={}, Spoofing={}",
                 vpin,
                 is_layering,

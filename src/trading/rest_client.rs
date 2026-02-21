@@ -26,7 +26,8 @@ impl std::fmt::Display for BybitError {
 
 impl std::error::Error for BybitError {}
 
-use crate::trading::types::{ExchangeConfig, MarketInfo, AmendOrderResult, SymbolInfo, LotFilter};
+use crate::config::ExchangeConfig;
+use crate::trading::types::{MarketInfo, AmendOrderResult, SymbolInfo, LotFilter};
 use crate::utils::rate_limiter::{RateLimiter, RateLimitTracker, LimitCategory};
 use crate::utils::backoff::ExponentialBackoff;
 

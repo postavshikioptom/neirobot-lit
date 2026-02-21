@@ -6,7 +6,7 @@ use std::time::Instant;
 use std::path::PathBuf;
 
 use crate::trading::rest_client::ApiKeyInfoResponse;
-use crate::trading::types::ExchangeConfig;
+use crate::config::ExchangeConfig;
 
 /// Система самодиагностики для обеспечения технической безопасности торгов (Задача 171)
 pub struct HealthMonitor {
@@ -552,7 +552,7 @@ impl HealthMonitor {
     /// 4. Удаляет интент после завершения действия
     pub async fn check_stale_orders(
         &self,
-        rest_client: &impl crate::exchange::bybit::BybitRestClientTrait,
+        rest_client: &impl crate::trading::rest_client::BybitRestClientTrait,
         bot_config: &crate::config::types::BotConfig,
         exchange_config: &crate::config::types::ExchangeConfig,
         active_intents: &mut std::collections::HashMap<String, crate::risk::risk_manager::OrderIntent>,

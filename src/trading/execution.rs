@@ -1250,7 +1250,7 @@ impl ExecutionEngine {
             let close_request = CreateOrderRequest {
                 symbol: self.symbol.clone(),
                 side: close_side,
-                order_type: crate::trading::types::OrderType::Market,
+                order_type: "Market".to_string(),
                 qty: close_qty,
                 price: Some(close_price),
                 time_in_force: Some("IOC".to_string()),
@@ -1563,7 +1563,7 @@ impl ExecutionEngine {
             let error_msg = e.to_string();
             if error_msg.contains("HardStop") || error_msg.contains("drawdown") {
                 // ЯВНЫЙ HARDSTOP TRIGGER — выполняем экстренные действия
-                critical!("[{}] HARD STOP TRIGGERED: {}", self.symbol, error_msg);
+                tracing::error!("[{}] HARD STOP TRIGGERED: {}", self.symbol, error_msg);
                 // 1. Отмена всех ордеров
                 let _ = self.order_manager.cancel_all_orders(rest_client, &mut self.risk_manager, &self.bot_config, exchange_config).await;
                 // 2. Экстренное закрытие позиции
@@ -1632,7 +1632,7 @@ impl ExecutionEngine {
         self.pending_trades.clear(); // Очищаем накопленные сделки
         
         if is_toxic {
-            log::warn!("[Adversarial] Toxic flow detected, skipping signal");
+            tracing::warn!("[Adversarial] Toxic flow detected, skipping signal");
             return Ok(());
         }
 
@@ -2711,7 +2711,7 @@ impl ExecutionEngine {
             let error_msg = e.to_string();
             if error_msg.contains("HardStop") || error_msg.contains("drawdown") {
                 // ЯВНЫЙ HARDSTOP TRIGGER — выполняем экстренные действия
-                critical!("[{}] HARD STOP TRIGGERED: {}", self.symbol, error_msg);
+                tracing::error!("[{}] HARD STOP TRIGGERED: {}", self.symbol, error_msg);
             } else {
                 warn!("[{}] Risk breach detected after order update: {}. Triggering emergency exit.", self.symbol, e);
             }

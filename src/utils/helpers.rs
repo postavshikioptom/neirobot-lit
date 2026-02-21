@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
-use rand::thread_rng;
+use rand::Rng;
 
 #[inline(always)]
 pub fn now_ms() -> u64 {
@@ -424,7 +424,7 @@ mod clock_skew_tests {
 /// - Добавляет случайный джиттер (0..100 мс) для предотвращения "thundering herd"
 /// - Ограничивает максимальное время ожидания 60 секундами
 pub async fn apply_backoff(attempt: u32, base_ms: u64) {
-    let mut rng = thread_rng();
+    let mut rng = rand::thread_rng();
     let jitter = rng.gen_range(0..100);
     
     // Экспоненциальный расчет: base_ms * 2^attempt
