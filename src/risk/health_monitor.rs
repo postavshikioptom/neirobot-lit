@@ -799,4 +799,3 @@ impl HealthMonitor {
 
         Ok((freed_bytes, deleted_count))
     }
-}

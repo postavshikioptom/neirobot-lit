@@ -1920,12 +1920,23 @@ async fn handle_market_update(
         return Ok(());
     }
 
-    // 4. ML Pipeline (Задача №197: Использование пре-аллоцированных буферов и Zero-copy)
+    // 4. Задача 161: Обновление и детекция режима рынка (ПЕРЕД инференсом)
+    let current_regime = if let Some(ref mut detector) = execution.regime_detector {
+        detector.update(&ob, now_ms as u64);
+        detector.detect()
+    } else {
+        neirobot_lit::config::types::RegimeId::Unknown
+    };
     
-    // Получаем текущий режим рынка (задача 161)
-    let regime_id = execution.regime_detector.as_ref()
-        .map(|d| d.detect() as usize)
-        .unwrap_or(0);
+    // Преобразуем RegimeId в usize для передачи в инференс
+    let regime_id = match current_regime {
+        neirobot_lit::config::types::RegimeId::Quiet => 0,
+        neirobot_lit::config::types::RegimeId::Trend => 1,
+        neirobot_lit::config::types::RegimeId::Volatile => 2,
+        neirobot_lit::config::types::RegimeId::Unknown => 255,
+    };
+
+    // 4. ML Pipeline (Задача №197: Использование пре-аллоцированных буферов и Zero-copy)
     
     // Заполняем буфер признаками из стакана и нормализуем их на месте (Zero-copy версия, Задача 078.3)
     let start_feature = std::time::Instant::now();
@@ -1964,12 +1975,6 @@ async fn handle_market_update(
 
         // Извлекаем лучшие цены для Execution из снапшота (Задача 191)
         let (best_bid, bid_vol, best_ask, ask_vol) = snapshot.get_best_bid_ask_with_vol();
-        
-        // Задача 161: Обновление и детекция режима рынка
-        if let Some(ref mut detector) = execution.regime_detector {
-            detector.update(&ob, now_ms as u64);
-            let _current_regime = detector.detect();
-        }
 
         // 5.5. Проверка условий частичной фиксации прибыли при обновлении orderbook (Задача 166)
         let mid_price = (Decimal::from_f64(best_bid).unwrap_or_default() + Decimal::from_f64(best_ask).unwrap_or_default()) / Decimal::from(2);
@@ -1981,7 +1986,7 @@ async fn handle_market_update(
             exchange_config
         ).await.context("OrderBook update processing failed")?;
 
-        // 6. Execution logic
+        // 6. Execution logic - Задача 161: передаем current_regime для динамических порогов
         execution.on_inference_output(
             inference, 
             price, 
@@ -1992,7 +1997,8 @@ async fn handle_market_update(
             ob,  // Задача 233: Передаем живой стакан для цикла стабилизации
             &update,
             rest_client,
-            exchange_config
+            exchange_config,
+            current_regime  // Задача 161: текущий режим рынка для динамических порогов
         ).await.context("Trading execution failed")?;
     }
 

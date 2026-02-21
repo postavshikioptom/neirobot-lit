@@ -576,7 +576,7 @@ impl Default for PriceReferenceSource {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct RiskDefaultsConfig {
     #[serde(default = "default_drawdown_stop")]

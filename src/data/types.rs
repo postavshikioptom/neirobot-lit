@@ -54,14 +54,14 @@ pub struct OrderBookUpdateOwned {
 
 /// Публичная сделка от биржи (для расчета VWAP/TWAP) - borrowed версия для zero-copy парсинга
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublicTrade<'a> {
+pub struct PublicTrade {
     pub price: rust_decimal::Decimal,
     pub size: rust_decimal::Decimal,
     pub side: Side,       // Buy/Sell
     pub timestamp: i64,   // Unix MS
 }
 
-impl<'a> PublicTrade<'a> {
+impl PublicTrade {
     /// Конвертирует borrowed версию в owned для хранения
     pub fn to_owned(&self) -> PublicTradeOwned {
         PublicTradeOwned {

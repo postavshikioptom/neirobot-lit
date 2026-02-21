@@ -429,9 +429,34 @@ impl RiskManager {
             );
             
             if filter_config.adjust_size_if_thin {
-                let adjusted_size = size_usd * (filter_config.max_impact_bps / impact_bps);
-                if adjusted_size > 0.0 {
-                    return RiskResult::AdjustSize(adjusted_size);
+                // Бинарный поиск максимального размера, который проходит по фильтру
+                let mut low = 0.0;
+                let mut high = size_usd;
+                let mut best_size = 0.0;
+                
+                // Максимум 10 итераций бинарного поиска
+                for _ in 0..10 {
+                    let mid = (low + high) / 2.0;
+                    if mid <= 0.0 {
+                        break;
+                    }
+                    
+                    let test_impact = ob.calculate_vwap_impact(side, mid);
+                    if test_impact <= filter_config.max_impact_bps {
+                        best_size = mid;
+                        low = mid;
+                    } else {
+                        high = mid;
+                    }
+                    
+                    // Если разница меньше $1, останавливаемся
+                    if (high - low).abs() < 1.0 {
+                        break;
+                    }
+                }
+                
+                if best_size > 0.0 {
+                    return RiskResult::AdjustSize(best_size);
                 }
             }
             return RiskResult::Reject(msg);
@@ -2176,7 +2201,6 @@ mod tests {
         // Благодаря saturating_sub не должно быть паники, lockout не активен
         assert!(!risk.is_in_lockout(&state, &bot_config));
     }
-}
 
     // ============================================================================
     // Мониторинг устаревших сигналов (Задача 169)
@@ -2387,7 +2411,6 @@ mod tests {
         
         drawdown_pct.to_f64().unwrap_or(0.0).max(0.0)
     }
-}
 
 
 

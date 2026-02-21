@@ -1445,6 +1445,7 @@ impl ExecutionEngine {
         orderbook_update: &OrderBookUpdateOwned,
         rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
+        regime: crate::config::types::RegimeId,  // Задача 161: текущий режим рынка
     ) -> Result<()> {
         // Задача 231: Проверка и сброс штрафа за ошибку маржи
         self.risk_manager.check_and_reset_margin_penalty(&self.bot_config.risk);
@@ -1611,8 +1612,8 @@ impl ExecutionEngine {
         let current_obi = orderbook.calculate_imbalance(self.bot_config.obi_depth);
         debug!("[{}] Current OBI: {:.4}", self.symbol, current_obi);
 
-        // 4. Фильтрация сигнала по порогам вероятности (Задача 044)
-        let effective_signal = self.filter_signal(&fused_probs);
+        // 4. Фильтрация сигнала по порогам вероятности (Задача 044) с учетом режима рынка (Задача 161)
+        let effective_signal = self.filter_signal(&fused_probs, regime);
         
         // Задача 201: Создаем SignalWithTimestamp для замера latency
         let signal_with_ts = crate::ml::types::SignalWithTimestamp {
@@ -1809,20 +1810,26 @@ impl ExecutionEngine {
 
     /// Превращает вероятности в сигнал на основе асимметричных порогов
     /// Задача 101: Использование long_threshold и short_threshold вместо единых порогов
-    fn filter_signal(&self, probs: &[f32; 3]) -> Signal {
+    /// Задача 161: Использование динамических порогов на основе режима рынка
+    fn filter_signal(&self, probs: &[f32; 3], regime: crate::config::types::RegimeId) -> Signal {
         // Индексы: [0] = Flat, [1] = Up, [2] = Down
         let prob_flat = probs[0];
         let prob_up = probs[1];
         let prob_down = probs[2];
 
-        // Конвертируем Decimal в f32 с безопасными дефолтами (Задача 101)
-        let long_th = self.bot_config.long_threshold.to_f32().unwrap_or(0.6);
-        let short_th = self.bot_config.short_threshold.to_f32().unwrap_or(0.6);
+        // Задача 161: Получаем динамические пороги на основе режима рынка
+        let (buy_threshold, sell_threshold, min_confidence) = self.get_thresholds_for_regime(regime);
+        
+        // Используем динамические пороги, если они не равны базовым (режим переопределен)
+        // Иначе используем базовые пороги из конфига
+        let long_th = buy_threshold;
+        let short_th = sell_threshold;
 
         // Логирование всех трёх вероятностей [F, D, U] при принятии решения (Задача 101)
+        // Задача 161: также логируем текущий режим
         tracing::info!(
-            "[{}] Signal probabilities: [Flat={:.4}, Down={:.4}, Up={:.4}], thresholds: [long={:.4}, short={:.4}]",
-            self.symbol, prob_flat, prob_down, prob_up, long_th, short_th
+            "[{}] Signal probabilities: [Flat={:.4}, Down={:.4}, Up={:.4}], thresholds: [long={:.4}, short={:.4}], regime: {:?}",
+            self.symbol, prob_flat, prob_down, prob_up, long_th, short_th, regime
         );
 
         // Приоритет входа: игнорировать противоречивый сигнал (Задача 101)

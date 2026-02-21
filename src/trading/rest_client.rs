@@ -967,7 +967,7 @@ impl BybitRestClientTrait for BybitRestClient {
         category: &str,
         symbol: &str,
         limit: i32,
-    ) -> Result<crate::data::types::OrderBookUpdate> {
+    ) -> Result<crate::data::types::OrderBookUpdateOwned> {
         self.fetch_orderbook(category, symbol, limit).await
     }
 
