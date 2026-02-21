@@ -699,6 +699,11 @@ impl ExecutionEngine {
             
             // Обновляем PositionManager данными биржи
             self.position_manager.set_position(signed_ex_size, ex_avg_price);
+            
+            // Сохранить состояние после синхронизации позиции (Задача 107)
+            if let Err(e) = self.save_current_state().await {
+                error!("[{}] Failed to save state after sync: {}", self.symbol, e);
+            }
         }
 
         Ok(())
@@ -836,7 +841,12 @@ impl ExecutionEngine {
             let mut state_guard = self.state.lock().await;
             state_guard.position_size = Decimal::ZERO;
             state_guard.active_orders.clear();
-            // Задача 190: Сохранение состояния теперь происходит только при graceful shutdown
+            // Сохранить состояние после экстренного закрытия (Задача 107)
+            drop(state_guard); // Освобождаем блокировку перед вызовом save_current_state
+        }
+        
+        if let Err(e) = self.save_current_state().await {
+            error!("[{}] Failed to save state after panic exit: {}", self.symbol, e);
         }
         
         Ok(())
@@ -924,7 +934,11 @@ impl ExecutionEngine {
                     }
                 }
                 
-                // Задача 190: Сохранение состояния теперь происходит только при graceful shutdown
+                // Сохранить состояние после синхронизации (Задача 107)
+                drop(state_guard); // Освобождаем блокировку перед вызовом save_current_state
+                if let Err(e) = self.save_current_state().await {
+                    error!("[{}] Failed to save state after reconciliation: {}", self.symbol, e);
+                }
                 info!("[{}] State synchronized successfully", self.symbol);
             } else {
                 self.emergency_mode = true;
@@ -1438,10 +1452,10 @@ impl ExecutionEngine {
         // Задача 169: Сохраняем timestamp источника сигнала для проверки свежести
         self.last_signal_timestamp_ms = output.source_timestamp_ms;
         
-        // 0. Проверка аварийного режима (Emergency Mode)
+        // 0. Проверка аварийного режима (Emergency Mode) - Задача 107
         if self.emergency_mode {
-            debug!("[{}] Signal ignored: Emergency Mode is ACTIVE", self.symbol);
-            return Ok(());
+            error!("[{}] BLOCKED: Emergency mode is active. Manual intervention required.", self.symbol);
+            return Err(anyhow::anyhow!("Trading blocked: emergency_mode is active"));
         }
 
         // Задача 224: Обработка дрейфа модели
