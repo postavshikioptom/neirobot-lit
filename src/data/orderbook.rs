@@ -268,8 +268,8 @@ impl OrderBook {
     /// Соответствует глобальной схеме данных (задача 012): 50 уровней
     pub fn take_snapshot(&self) -> OrderBookSnapshot {
         OrderBookSnapshot {
-            // Задача 191: Используем timestamp_ms с биржи вместо системного времени для точного анализа задержек
-            timestamp_ms: self.timestamp_ms as i64,
+            // Задача 132: Используем системное время через helpers::unix_ms() для минимизации оверхеда в асинхронном цикле
+            timestamp_ms: crate::utils::helpers::unix_ms() as i64,
             last_update_id: self.last_update_id,
             symbol: self.symbol.clone(),
             // Копируем все 50 уровней согласно глобальной схеме (задача 012)

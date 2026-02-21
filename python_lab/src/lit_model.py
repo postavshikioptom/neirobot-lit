@@ -346,9 +346,9 @@ class LiTModel(nn.Module):
         # src_key_padding_mask: True для позиций, которые нужно игнорировать
         x_trans = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
         
-        # Шаг 6: Прогноз строго по CLS токену согласно плану 025
-        cls_output = x_trans[:, 0, :]
-        pooled = self.norm(cls_output)
+        # Шаг 6: Global Average Pooling по патчам (исключая CLS токен) согласно плану 130
+        pooled = x_trans[:, 1:, :].mean(dim=1)
+        pooled = self.norm(pooled)
         
         # Шаг 7: Разделение на ветки (Multi-Task)
         # Классификация с Multi-Horizon поддержкой

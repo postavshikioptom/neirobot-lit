@@ -145,6 +145,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
             match builder.with_execution_providers([
                 ep::CUDA::default()
                     .with_device_id(config.device_id as u32)
+                    .with_fp16(is_fp16)
                     .build()
             ]) {
                 Ok(b) => {

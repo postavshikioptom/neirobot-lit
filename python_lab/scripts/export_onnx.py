@@ -97,7 +97,7 @@ def export():
     parser.add_argument("--config_path", type=str, required=True, help="Path to config file (YAML/TOML)")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save exported files")
     parser.add_argument("--fp16", action="store_true", help="Convert model to FP16 for faster inference")
-    parser.add_argument("--signal_only", action="store_true", default=True, help="Export only logits head (exclude volatility)")
+    parser.add_argument("--signal_only", action="store_true", default=False, help="Export only logits head (exclude volatility)")
     parser.add_argument("--embed_temperature", action="store_true", help="Embed temperature scaling into ONNX graph (Div node before Softmax)")
     args = parser.parse_args()
 
