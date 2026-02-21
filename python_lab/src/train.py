@@ -1392,7 +1392,7 @@ def train():
         num_regimes = best_n_components
         
         # Сохраняем параметры HMM
-        regime_config_path = base_path / "bots" / args.symbol / "models" / "regime_config.json"
+        regime_config_path = base_path / "bots" / args.symbol / "model" / "regime_config.json"
         regime_detector.save(str(regime_config_path))
         print(f"[Regime Detection] Saved regime config to {regime_config_path}")
     else:

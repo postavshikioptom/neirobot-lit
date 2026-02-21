@@ -16,7 +16,6 @@ pub struct SharedState {
     pub ws_connected: AtomicBool,
     pub emergency_mode: AtomicBool,
     pub start_time: Instant,
-    pub config: HealthConfig,
 }
 
 /// Структура для JSON-ответа health-check эндпоинта
@@ -32,9 +31,9 @@ pub struct HealthStatus {
 }
 
 /// Запускает HTTP-сервер для health-check эндпоинта
-pub async fn start_health_server(config: HealthConfig, state: Arc<SharedState>) {
+pub async fn start_health_server(config: HealthConfig, state: Arc<SharedState>, max_memory_mb: u64) {
     let app = Router::new()
-        .route("/health", get(health_handler))
+        .route("/health", get(move |State(s): State<Arc<SharedState>>| health_handler(s, max_memory_mb)))
         .route("/metrics", get(metrics_handler))
         .with_state(state);
 
@@ -50,7 +49,8 @@ pub async fn start_health_server(config: HealthConfig, state: Arc<SharedState>) 
 
 /// Хендлер для /health эндпоинта
 async fn health_handler(
-    State(state): State<Arc<SharedState>>
+    state: Arc<SharedState>,
+    max_memory_mb: u64,
 ) -> (StatusCode, Json<HealthStatus>) {
     let now = crate::utils::helpers::unix_ms();
     let last = state.last_update.load(Ordering::Relaxed);
@@ -72,7 +72,7 @@ async fn health_handler(
     let is_down = diff > 30_000 || !is_connected || is_emergency;
     
     // Условие деградации: превышение лимита памяти
-    let is_degraded = rss_mb > state.config.max_memory_mb;
+    let is_degraded = rss_mb > max_memory_mb;
     
     let status_str = if is_down { 
         "down".to_string() 

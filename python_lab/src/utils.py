@@ -733,7 +733,7 @@ def plot_lob_importance_heatmap(importance_dict, n_levels=50, save_path=None):
         linewidths=0.1,
         linecolor='gray',
         ax=ax,
-        xticklabels=['Ask Price', 'Ask Volume', 'Bid Price', 'Bid Volume'],
+        xticklabels=['Price', 'Volume', 'Imbalance'],
         yticklabels=[f'Level {i}' if i % 5 == 0 else '' for i in range(n_levels)]
     )
     

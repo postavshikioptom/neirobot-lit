@@ -148,10 +148,14 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         seq_len = hparams.get("seq_len", 100)
         activation = hparams.get("activation", "gelu_exact")
         past_returns_lags = hparams.get("past_returns_lags", [10, 50, 100])
+        num_regimes = hparams.get("num_regimes", 0)
+        regime_embedding_dim = hparams.get("regime_embedding_dim", 16)
     else:
         model = LiTModel()
         model.load_state_dict(torch.load(input_path, map_location="cpu"))
         past_returns_lags = [10, 50, 100]
+        num_regimes = 0
+        regime_embedding_dim = 16
     
     model.eval()
 
@@ -313,6 +317,7 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         "precision": final_precision,
         "quantized": use_fp16,
         "num_regimes": num_regimes,
+        "regime_embedding_dim": regime_embedding_dim,
         "use_regime_embedding": use_regime,
         "sparsity": float(sparsity),
         "pruned": sparsity > 0.01,
@@ -323,6 +328,24 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         "input_format": "flat_lob_3ch",
         "input_description": "Flat LOB buffer: 50 levels * 3 channels (Price, Volume, Imbalance) = 150 features"
     }
+    
+    # 9. Экспорт параметров HMM (regime_config.json) - Задача 155
+    regime_config_path = Path(output_path).parent / "regime_config.json"
+    if regime_config_path.exists():
+        with open(regime_config_path, 'r') as f:
+            regime_config = json.load(f)
+        export_metadata["regime_detection"] = {
+            "enabled": True,
+            "n_components": regime_config.get("n_components", 0),
+            "covariance_type": regime_config.get("covariance_type", "diag"),
+            "config_file": "regime_config.json"
+        }
+        print(f"✓ Regime config found at {regime_config_path} with {regime_config.get('n_components', 0)} components")
+    else:
+        print("⚠️  Regime config not found, skipping regime detection export")
+        export_metadata["regime_detection"] = {
+            "enabled": False
+        }
     
     # Объединяем с существующей metadata (если есть)
     metadata.update(export_metadata)

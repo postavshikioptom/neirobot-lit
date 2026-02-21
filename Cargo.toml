@@ -97,9 +97,9 @@ rust_decimal_macros = "1.40.0"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 debug = true
 # strip = true
+# panic = "abort"  # Отключено для работы panic handler (задача 140)
 
 [[bench]]
 name = "hot_path"

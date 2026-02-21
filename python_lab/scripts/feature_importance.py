@@ -462,7 +462,7 @@ def main():
     y_val_list = []
     
     for i in tqdm(range(len(val_ds)), desc="Loading data"):
-        x, y, _, _ = val_ds[i]
+        x, y, _, _, _ = val_ds[i]
         X_val_list.append(x)
         y_val_list.append(y)
     

@@ -96,7 +96,7 @@ shared_state.last_update.store(helpers::unix_ms(), Ordering::Relaxed);
 ```
 
 ## 5. Инструкции для Gemini (Coder AI):
-1.  **Cargo.toml**: Добавить `axum = { version = "0.7", features = ["json"] }`.
+1.  **Cargo.toml**: Добавить `axum = { version = "0.8.8", features = ["json", "ws"] }`.
 2.  **[./src/monitoring/health.rs](./src/monitoring/health.rs)**: Реализовать `SharedState`, `health_handler` и `start_health_server`.
 3.  **[./src/bin/run-bot.rs](./src/bin/run-bot.rs)**: Инициализировать состояние и обновлять `last_update` при каждом `apply_update` стакана.
 4.  **[./src/config/types.rs](./src/config/types.rs)**: Добавить `HealthConfig` (host, port, timeout_sec).

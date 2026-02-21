@@ -265,7 +265,45 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
         registry.init();
     }
 
+    let max_files = config.max_files;
+    let log_dir_clone = log_dir.clone();
+    tokio::spawn(async move {
+        clean_old_logs(log_dir_clone, max_files).await;
+    });
+
     Ok(guard)
+}
+
+async fn clean_old_logs(dir: PathBuf, max_files: usize) {
+    loop {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let meta = e.metadata().ok()?;
+                    if meta.is_file() { 
+                        Some((meta.modified().ok()?, e.path())) 
+                    } else { 
+                        None 
+                    }
+                })
+                .collect();
+
+            files.sort_by_key(|&(t, _)| t);
+
+            if files.len() > max_files {
+                let to_remove = files.len() - max_files;
+                for i in 0..to_remove {
+                    if let Err(e) = std::fs::remove_file(&files[i].1) {
+                        tracing::warn!("Failed to remove old log file {:?}: {}", files[i].1, e);
+                    } else {
+                        tracing::info!("Removed old log file: {:?}", files[i].1);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+    }
 }
 
 #[cfg(test)]

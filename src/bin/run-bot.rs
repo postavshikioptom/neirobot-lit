@@ -36,6 +36,7 @@ use neirobot_lit::data::websocket::{BybitWsClient, BybitPrivateWsClient, Reconne
 use neirobot_lit::data::types::WsData;
 use neirobot_lit::ml::{OnnxEngine, TensorBuilder, Normalizer};
 use neirobot_lit::trading::{ExecutionEngine, RiskManager, BybitRestClient};
+use neirobot_lit::trading::emergency;
 use neirobot_lit::data::orderbook::OrderBook;
 use neirobot_lit::utils::logger::init_logger;
 use neirobot_lit::utils::trade_logger::CsvTradeLogger;
@@ -69,6 +70,20 @@ struct Args {
 }
 
 use neirobot_lit::trading::types::MarketInfo;
+
+fn setup_panic_handler(key: Arc<String>, secret: Arc<String>, symbol: String) {
+    let default_hook = panic::take_hook();
+
+    panic::set_hook(Box::new(move |panic_info| {
+        eprintln!("\nFATAL ERROR: {}", panic_info);
+        
+        emergency::cancel_all_sync(&key, &secret, &symbol);
+
+        default_hook(panic_info);
+        
+        process::exit(1);
+    }));
+}
 
 fn main() -> Result<()> {
     // 1. Загрузка окружения для получения лимитов потоков
@@ -245,6 +260,12 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
 
     info!("Starting Neirobot LiT for {}", args.symbol);
 
+    // Задача 140: Установка panic handler для экстренной отмены ордеров
+    let api_key_arc = Arc::new(api_key.clone());
+    let api_secret_arc = Arc::new(api_secret.clone());
+    setup_panic_handler(api_key_arc, api_secret_arc, args.symbol.clone());
+    info!("Panic handler initialized for emergency order cancellation");
+
     // Задача 184: Обработка SIGHUP для перезагрузки конфигурации
     let config_path_clone = config_path.clone();
     let symbol_clone = args.symbol.clone();
@@ -394,7 +415,6 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         ws_connected: AtomicBool::new(true),
         emergency_mode: AtomicBool::new(false),
         start_time: tokio::time::Instant::now(),
-        config: full_config.monitoring.clone(),
     });
 
     // Запуск задачи мониторинга ресурсов в фоновом рантайме (каждые 5 секунд)
@@ -409,8 +429,9 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     // Запуск health-check сервера в отдельной задаче в фоновом рантайме
     let state_for_server = shared_state.clone();
     let health_config = full_config.monitoring.clone();
+    let max_memory_mb = full_config.bot.system.max_memory_mb;
     bg_handle.spawn(async move {
-        start_health_server(health_config, state_for_server).await;
+        start_health_server(health_config, state_for_server, max_memory_mb).await;
     });
 
     // Запуск Watchdog для Hot Path (Задача 146)
