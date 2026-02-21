@@ -428,17 +428,11 @@ def _compute_augmentation_indices(n_levels: int):
     # ...
     # [198, 199] = bid_p_49, bid_v_49
     
-    # PRICE_COLS = все цены (ask_p и bid_p)
-    PRICE_COLS = []
-    for i in range(n_levels):
-        PRICE_COLS.append(i * 2)  # ask_p_i
-        PRICE_COLS.append(100 + i * 2)  # bid_p_i
+    # PRICE_COLS = все четные индексы (все цены ask_p и bid_p)
+    PRICE_COLS = list(range(0, 200, 2))
     
-    # VOL_COLS = все объемы (ask_v и bid_v)
-    VOL_COLS = []
-    for i in range(n_levels):
-        VOL_COLS.append(i * 2 + 1)  # ask_v_i
-        VOL_COLS.append(100 + i * 2 + 1)  # bid_v_i
+    # VOL_COLS = все нечетные индексы (все объемы ask_v и bid_v)
+    VOL_COLS = list(range(1, 200, 2))
     
     # ASK_COLS = ask_p и ask_v (индексы 0..99)
     ASK_COLS = list(range(0, 100))

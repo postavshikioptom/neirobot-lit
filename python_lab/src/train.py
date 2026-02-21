@@ -1061,10 +1061,6 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     
     return score
 
-def enable_dropout(m):
-    if isinstance(m, nn.Dropout):
-        m.train()
-
 def train():
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
@@ -2492,6 +2488,94 @@ def train():
         print()
         
         trainer.fit(model, train_loader, val_loader)
+        
+        # ============================================================================
+        # MC Dropout for Uncertainty Estimation (Задача 125)
+        # ============================================================================
+        print(f"\n{'='*60}")
+        print("MC DROPOUT UNCERTAINTY ESTIMATION")
+        print(f"{'='*60}\n")
+        
+        try:
+            from .utils import calculate_uncertainty
+            
+            # Переключаем модель в режим MC Dropout
+            model.model.apply(enable_dropout)
+            model.model.eval()  # Остальные слои остаются в eval режиме
+            
+            # Выполняем warm-up для стабилизации CUDA/JIT
+            print("Warming up model...")
+            with torch.no_grad():
+                dummy_input = torch.randn(1, args.seq_len, in_channels, 50, device=next(model.parameters()).device)
+                for _ in range(5):
+                    _ = model(dummy_input)
+            print("Warm-up completed.\n")
+            
+            # Выполняем N прогонов MC Dropout для сбора логитов
+            n_mc_passes = 20
+            print(f"Performing {n_mc_passes} MC Dropout passes on validation set...")
+            
+            mc_logits_list = []
+            val_labels_list = []
+            
+            for mc_pass in tqdm(range(n_mc_passes), desc="MC Passes"):
+                pass_logits = []
+                pass_labels = []
+                
+                with torch.no_grad():
+                    for batch in tqdm(val_loader, desc=f"Pass {mc_pass+1}/{n_mc_passes}", leave=False):
+                        if len(batch) == 5:
+                            x, y, _, _, regime_id = batch
+                        else:
+                            x, y, _, _ = batch
+                            regime_id = None
+                        
+                        x = x.to(next(model.parameters()).device)
+                        y = y.to(next(model.parameters()).device)
+                        
+                        if regime_id is not None:
+                            regime_id = regime_id.to(next(model.parameters()).device)
+                        
+                        logits, _ = model(x, regime_id=regime_id)
+                        pass_logits.append(logits.cpu())
+                        pass_labels.append(y.cpu())
+                
+                mc_logits_list.append(torch.cat(pass_logits, dim=0))
+                if mc_pass == 0:
+                    val_labels_list = torch.cat(pass_labels, dim=0)
+            
+            # Объединяем логиты: (n_passes, batch_size, num_classes)
+            mc_logits = torch.stack(mc_logits_list, dim=0)
+            
+            # Вычисляем неопределенность
+            mean_probs, entropy, mutual_info = calculate_uncertainty(mc_logits)
+            
+            # Логируем статистику неопределенности
+            print(f"\n{'='*60}")
+            print("Uncertainty Statistics:")
+            print(f"  Entropy - Mean: {entropy.mean().item():.4f}, Std: {entropy.std().item():.4f}")
+            print(f"           Min: {entropy.min().item():.4f}, Max: {entropy.max().item():.4f}")
+            print(f"  MI      - Mean: {mutual_info.mean().item():.4f}, Std: {mutual_info.std().item():.4f}")
+            print(f"           Min: {mutual_info.min().item():.4f}, Max: {mutual_info.max().item():.4f}")
+            print(f"{'='*60}\n")
+            
+            # Сохраняем MC Dropout логиты и неопределенность для использования в evaluate_uncertainty.py
+            uncertainty_data = {
+                'mc_logits': mc_logits,
+                'entropy': entropy,
+                'mutual_info': mutual_info,
+                'val_labels': val_labels_list,
+                'mean_probs': mean_probs
+            }
+            
+            # Сохраняем в checkpoint директорию для дальнейшего анализа
+            uncertainty_path = checkpoint_dir / "mc_dropout_uncertainty.pt"
+            torch.save(uncertainty_data, uncertainty_path)
+            print(f"MC Dropout uncertainty data saved to: {uncertainty_path}\n")
+            
+        except Exception as e:
+            print(f"Warning: MC Dropout uncertainty estimation failed: {str(e)}")
+            print("Continuing with model pruning...\n")
         
         # ============================================================================
         # Model Pruning (Задача 159)
