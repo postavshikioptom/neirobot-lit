@@ -1026,9 +1026,40 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     
     val_mcc = matthews_corrcoef(val_labels, val_preds)
     
-    print(f"[Optuna Trial] seq_len={seq_len}, val_mcc={val_mcc:.4f}")
+    # Вычисляем ECE для Optuna (Задача 122, пункт 3)
+    # Собираем логиты для валидационного набора
+    all_logits = []
+    trial_model.eval()
+    with torch.no_grad():
+        for batch in trial_val_loader:
+            x = batch[0].to(device)
+            regime_id = batch[4].to(device) if len(batch) > 4 else None
+            
+            output = trial_model(x, regime_id=regime_id)
+            if isinstance(output, tuple):
+                logits = output[0]
+            else:
+                logits = output
+            
+            if logits.dim() == 3:
+                logits = logits[:, 0, :]
+            
+            all_logits.append(logits.cpu())
     
-    return val_mcc
+    val_logits_tensor = torch.cat(all_logits)
+    val_labels_tensor_for_ece = torch.from_numpy(val_labels).long()
+    
+    # Вычисляем ECE через CalibrationMetrics
+    calibration_metrics = CalibrationMetrics(n_bins=15)
+    ece, _, _ = calibration_metrics.calculate(val_logits_tensor, val_labels_tensor_for_ece)
+    
+    # Целевая функция: максимизируем MCC, минимизируем ECE
+    # Так как Optuna максимизирует, используем: MCC - (ECE * 0.5)
+    score = val_mcc - (ece * 0.5)
+    
+    print(f"[Optuna Trial] seq_len={seq_len}, val_mcc={val_mcc:.4f}, ece={ece:.4f}, score={score:.4f}")
+    
+    return score
 
 def enable_dropout(m):
     if isinstance(m, nn.Dropout):

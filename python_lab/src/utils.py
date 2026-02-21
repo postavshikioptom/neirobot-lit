@@ -293,24 +293,47 @@ class CalibrationMetrics:
         return ece.item(), mce.item(), bin_data
 
 
+def calculate_ece(probs, labels, bins=15):
+    """
+    probs: тензор вероятностей после Softmax (N, C)
+    labels: истинные метки (N,)
+    """
+    confidences, predictions = torch.max(probs, dim=1)
+    accuracies = predictions.eq(labels)
+    
+    ece = torch.zeros(1, device=probs.device)
+    bin_boundaries = torch.linspace(0, 1, bins + 1)
+    
+    for i in range(bins):
+        lower, upper = bin_boundaries[i], bin_boundaries[i+1]
+        # Маска для элементов в текущей корзине (bin)
+        in_bin = confidences.gt(lower.item()) * confidences.le(upper.item())
+        prop_in_bin = in_bin.float().mean()
+        
+        if prop_in_bin > 0:
+            accuracy_in_bin = accuracies[in_bin].float().mean()
+            avg_confidence_in_bin = confidences[in_bin].mean()
+            ece += torch.abs(accuracy_in_bin - avg_confidence_in_bin) * prop_in_bin
+    
+    return ece.item()
+
+
 def plot_reliability_diagram(bin_data, ece, mce, save_path):
     """
     Строит диаграмму надежности (Reliability Diagram) с двойной осью.
     
-    Основная ось показывает точность (Accuracy), вторичная ось показывает 
-    количество примеров в каждой корзине (Count) с логарифмической шкалой.
-    
     Args:
-        bin_data: список словарей с данными по корзинам (из CalibrationMetrics.calculate)
+        bin_data: список словарей с данными по каждой корзине (из CalibrationMetrics.calculate)
         ece: Expected Calibration Error
         mce: Maximum Calibration Error
         save_path: путь для сохранения графика (например, reports/SYMBOL/calibration.png)
     """
+    # Строим диаграмму
     accs = [d['acc'] for d in bin_data]
     confs = [d['conf'] for d in bin_data]
     counts = [d['count'] for d in bin_data]
-    bins = np.linspace(0, 1, len(bin_data) + 1)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
+    bins_array = np.linspace(0, 1, len(bin_data) + 1)
+    bin_centers = (bins_array[:-1] + bins_array[1:]) / 2
 
     fig, ax1 = plt.subplots(figsize=(8, 8))
     
@@ -329,7 +352,7 @@ def plot_reliability_diagram(bin_data, ece, mce, save_path):
     ax2.bar(bin_centers, counts, width=1/len(bin_data), alpha=0.2, 
             color='gray', label='Bin Size')
     ax2.set_ylabel('Count (Log Scale)')
-    ax2.set_yscale('log')  # Логарифмическая шкала для лучшей видимости
+    ax2.set_yscale('log')
     ax2.legend(loc='upper right')
 
     plt.tight_layout()

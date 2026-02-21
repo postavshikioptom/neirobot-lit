@@ -98,6 +98,7 @@ def export():
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save exported files")
     parser.add_argument("--fp16", action="store_true", help="Convert model to FP16 for faster inference")
     parser.add_argument("--signal_only", action="store_true", default=True, help="Export only logits head (exclude volatility)")
+    parser.add_argument("--embed_temperature", action="store_true", help="Embed temperature scaling into ONNX graph (Div node before Softmax)")
     args = parser.parse_args()
 
     model_path = Path(args.model_path)
@@ -183,6 +184,19 @@ def export():
     # 5. Экспорт в ONNX (FP32)
     # Обертка для модели, чтобы она принимала 3D тензор [1, seq_len, features]
     # и преобразовывала его в 4D [1, seq_len, channels, levels], который ожидает LiTModel
+    class TemperatureEmbeddedModel(torch.nn.Module):
+        """Обертка для встраивания temperature scaling в ONNX граф"""
+        def __init__(self, base_model, temperature):
+            super().__init__()
+            self.base_model = base_model
+            self.temperature = temperature
+        
+        def forward(self, x):
+            logits = self.base_model(x)
+            # Встраиваем деление на температуру в граф
+            calibrated_logits = logits / self.temperature
+            return calibrated_logits
+    
     class ModelWrapper(torch.nn.Module):
         def __init__(self, base_model, n_channels, n_levels, signal_only=True):
             super().__init__()
@@ -202,6 +216,15 @@ def export():
             return outputs
 
     wrapped_model = ModelWrapper(module.model, n_channels, n_levels, signal_only=args.signal_only)
+    
+    # Если требуется встроить температуру в граф
+    if args.embed_temperature:
+        temperature_value = hparams.get("temperature", 1.0)
+        wrapped_model = TemperatureEmbeddedModel(wrapped_model, temperature_value)
+        print(f"Embedding temperature T={temperature_value} into ONNX graph...")
+        temperature_embedded = True
+    else:
+        temperature_embedded = False
     dummy_input_3d = torch.randn(1, seq_len, n_channels * n_levels)
     
     # Определяем имена выходов
@@ -281,7 +304,7 @@ def export():
         "git_hash": get_git_hash(),
         "export_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "temperature": temperature,
-        "temperature_embedded": False,
+        "temperature_embedded": temperature_embedded,
         "model_name": "LiT",
         "model_params": {
             "architecture": "LiT-Transformer",
