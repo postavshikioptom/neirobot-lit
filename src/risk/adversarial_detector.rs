@@ -77,7 +77,7 @@ impl AdversarialDetector {
     /// Обновить VPIN с новой сделкой
     fn update_vpin(&mut self, trade: &PublicTrade) {
         let trade_price = trade.price.to_f64().unwrap_or(0.0);
-        let trade_volume = trade.amount.to_f64().unwrap_or(0.0);
+        let trade_volume = trade.size.to_f64().unwrap_or(0.0);
 
         // Классифицировать сделку
         let side = self.classify_trade_side(trade_price);

@@ -71,8 +71,8 @@ impl RollingPriceStats {
         self.last_ts = trade.timestamp;
 
         // 2. Добавление новой сделки (VWAP)
-        self.sum_pv += trade.price * trade.amount;
-        self.sum_vol += trade.amount;
+        self.sum_pv += trade.price * trade.size;
+        self.sum_vol += trade.size;
         self.trades.push_back(trade);
 
         // 3. Очистка старых данных (Sliding Window)
@@ -81,8 +81,8 @@ impl RollingPriceStats {
             let old = self.trades.pop_front().unwrap();
             
             // Вычитаем из VWAP
-            self.sum_pv -= old.price * old.amount;
-            self.sum_vol -= old.amount;
+            self.sum_pv -= old.price * old.size;
+            self.sum_vol -= old.size;
             
             // Для TWAP: вычитаем дельту первой сделки
             // Дельта = (следующая_сделка.timestamp - старая_сделка.timestamp) * старая_сделка.price
@@ -102,7 +102,7 @@ impl RollingPriceStats {
             let (s_pv, s_vol) = self.trades.iter()
                 .filter(|t| t.side == side)
                 .fold((Decimal::ZERO, Decimal::ZERO), |acc, t| {
-                    (acc.0 + t.price * t.amount, acc.1 + t.amount)
+                    (acc.0 + t.price * t.size, acc.1 + t.size)
                 });
             if s_vol.is_zero() { 
                 Decimal::ZERO 
@@ -183,14 +183,14 @@ mod tests {
         // Добавляем несколько сделок
         stats.update(PublicTrade {
             price: dec!(100.0),
-            amount: dec!(10.0),
+            size: dec!(10.0),
             side: Side::Buy,
             timestamp: 1000,
         });
         
         stats.update(PublicTrade {
             price: dec!(110.0),
-            amount: dec!(20.0),
+            size: dec!(20.0),
             side: Side::Sell,
             timestamp: 2000,
         });
@@ -206,14 +206,14 @@ mod tests {
         
         stats.update(PublicTrade {
             price: dec!(100.0),
-            amount: dec!(10.0),
+            size: dec!(10.0),
             side: Side::Buy,
             timestamp: 1000,
         });
         
         stats.update(PublicTrade {
             price: dec!(110.0),
-            amount: dec!(20.0),
+            size: dec!(20.0),
             side: Side::Sell,
             timestamp: 3000,
         });
@@ -229,14 +229,14 @@ mod tests {
         
         stats.update(PublicTrade {
             price: dec!(100.0),
-            amount: dec!(10.0),
+            size: dec!(10.0),
             side: Side::Buy,
             timestamp: 1000,
         });
         
         stats.update(PublicTrade {
             price: dec!(110.0),
-            amount: dec!(20.0),
+            size: dec!(20.0),
             side: Side::Sell,
             timestamp: 7000, // Старая сделка должна быть удалена
         });
