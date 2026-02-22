@@ -855,12 +855,15 @@ impl RiskManager {
         tick_size: Decimal, // Задача 176: Для проверки дубликатов
     ) -> Result<()> {
         // 0. Проверка на дубликат ордера (Задача 176)
-        let price_f64 = price.to_f64().unwrap_or(0.0);
-        let qty_f64 = qty.to_f64().unwrap_or(0.0);
-        let tick_size_f64 = tick_size.to_f64().unwrap_or(0.0);
-        
-        if self.is_duplicate(side, price_f64, qty_f64, tick_size_f64) {
-            bail!("Risk: Duplicate order detected (fuzzy match)");
+        // Пропускаем проверку, если разрешены множественные активные ордера (для сеточной торговли)
+        if !self.config.allow_multiple_active_orders {
+            let price_f64 = price.to_f64().unwrap_or(0.0);
+            let qty_f64 = qty.to_f64().unwrap_or(0.0);
+            let tick_size_f64 = tick_size.to_f64().unwrap_or(0.0);
+            
+            if self.is_duplicate(side, price_f64, qty_f64, tick_size_f64) {
+                bail!("Risk: Duplicate order detected (fuzzy match)");
+            }
         }
 
         // 1. Проверка глобальных рисков и здоровья (Задача 171)
@@ -1792,7 +1795,8 @@ impl RiskManager {
             
             let qty_diff_pct = (qty - intent.qty).abs() / intent.qty;
 
-            if qty_diff_pct > qty_tolerance {
+            // Задача 176: Строгое сравнение (>= вместо >) для соответствия формуле diff < tolerance
+            if qty_diff_pct >= qty_tolerance {
                 continue;
             }
 
@@ -1800,7 +1804,8 @@ impl RiskManager {
             let price_diff = (price - intent.price).abs();
             let price_tolerance = tick_size * price_tolerance_ticks as f64;
 
-            if price_diff > price_tolerance {
+            // Задача 176: Строгое сравнение (>= вместо >) для соответствия формуле diff < tolerance
+            if price_diff >= price_tolerance {
                 continue;
             }
 

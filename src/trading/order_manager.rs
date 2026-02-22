@@ -284,10 +284,12 @@ impl OrderManager {
     /// Генерация уникального order_link_id с атомарным nonce (Задача 176)
     /// Формат: LIT_{symbol}_{unix_ms}_{nonce}
     /// Гарантирует уникальность даже при генерации нескольких ордеров в одну миллисекунду
-    pub fn generate_order_link_id(&self, symbol: &str) -> String {
+    /// Задача 176: Генерация уникального order_link_id в формате {bot_id}-{signal_id}-{unix_ms}-{nonce}
+    pub fn generate_order_link_id(&self, bot_id: &str, signal_id: Option<&str>) -> String {
         let now = chrono::Utc::now().timestamp_millis();
         let nonce = self.nonce.fetch_add(1, Ordering::SeqCst);
-        format!("LIT_{}_{}_{}", symbol.to_uppercase(), now, nonce)
+        let sig_id = signal_id.unwrap_or("NOSIG");
+        format!("{}-{}-{}-{}", bot_id, sig_id, now, nonce)
     }
 
     /// Отправка лимитного ордера на биржу
@@ -315,7 +317,7 @@ impl OrderManager {
         best_ask: Option<Decimal>,
         position_qty: Option<Decimal>,
     ) -> Result<String> {
-        let order_link_id = self.generate_order_link_id(&bot_config.symbol);
+        let order_link_id = self.generate_order_link_id(&bot_config.bot_id, None);
         
         // Проверка на дубликат
         if self.active_orders.contains_key(&order_link_id) {
@@ -1038,7 +1040,7 @@ impl OrderManager {
         bot_config: &BotConfig,
         exchange_config: &ExchangeConfig,
     ) -> Result<()> {
-        let order_link_id = self.generate_order_link_id(&bot_config.symbol);
+        let order_link_id = self.generate_order_link_id(&bot_config.bot_id, None);
         
         if let Some(request) = position_manager.emergency_market_close(
             exchange_config.bybit.category.clone(),
@@ -1636,7 +1638,7 @@ impl OrderManager {
         let display_qty = Decimal::from_f64(display_size).unwrap_or(Decimal::ZERO);
         
         // Создаем link_id для ордера
-        let link_id = self.generate_order_link_id(&bot_config.symbol);
+        let link_id = self.generate_order_link_id(&bot_config.bot_id, None);
         
         // Создаем ордер
         let mut order = Order::new(
@@ -1667,12 +1669,13 @@ impl OrderManager {
             bot_config.symbol, total_size, display_size, display_ratio * 100.0, price
         );
         
-        // Регистрируем намерение
+        // Регистрируем намерение с полным объемом (total_size), а не display_size
+        // Это критично для корректного fuzzy matching дубликатов айсбергов
         risk_manager.register_order_intent(
             link_id.clone(),
             side,
             price.to_f64().unwrap_or(0.0),
-            display_size,
+            total_size, // Используем total_size вместо display_size
         );
         
         // Отправляем на биржу используя стандартную логику place_limit_order

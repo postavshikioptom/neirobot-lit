@@ -560,6 +560,7 @@ fn default_duplicate_window_ms() -> u64 { 5000 } // 5 секунд окно де
 fn default_duplicate_qty_tolerance_pct() -> f64 { 0.01 } // 1% допуск по объему
 fn default_duplicate_price_tolerance_ticks() -> u32 { 2 } // 2 тика допуск по цене
 fn default_order_intent_timeout_ms() -> u64 { 30000 } // 30 секунд таймаут очистки
+fn default_allow_multiple_active_orders() -> bool { false } // По умолчанию запрещаем множественные ордера
 
 // Задача 177: Расширенный фильтр отклонения цены
 fn default_max_price_deviation_bps() -> u32 { 500 } // 500 bps = 5%
@@ -648,6 +649,8 @@ pub struct RiskDefaultsConfig {
     pub duplicate_price_tolerance_ticks: u32,
     #[serde(default = "default_order_intent_timeout_ms")]
     pub order_intent_timeout_ms: u64,
+    #[serde(default = "default_allow_multiple_active_orders")]
+    pub allow_multiple_active_orders: bool,
 
     // Задача 177: Расширенный фильтр отклонения цены
     #[serde(default = "default_max_price_deviation_bps")]
@@ -758,6 +761,7 @@ impl Default for RiskDefaultsConfig {
             duplicate_qty_tolerance_pct: default_duplicate_qty_tolerance_pct(),
             duplicate_price_tolerance_ticks: default_duplicate_price_tolerance_ticks(),
             order_intent_timeout_ms: default_order_intent_timeout_ms(),
+            allow_multiple_active_orders: default_allow_multiple_active_orders(),
             max_price_deviation_bps: default_max_price_deviation_bps(),
             price_reference_source: PriceReferenceSource::default(),
             halt_on_extreme_deviation: default_halt_on_extreme_deviation(),
@@ -1113,6 +1117,7 @@ impl Default for SorConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct BotConfig {
+    pub bot_id: String, // Задача 176: Уникальный ID бота для формирования order_link_id
     pub symbol: String,
     pub model_path: std::path::PathBuf,
     #[serde(default = "default_seq_len")]
@@ -1429,6 +1434,7 @@ pub struct BotConfig {
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
+            bot_id: "BOT_DEFAULT".to_string(), // Задача 176: ID бота по умолчанию
             symbol: "UNKNOWN".to_string(),
             model_path: std::path::PathBuf::from("models/default.onnx"),
             seq_len: default_seq_len(),

@@ -124,30 +124,36 @@ pub struct Signal {
     pub side: SignalSide,
     /// Время получения исходного снепшота стакана (receive_ts) в миллисекундах (Задача 169)
     pub source_timestamp_ms: u64,
+    /// Задача 176: Уникальный ID сигнала для формирования order_link_id
+    pub id: String,
 }
 
 impl Signal {
-    /// Создать новый сигнал с указанным типом и временем
-    pub fn new(side: SignalSide, source_timestamp_ms: u64) -> Self {
+    /// Создать новый сигнал с указанным типом, временем и ID
+    pub fn new(side: SignalSide, source_timestamp_ms: u64, id: String) -> Self {
         Signal {
             side,
             source_timestamp_ms,
+            id,
         }
     }
 
-    /// Создать сигнал Up с нулевым timestamp (для обратной совместимости)
+    /// Создать сигнал Up с нулевым timestamp и автогенерированным ID (для обратной совместимости)
     pub fn up() -> Self {
-        Signal::new(SignalSide::Up, 0)
+        let id = format!("SIG_UP_{}", chrono::Utc::now().timestamp_millis());
+        Signal::new(SignalSide::Up, 0, id)
     }
 
-    /// Создать сигнал Down с нулевым timestamp (для обратной совместимости)
+    /// Создать сигнал Down с нулевым timestamp и автогенерированным ID (для обратной совместимости)
     pub fn down() -> Self {
-        Signal::new(SignalSide::Down, 0)
+        let id = format!("SIG_DOWN_{}", chrono::Utc::now().timestamp_millis());
+        Signal::new(SignalSide::Down, 0, id)
     }
 
-    /// Создать сигнал Flat с нулевым timestamp (для обратной совместимости)
+    /// Создать сигнал Flat с нулевым timestamp и автогенерированным ID (для обратной совместимости)
     pub fn flat() -> Self {
-        Signal::new(SignalSide::Flat, 0)
+        let id = format!("SIG_FLAT_{}", chrono::Utc::now().timestamp_millis());
+        Signal::new(SignalSide::Flat, 0, id)
     }
 
     // Для обратной совместимости - методы для проверки типа сигнала

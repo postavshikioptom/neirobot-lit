@@ -663,28 +663,29 @@ fn test_order_link_id_uniqueness() {
     let om2 = OrderManager::new();
     
     // Генерируем несколько order_link_id подряд используя реальный метод
-    let id1 = om1.generate_order_link_id("BTCUSDT");
-    let id2 = om1.generate_order_link_id("BTCUSDT");
-    let id3 = om1.generate_order_link_id("BTCUSDT");
+    // Задача 176: Новый формат {bot_id}-{signal_id}-{unix_ms}-{nonce}
+    let id1 = om1.generate_order_link_id("BOT_1", Some("SIG_100"));
+    let id2 = om1.generate_order_link_id("BOT_1", Some("SIG_100"));
+    let id3 = om1.generate_order_link_id("BOT_1", Some("SIG_100"));
     
     // Все ID должны быть уникальными
     assert_ne!(id1, id2, "Order link IDs should be unique");
     assert_ne!(id2, id3, "Order link IDs should be unique");
     assert_ne!(id1, id3, "Order link IDs should be unique");
     
-    // Проверяем формат (должен содержать префикс и nonce)
-    assert!(id1.starts_with("LIT_BTCUSDT_"), "Order link ID should start with LIT_BTCUSDT_");
-    assert!(id2.starts_with("LIT_BTCUSDT_"), "Order link ID should start with LIT_BTCUSDT_");
-    assert!(id3.starts_with("LIT_BTCUSDT_"), "Order link ID should start with LIT_BTCUSDT_");
+    // Проверяем формат (должен начинаться с BOT_1-SIG_100-)
+    assert!(id1.starts_with("BOT_1-SIG_100-"), "Order link ID should start with BOT_1-SIG_100-");
+    assert!(id2.starts_with("BOT_1-SIG_100-"), "Order link ID should start with BOT_1-SIG_100-");
+    assert!(id3.starts_with("BOT_1-SIG_100-"), "Order link ID should start with BOT_1-SIG_100-");
     
     // Проверяем, что nonce инкрементируется (последний компонент ID)
-    let parts1: Vec<&str> = id1.split('_').collect();
-    let parts2: Vec<&str> = id2.split('_').collect();
-    let parts3: Vec<&str> = id3.split('_').collect();
+    let parts1: Vec<&str> = id1.split('-').collect();
+    let parts2: Vec<&str> = id2.split('-').collect();
+    let parts3: Vec<&str> = id3.split('-').collect();
     
-    assert_eq!(parts1.len(), 4, "Order link ID should have 4 parts separated by _");
-    assert_eq!(parts2.len(), 4, "Order link ID should have 4 parts separated by _");
-    assert_eq!(parts3.len(), 4, "Order link ID should have 4 parts separated by _");
+    assert_eq!(parts1.len(), 4, "Order link ID should have 4 parts separated by -");
+    assert_eq!(parts2.len(), 4, "Order link ID should have 4 parts separated by -");
+    assert_eq!(parts3.len(), 4, "Order link ID should have 4 parts separated by -");
     
     // Проверяем, что nonce увеличивается
     let nonce1: u64 = parts1[3].parse().expect("Last part should be nonce");
@@ -695,7 +696,7 @@ fn test_order_link_id_uniqueness() {
     assert_eq!(nonce3, nonce2 + 1, "Nonce should increment");
     
     // Проверяем, что разные инстансы OrderManager имеют независимые nonce
-    let id_om2 = om2.generate_order_link_id("BTCUSDT");
+    let id_om2 = om2.generate_order_link_id("BOT_1", Some("SIG_100"));
     assert_ne!(id3, id_om2, "Different OrderManager instances should generate different IDs");
 }
 
