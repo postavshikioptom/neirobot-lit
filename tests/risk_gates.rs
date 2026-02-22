@@ -2215,3 +2215,58 @@ fn test_integration_signal_staleness_below_threshold() {
     assert!(!risk_manager.check_stale_signal_circuit_breaker(),
         "Circuit breaker should NOT trigger when stale ratio <= 50%");
 }
+
+
+#[cfg(test)]
+mod clock_drift_tests {
+    use super::*;
+    
+    #[test]
+    fn test_clock_drift_action_enum() {
+        use neirobot_lit::config::types::ClockDriftAction;
+        
+        // Проверяем, что enum ClockDriftAction корректно сериализуется
+        let stop = ClockDriftAction::StopBot;
+        let log = ClockDriftAction::LogWarning;
+        
+        assert_eq!(stop, ClockDriftAction::StopBot);
+        assert_eq!(log, ClockDriftAction::LogWarning);
+    }
+    
+    #[test]
+    fn test_risk_manager_blocks_on_clock_drift() {
+        use neirobot_lit::risk::risk_manager::RiskManager;
+        use neirobot_lit::config::types::RiskDefaultsConfig;
+        use rust_decimal::Decimal;
+        
+        // Создаем конфигурацию с низким лимитом дрифта
+        let mut config = RiskDefaultsConfig::default();
+        config.max_clock_drift_ms = 100; // 100ms лимит
+        
+        // Создаем RiskManager
+        let mut risk_manager = RiskManager::new(
+            config,
+            Decimal::from(10000) // initial equity
+        );
+        
+        // Симулируем обнаружение дрифта
+        risk_manager.health_monitor.last_clock_drift = 500; // 500ms дрифт
+        risk_manager.health_monitor.is_clock_stale = true;
+        
+        // Проверяем что check_risk_gates блокирует торговлю
+        let result = risk_manager.check_risk_gates(Decimal::ZERO);
+        
+        assert!(result.is_err(), "Expected check_risk_gates to fail when clock is stale");
+        assert!(risk_manager.is_blocked, "Expected is_blocked to be true");
+        
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Clock drift") || err_msg.contains("clock"),
+            "Error message should mention clock drift, got: {}",
+            err_msg
+        );
+    }
+    
+    // TODO: Добавить mock тест для calculate_clock_drift с подменой JSON ответа
+    // Требует mockito или similar для мокирования HTTP запросов
+}

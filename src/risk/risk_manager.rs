@@ -590,6 +590,40 @@ impl RiskManager {
             bail!("Risk: Price shock detected. Trading suspended.");
         }
 
+        // Задача 172: Проверка дрифта часов
+        if self.health_monitor.is_clock_stale() {
+            self.is_blocked = true;
+            error!(
+                "CRITICAL_RISK_STOP: Clock drift exceeded: {}ms > {}ms",
+                self.health_monitor.get_last_clock_drift().abs(),
+                self.config.max_clock_drift_ms
+            );
+            // Логируем в аудит (Задача 217)
+            if let Some(logger) = &self.audit_logger {
+                let _ = logger.log_risk_gate(
+                    "CLOCK_DRIFT",
+                    true,
+                    &format!(
+                        "{}ms > {}ms",
+                        self.health_monitor.get_last_clock_drift().abs(),
+                        self.config.max_clock_drift_ms
+                    ),
+                );
+            }
+            // Отправляем алерт в Telegram (Задача 222)
+            if let Some(am) = &self.alert_manager {
+                am.send_alert(crate::monitoring::alert_manager::Alert::new(
+                    crate::monitoring::alert_manager::AlertLevel::Critical,
+                    format!(
+                        "CRITICAL_RISK_STOP: Clock drift exceeded: {}ms",
+                        self.health_monitor.get_last_clock_drift().abs()
+                    ),
+                    "RiskManager".to_string(),
+                ));
+            }
+            bail!("Risk: Clock drift exceeded");
+        }
+
         // 1. Проверка здоровья системы с очисткой интентов (Задача 176)
         if let Err(e) = self.health_monitor.is_sane_with_intent_cleanup(&mut self.active_intents) {
             self.is_blocked = true;

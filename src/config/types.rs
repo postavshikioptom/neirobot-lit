@@ -156,6 +156,19 @@ fn default_stale_order_action() -> StaleOrderAction { StaleOrderAction::CancelOn
 fn default_min_fill_pct_to_keep() -> f64 { 0.8 }
 fn default_stale_check_interval_ms() -> u64 { 1000 }
 
+// --- Конфигурация защиты от десинхронизации времени (Задача 172) ---
+
+/// Действие при обнаружении критического дрифта часов
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClockDriftAction {
+    StopBot,    // Остановить торговлю
+    LogWarning, // Только логировать предупреждение
+}
+
+fn default_max_clock_drift_ms() -> i64 { 100 } // 100ms максимальный дрифт
+fn default_clock_sync_interval_s() -> u64 { 300 } // 300s = 5 минут интервал проверки
+fn default_drift_action() -> ClockDriftAction { ClockDriftAction::LogWarning }
+
 // Задача 180: Расширенная проверка целостности данных (Data Integrity Checksum Extended)
 fn default_checksum_validation_enabled() -> bool { true }
 fn default_max_checksum_mismatches() -> u32 { 3 }
@@ -670,6 +683,14 @@ pub struct RiskDefaultsConfig {
     #[serde(default = "default_max_checksum_mismatches")]
     pub max_checksum_mismatches: u32,
 
+    // Задача 172: Защита от десинхронизации времени (Clock Drift Protection)
+    #[serde(default = "default_max_clock_drift_ms")]
+    pub max_clock_drift_ms: i64,
+    #[serde(default = "default_clock_sync_interval_s")]
+    pub clock_sync_interval_s: u64,
+    #[serde(default = "default_drift_action")]
+    pub drift_action: ClockDriftAction,
+
     // Задача 187: Политика автоматизированной очистки данных
     #[serde(default = "default_raw_data_retention_days")]
     pub raw_data_retention_days: u32,
@@ -750,6 +771,9 @@ impl Default for RiskDefaultsConfig {
             stale_check_interval_ms: default_stale_check_interval_ms(),
             checksum_validation_enabled: default_checksum_validation_enabled(),
             max_checksum_mismatches: default_max_checksum_mismatches(),
+            max_clock_drift_ms: default_max_clock_drift_ms(),
+            clock_sync_interval_s: default_clock_sync_interval_s(),
+            drift_action: default_drift_action(),
             raw_data_retention_days: default_raw_data_retention_days(),
             max_data_dir_size_gb: default_max_data_dir_size_gb(),
             cleanup_interval_hours: default_cleanup_interval_hours(),

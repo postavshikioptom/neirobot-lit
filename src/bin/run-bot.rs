@@ -1391,6 +1391,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
     let mut stale_order_check_interval = tokio::time::interval(Duration::from_millis(config.bot.stale_check_interval_ms)); // Задача 179
     let mut log_archival_interval = tokio::time::interval(Duration::from_secs(3600)); // Задача 182: Архивация логов раз в час
     let mut data_cleanup_interval = tokio::time::interval(Duration::from_secs(config.bot.risk.cleanup_interval_hours as u64 * 3600)); // Задача 187: Очистка данных
+    let mut clock_drift_check_interval = tokio::time::interval(Duration::from_secs(config.bot.risk.clock_sync_interval_s)); // Задача 172: Проверка дрифта часов
     let mut position_sync_interval = tokio::time::interval(Duration::from_secs(config.bot.position_sync_interval_secs)); // Задача 066: Синхронизация позиции
     let mut last_chase_time = 0u64;
     let chase_interval_ms = config.bot.chase_interval_ms.max(200);
@@ -1691,6 +1692,14 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     config.logging.log_retention_days
                 ).await {
                     error!("Failed to run log archival task: {}", e);
+                }
+            }
+            _ = clock_drift_check_interval.tick() => {
+                // Задача 172: Периодическая проверка дрифта часов
+                if let Err(e) = execution.health_monitor.check_clock_drift(
+                    &config.exchange.base_url
+                ).await {
+                    error!("Clock drift check failed: {}", e);
                 }
             }
             _ = data_cleanup_interval.tick() => {

@@ -337,31 +337,41 @@ mod tests {
 // Проверка синхронизации времени с биржей (Задача 169)
 // ============================================================================
 
-/// Проверяет расхождение локального времени с временем биржи Bybit
+/// Рассчитывает дрифт часов между локальным временем и временем биржи Bybit
+/// с учетом RTT (Round Trip Time) для точности HFT
 /// 
 /// # Параметры
 /// - `base_url`: URL REST API биржи (например, "https://api.bybit.com")
-/// - `max_skew_ms`: Максимально допустимое расхождение в миллисекундах
 /// 
 /// # Возвращает
-/// - `Ok(delta_ms)`: Расхождение времени (local_ms - server_ms)
+/// - `Ok(drift_ms)`: Расхождение времени в миллисекундах (local_ms - adjusted_server_ms)
 /// - `Err`: Ошибка при запросе к API
+/// 
+/// # Логика
+/// 1. Замер t1 (Instant::now())
+/// 2. Вызов GET /v5/market/time
+/// 3. Парсинг result.timeNano (Bybit V5 format)
+/// 4. Замер t2 (Instant::now())
+/// 5. Расчет: drift = current_unix_ms - (server_ms + rtt/2)
 /// 
 /// # Пример
 /// ```no_run
-/// use neirobot_lit::utils::helpers::check_clock_skew;
+/// use neirobot_lit::utils::helpers::calculate_clock_drift;
 /// 
-/// let delta = check_clock_skew("https://api.bybit.com", 5000).await?;
-/// if delta.abs() > 5000 {
-///     eprintln!("CRITICAL: Clock skew detected: {}ms", delta);
+/// let drift = calculate_clock_drift("https://api.bybit.com").await?;
+/// if drift.abs() > 100 {
+///     eprintln!("CRITICAL: Clock drift detected: {}ms", drift);
 /// }
 /// ```
-pub async fn check_clock_skew(base_url: &str, max_skew_ms: i64) -> anyhow::Result<i64> {
+pub async fn calculate_clock_drift(base_url: &str) -> anyhow::Result<i64> {
     use reqwest::Client;
     use serde_json::Value;
     
     let client = Client::new();
     let url = format!("{}/v5/market/time", base_url);
+    
+    // Замер t1 для расчета RTT
+    let t1 = std::time::Instant::now();
     
     // Запрашиваем время биржи
     let response = client
@@ -370,31 +380,39 @@ pub async fn check_clock_skew(base_url: &str, max_skew_ms: i64) -> anyhow::Resul
         .await
         .context("Failed to request server time from Bybit")?;
     
-    let local_ms = unix_ms() as i64;
+    // Замер t2 для расчета RTT
+    let t2 = std::time::Instant::now();
+    let rtt_ms = t2.duration_since(t1).as_millis() as u64;
     
     let json: Value = response
         .json()
         .await
         .context("Failed to parse server time response")?;
     
-    // Извлекаем время сервера из ответа
-    let server_ms = json["time"]
-        .as_i64()
-        .context("Missing 'time' field in server response")?;
+    // Извлекаем timeNano из result (Bybit V5 API format)
+    let time_nano_str = json["result"]["timeNano"]
+        .as_str()
+        .context("Missing 'result.timeNano' field in server response")?;
     
-    let delta = local_ms - server_ms;
+    // Конвертируем наносекунды в миллисекунды
+    let server_ms = time_nano_str
+        .parse::<u64>()
+        .context("Failed to parse timeNano as u64")?
+        / 1_000_000;
     
-    if delta.abs() > max_skew_ms {
-        tracing::error!(
-            "CRITICAL CLOCK SKEW: Local time differs from Bybit by {}ms (limit: {}ms)",
-            delta,
-            max_skew_ms
-        );
-    } else {
-        tracing::debug!("Clock skew check passed: delta = {}ms", delta);
-    }
+    // Корректируем время сервера с учетом половины RTT
+    let adjusted_server_ms = server_ms + (rtt_ms / 2);
     
-    Ok(delta)
+    // Вычисляем дрифт
+    let local_ms = unix_ms() as i64;
+    let drift = local_ms - adjusted_server_ms as i64;
+    
+    tracing::debug!(
+        "Clock drift check: local={}ms, server={}ms, rtt={}ms, adjusted_server={}ms, drift={}ms",
+        local_ms, server_ms, rtt_ms, adjusted_server_ms, drift
+    );
+    
+    Ok(drift)
 }
 
 #[cfg(test)]
@@ -403,13 +421,13 @@ mod clock_skew_tests {
     
     #[tokio::test]
     #[ignore] // Требует сетевого подключения
-    async fn test_check_clock_skew_real() {
-        let result = check_clock_skew("https://api.bybit.com", 5000).await;
+    async fn test_calculate_clock_drift_real() {
+        let result = calculate_clock_drift("https://api.bybit.com").await;
         assert!(result.is_ok());
         
-        let delta = result.unwrap();
+        let drift = result.unwrap();
         // Обычно расхождение должно быть меньше 1 секунды
-        assert!(delta.abs() < 1000, "Clock skew too large: {}ms", delta);
+        assert!(drift.abs() < 1000, "Clock drift too large: {}ms", drift);
     }
 }
 

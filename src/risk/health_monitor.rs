@@ -30,6 +30,11 @@ pub struct HealthMonitor {
     // Задача 182: Архивация логов
     log_dir: Option<PathBuf>,
     last_archive_check: Instant,
+    
+    // Задача 172: Защита от десинхронизации времени (Clock Drift Protection)
+    last_clock_drift: i64,
+    is_clock_stale: bool,
+    last_clock_check: Instant,
 }
 
 impl HealthMonitor {
@@ -61,6 +66,9 @@ impl HealthMonitor {
             checksum_mismatch_count: 0,
             log_dir: None,
             last_archive_check: Instant::now(),
+            last_clock_drift: 0,
+            is_clock_stale: false,
+            last_clock_check: Instant::now(),
         }
     }
 
@@ -341,6 +349,55 @@ impl HealthMonitor {
         } else {
             sorted[mid]
         }
+    }
+    
+    /// Проверка дрифта часов (Задача 172)
+    /// Вызывается периодически для синхронизации времени с биржей
+    pub async fn check_clock_drift(&mut self, base_url: &str) -> anyhow::Result<()> {
+        use crate::utils::helpers::calculate_clock_drift;
+        
+        // Проверяем интервал
+        if self.last_clock_check.elapsed().as_secs() < self.config.clock_sync_interval_s {
+            return Ok(());
+        }
+        
+        // Вызываем calculate_clock_drift с обработкой ошибок
+        match calculate_clock_drift(base_url).await {
+            Ok(drift) => {
+                self.last_clock_drift = drift;
+                self.last_clock_check = Instant::now();
+                
+                // Проверяем превышение лимита
+                if drift.abs() > self.config.max_clock_drift_ms {
+                    tracing::error!(
+                        "CRITICAL: Clock drift exceeded: {}ms > {}ms",
+                        drift.abs(),
+                        self.config.max_clock_drift_ms
+                    );
+                    self.is_clock_stale = true;
+                } else {
+                    self.is_clock_stale = false;
+                    tracing::debug!("Clock drift check passed: {}ms", drift);
+                }
+            }
+            Err(e) => {
+                // При сетевой ошибке не блокируем бота сразу, только предупреждаем
+                tracing::warn!("Failed to check clock drift: {}. Keeping previous state.", e);
+                // Не меняем is_clock_stale при ошибке сети
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Возвращает флаг устаревания часов (Задача 172)
+    pub fn is_clock_stale(&self) -> bool {
+        self.is_clock_stale
+    }
+    
+    /// Возвращает последний измеренный дрифт часов (Задача 172)
+    pub fn get_last_clock_drift(&self) -> i64 {
+        self.last_clock_drift
     }
 }
 
