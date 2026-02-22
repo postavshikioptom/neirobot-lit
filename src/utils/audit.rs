@@ -133,7 +133,7 @@ impl AuditLogger {
 
         // Парсим последнюю строку через CSV reader для правильной обработки экранированных значений
         let mut reader = csv::Reader::from_reader(last_line.as_bytes());
-        if let Ok(record) = reader.records().next().transpose() {
+        if let Some(record) = reader.records().next() {
             if let Ok(record) = record {
                 if record.len() >= 7 {
                     let hash_str = record.get(6).unwrap_or("").trim_matches('"');
@@ -206,11 +206,13 @@ impl AuditLogger {
         };
 
         // Записываем в CSV
-        let mut wtr = Writer::from_writer(&mut inner.file);
-        wtr.serialize(&record)
-            .context("Failed to serialize audit record")?;
-        wtr.flush()
-            .context("Failed to flush CSV writer")?;
+        {
+            let mut wtr = Writer::from_writer(&mut inner.file);
+            wtr.serialize(&record)
+                .context("Failed to serialize audit record")?;
+            wtr.flush()
+                .context("Failed to flush CSV writer")?;
+        } // Writer уничтожается здесь, освобождая заимствование
 
         // Выполняем fsync для гарантии записи на диск
         inner.file.sync_all()

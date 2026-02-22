@@ -103,7 +103,7 @@ impl StatePersistenceManager {
     pub fn save_state(&self, state: &PersistentState) -> Result<()> {
         // Захватить эксклюзивную блокировку на файл состояния
         let lock_file = self.state_dir.join("state.lock");
-        let mut lock = OpenOptions::new()
+        let lock = OpenOptions::new()
             .create(true)
             .write(true)
             .open(&lock_file)?;
@@ -186,7 +186,7 @@ impl StatePersistenceManager {
     pub fn load_state(&self) -> Result<PersistentState> {
         // Захватить эксклюзивную блокировку на файл состояния
         let lock_file = self.state_dir.join("state.lock");
-        let mut lock = OpenOptions::new()
+        let lock = OpenOptions::new()
             .create(true)
             .write(true)
             .open(&lock_file)?;

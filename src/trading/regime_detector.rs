@@ -105,7 +105,7 @@ impl RegimeDetector {
     /// Вычисляет признаки для текущего состояния рынка
     /// Возвращает: [intensity, volatility, spread_z, ofi]
     fn compute_features(&self) -> Option<[f64; 4]> {
-        let window = self.config.window;
+        let _window = self.config.window;
         
         // Нужно минимум данных для расчета
         if self.mid_history.len() < 2 {

@@ -116,6 +116,7 @@ impl ExecutionEngine {
         let thresh_sell = bot_config.threshold_sell;
         let leverage = bot_config.leverage;
         let risk_config = bot_config.risk.clone();
+        let adversarial_config = bot_config.adversarial.clone();
         
         // Задача 202: Запускаем фоновый worker для логирования метрик исполнения
         let execution_quality_tx = crate::utils::logger::spawn_execution_quality_logger();
@@ -148,7 +149,7 @@ impl ExecutionEngine {
             close_on_flat,
             thresh_buy,
             thresh_sell,
-            bot_config,
+            bot_config: bot_config.clone(),
             market_info,
             trade_tx,
             execution_quality_tx,
@@ -177,7 +178,7 @@ impl ExecutionEngine {
             pending_slice_probs: None,
             last_signal_price: 0.0,
             regime_detector: None,
-            adversarial_detector: crate::risk::AdversarialDetector::new(bot_config.adversarial.clone()),
+            adversarial_detector: crate::risk::AdversarialDetector::new(adversarial_config),
             pending_trades: Vec::new(),
             current_funding_rate: 0.0,
             next_funding_time: 0,
@@ -201,7 +202,7 @@ impl ExecutionEngine {
     
     /// Установка sender для логирования влияния на цену (Задача 204)
     pub fn set_market_impact_logger(&mut self, tx: mpsc::Sender<crate::utils::logger::MarketImpactLog>) {
-        self.market_impact_tx = Some(tx);
+        self.market_impact_tx = Some(tx.clone());
         self.order_manager.set_market_impact_logger(tx);
     }
     
@@ -1819,7 +1820,7 @@ impl ExecutionEngine {
         let prob_down = probs[2];
 
         // Задача 161: Получаем динамические пороги на основе режима рынка
-        let (buy_threshold, sell_threshold, min_confidence) = self.get_thresholds_for_regime(regime);
+        let (buy_threshold, sell_threshold, _min_confidence) = self.get_thresholds_for_regime(regime);
         
         // Используем динамические пороги, если они не равны базовым (режим переопределен)
         // Иначе используем базовые пороги из конфига

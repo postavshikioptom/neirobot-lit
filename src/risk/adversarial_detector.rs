@@ -43,7 +43,7 @@ impl AdversarialDetector {
     /// Создать новый детектор
     pub fn new(config: AdversarialConfig) -> Self {
         Self {
-            config,
+            config: config.clone(),
             vpin_buckets: VecDeque::with_capacity(config.vpin_buckets_count),
             current_bucket: VPINBucket {
                 buy_volume: 0.0,

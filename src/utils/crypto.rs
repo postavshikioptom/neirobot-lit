@@ -45,7 +45,7 @@ impl MasterKey {
             2,     // iterations
             1,     // parallelism
             Some(KEY_SIZE)
-        ).context("Failed to create Argon2 params")?;
+        ).map_err(|e| anyhow::anyhow!("Failed to create Argon2 params: {}", e))?;
 
         let argon2 = Argon2::new(
             Algorithm::Argon2id,
@@ -79,8 +79,8 @@ pub fn encrypt(plaintext: &str, master_password: &str) -> Result<String> {
     let master_key = MasterKey::from_password(master_password, &salt)?;
 
     // Создаем cipher
-    let key = Key::<Aes256Gcm>::from_slice(master_key.as_bytes());
-    let cipher = Aes256Gcm::new(key);
+    let key = Key::<Aes256Gcm>::clone_from_slice(master_key.as_bytes());
+    let cipher = Aes256Gcm::new(&key);
 
     // Генерируем случайный nonce
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -99,7 +99,7 @@ pub fn encrypt(plaintext: &str, master_password: &str) -> Result<String> {
     // Упаковываем: salt + nonce + tag + ciphertext (как указано в требованиях)
     let mut packed = Vec::with_capacity(SALT_SIZE + NONCE_SIZE + 16 + ciphertext_only.len());
     packed.extend_from_slice(&salt);
-    packed.extend_from_slice(nonce.as_slice());
+    packed.extend_from_slice(&nonce[..]);
     packed.extend_from_slice(tag);
     packed.extend_from_slice(ciphertext_only);
 
@@ -143,15 +143,15 @@ pub fn decrypt(encrypted: &str, master_password: &str) -> Result<String> {
     let master_key = MasterKey::from_password(master_password, salt)?;
 
     // Создаем cipher
-    let key = Key::<Aes256Gcm>::from_slice(master_key.as_bytes());
-    let cipher = Aes256Gcm::new(key);
+    let key = Key::<Aes256Gcm>::clone_from_slice(master_key.as_bytes());
+    let cipher = Aes256Gcm::new(&key);
 
     // Создаем nonce
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = *Nonce::from_slice(nonce_bytes);
 
     // Расшифровываем
     let plaintext_bytes = cipher
-        .decrypt(nonce, ciphertext_with_tag.as_ref())
+        .decrypt(&nonce, ciphertext_with_tag.as_ref())
         .map_err(|e| anyhow::anyhow!("Decryption failed (wrong password or tampered data): {}", e))?;
 
     // Конвертируем в строку

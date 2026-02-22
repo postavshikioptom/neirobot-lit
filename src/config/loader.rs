@@ -133,7 +133,7 @@ pub fn load_full_config(root_path: &Path, bot_config_path: &Path) -> Result<Full
         trading: effective_trading,
         risk: effective_risk,
         bot,
-        monitoring: global.monitoring.unwrap_or_default(),
+        monitoring: global.monitoring.clone().unwrap_or_default(),
         global,
     };
 

@@ -773,7 +773,7 @@ impl OrderBook {
     pub fn get_execution_vwap(&self, side: crate::data::types::Side, size: f64) -> Option<f64> {
         use crate::data::types::Side;
         
-        let (cum_vols, cum_pvs, levels) = match side {
+        let (cum_vols, cum_pvs, _levels) = match side {
             Side::Buy => (&self.cum_vol_asks, &self.cum_price_vol_asks, &self.asks),
             Side::Sell => (&self.cum_vol_bids, &self.cum_price_vol_bids, &self.bids),
         };

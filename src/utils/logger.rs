@@ -254,12 +254,11 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
             .with_ansi(true)
             .with_timer(timer)
             .with_thread_names(true)
-            .with_target(true)
-            .with_filter(EnvFilter::new(&config.level));
+            .with_target(true);
         match config.format.as_str() {
-            "json" => registry.with(console_layer.json()).init(),
-            "compact" => registry.with(console_layer.compact()).init(),
-            _ => registry.with(console_layer.pretty()).init(),
+            "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
+            "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
+            _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
         };
     } else {
         registry.init();

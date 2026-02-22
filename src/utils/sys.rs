@@ -5,7 +5,7 @@ use core_affinity::CoreId;
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use std::sync::OnceLock;
 use parking_lot::Mutex;
-use sysinfo::{System, Pid, get_current_pid};
+use sysinfo::{System, Pid, get_current_pid, ProcessesToUpdate};
 use tokio::sync::mpsc;
 use std::time::Duration;
 
@@ -61,7 +61,7 @@ pub fn update_resource_metrics() {
     let mut sys = SYSTEM.get_or_init(|| Mutex::new(System::new_all())).lock();
     let pid = *PID.get_or_init(|| get_current_pid().expect("Failed to get current PID"));
     
-    sys.refresh_process(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     if let Some(process) = sys.process(pid) {
         METRICS.rss_bytes.store(process.memory(), Ordering::Relaxed);
         METRICS.cpu_usage.store(process.cpu_usage().to_bits(), Ordering::Relaxed);
@@ -103,7 +103,7 @@ pub async fn monitor_resources(max_mem_mb: u64, tx: mpsc::Sender<SystemEvent>) {
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         
-        sys.refresh_process(pid);
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         if let Some(process) = sys.process(pid) {
             let rss_bytes = process.memory();
             let rss_mb = rss_bytes / (1024 * 1024);

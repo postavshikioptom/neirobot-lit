@@ -14,7 +14,6 @@ use crate::ml::types::{Signal, InferenceOutput, ModelMetadata};
 use crate::monitoring::latency::HOT_PATH_STATS;
 use crate::config::types::{OnnxConfig, OnnxExecutionMode, BotConfig};
 use crate::ml::tensor::TensorBuffer;
-use std::io::Write;
 use std::cell::RefCell;
 
 impl From<OnnxExecutionMode> for ExecutionMode {

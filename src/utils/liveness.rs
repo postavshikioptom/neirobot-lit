@@ -12,7 +12,7 @@ fn get_unix_timestamp() -> u64 {
 }
 
 /// Получить путь к файлу heartbeat для бота
-fn get_heartbeat_path(bot_path: &Path, symbol: &str) -> std::path::PathBuf {
+fn get_heartbeat_path(bot_path: &Path, _symbol: &str) -> std::path::PathBuf {
     bot_path.join("state").join("liveness.heartbeat")
 }
 

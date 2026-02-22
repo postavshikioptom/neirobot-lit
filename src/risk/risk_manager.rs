@@ -258,7 +258,7 @@ impl RiskManager {
     pub fn new(config: RiskConfig, initial_equity: Decimal) -> Self {
         let today = Utc::now().date_naive();
         Self { 
-            config, 
+            config: config.clone(), 
             peak_equity: initial_equity,
             initial_equity,
             daily_start_equity: initial_equity,
@@ -840,7 +840,7 @@ impl RiskManager {
         side: OrderSide, 
         qty: Decimal, 
         current_pos: &Position,
-        active_orders_count: usize,
+        _active_orders_count: usize,
         mid_price: Decimal,
     ) -> Result<()> {
         // 1. Расчет проекции позиции
