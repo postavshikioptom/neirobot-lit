@@ -385,10 +385,10 @@ pub fn generate_config_diff(old_content: &str, new_content: &str) -> String {
                 diffy::Line::Context(l) => {
                     diff_output.push_str(&format!(" {}\n", l));
                 }
-                diffy::Line::Delete(l) => {
+                diffy::Line::Minus(l) => {
                     diff_output.push_str(&format!("-{}\n", l));
                 }
-                diffy::Line::Add(l) => {
+                diffy::Line::Plus(l) => {
                     diff_output.push_str(&format!("+{}\n", l));
                 }
             }

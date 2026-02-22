@@ -212,7 +212,7 @@ impl ParquetDumper {
             col_idx += 2;
         }
 
-        let mut df = DataFrame::new(columns).context("Failed to create DataFrame")?;
+        let mut df = DataFrame::new(self.timestamps.len(), columns).context("Failed to create DataFrame")?;
         
         // Имя файла: SYMBOL_FIRSTTIMESTAMP.parquet
         let file_path = self.output_dir.join(format!("{}_{}.parquet", self.symbol, self.timestamps[0]));

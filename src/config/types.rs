@@ -372,7 +372,7 @@ fn default_tsl_activation_bps() -> u32 { 200 }  // 2% профита для ак
 fn default_tsl_distance_bps() -> u32 { 100 }   // 1% отступа от экстремума
 fn default_tsl_step_bps() -> u32 { 10 }        // 0.1% минимальный шаг обновления
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrailingStopConfig {
     #[serde(default = "default_tsl_mode")]
     pub tsl_mode: TSLMode,
@@ -712,6 +712,7 @@ impl Default for RiskDefaultsConfig {
             max_position_size: None,
             max_notional_usd: None,
             max_margin_usd: None,
+            leverage: default_leverage(),
             max_daily_drawdown_usd: None,
             max_daily_drawdown_pct: None,
             auto_reset_at_midnight: default_auto_reset(),

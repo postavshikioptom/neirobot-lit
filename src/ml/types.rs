@@ -191,6 +191,7 @@ pub struct InferenceOutput {
     pub signal: Signal,             // Up, Down, Flat (+ timestamp)
     pub probabilities: Vec<f32>,    // [prob_flat, prob_up, prob_down] - matches Signal enum indices
     /// Матрица формы [Horizons, 3], где 3 — это классы [Flat, Up, Down]
+    #[serde(skip)]
     pub probs: Array2<f32>,
     /// Энтропия предсказания H = -Σ p_i * log(p_i) (задача 224)
     #[serde(skip_serializing_if = "Option::is_none")]

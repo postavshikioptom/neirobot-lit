@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use anyhow::{Result, Context};
 use serde::Deserialize;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use ndarray::{Array2, Array4, s};
 use wide::f32x8;
 
@@ -37,15 +38,18 @@ pub fn normalize_features_simd(features: &mut [f32], means: &[f32], inv_stds: &[
     
     while i < simd_len {
         // Эффективная загрузка 8 элементов из памяти используя from_slice_unaligned
-        let feat_vec = f32x8::from_slice_unaligned(&features[i..i+8]);
-        let mean_vec = f32x8::from_slice_unaligned(&means[i..i+8]);
-        let inv_std_vec = f32x8::from_slice_unaligned(&inv_stds[i..i+8]);
+        let feat_vec = f32x8::new([features[i], features[i+1], features[i+2], features[i+3], features[i+4], features[i+5], features[i+6], features[i+7]]);
+        let mean_vec = f32x8::new([means[i], means[i+1], means[i+2], means[i+3], means[i+4], means[i+5], means[i+6], means[i+7]]);
+        let inv_std_vec = f32x8::new([inv_stds[i], inv_stds[i+1], inv_stds[i+2], inv_stds[i+3], inv_stds[i+4], inv_stds[i+5], inv_stds[i+6], inv_stds[i+7]]);
         
         // Применяем нормализацию: (x - mean) * inv_std
         let normalized = (feat_vec - mean_vec) * inv_std_vec;
         
         // Сохраняем результат обратно
-        normalized.write_to_slice_unaligned(&mut features[i..i+8]);
+        let arr = normalized.as_array();
+        for (j, &val) in arr.iter().enumerate() {
+            features[i + j] = val;
+        }
         
         i += 8;
     }
@@ -83,14 +87,17 @@ pub fn clip_features_simd(features: &mut [f32], lows: &[f32], highs: &[f32]) {
     let mut i = 0;
     
     while i < simd_len {
-        let feat_vec = f32x8::from_slice_unaligned(&features[i..i+8]);
-        let low_vec = f32x8::from_slice_unaligned(&lows[i..i+8]);
-        let high_vec = f32x8::from_slice_unaligned(&highs[i..i+8]);
+        let feat_vec = f32x8::new([features[i], features[i+1], features[i+2], features[i+3], features[i+4], features[i+5], features[i+6], features[i+7]]);
+        let low_vec = f32x8::new([lows[i], lows[i+1], lows[i+2], lows[i+3], lows[i+4], lows[i+5], lows[i+6], lows[i+7]]);
+        let high_vec = f32x8::new([highs[i], highs[i+1], highs[i+2], highs[i+3], highs[i+4], highs[i+5], highs[i+6], highs[i+7]]);
         
         // Клиппинг: max(low, min(x, high))
         let clipped = feat_vec.max(low_vec).min(high_vec);
         
-        clipped.write_to_slice_unaligned(&mut features[i..i+8]);
+        let arr = clipped.as_array();
+        for (j, &val) in arr.iter().enumerate() {
+            features[i + j] = val;
+        }
         
         i += 8;
     }
@@ -122,14 +129,17 @@ pub fn normalize_time_slice_simd(time_slice: &mut [f32], mean: f32, inv_std: f32
     let mut i = 0;
     
     while i < simd_len {
-        // Эффективная загрузка 8 элементов из памяти
-        let feat_vec = f32x8::from_slice_unaligned(&time_slice[i..i+8]);
+        // Загружаем 8 элементов в массив и создаем SIMD вектор
+        let mut arr = [0.0f32; 8];
+        arr.copy_from_slice(&time_slice[i..i+8]);
+        let feat_vec = f32x8::from(arr);
         
         // Применяем нормализацию: (x - mean) * inv_std
         let normalized = (feat_vec - mean_vec) * inv_std_vec;
         
         // Сохраняем результат обратно
-        normalized.write_to_slice_unaligned(&mut time_slice[i..i+8]);
+        let result_arr: [f32; 8] = normalized.into();
+        time_slice[i..i+8].copy_from_slice(&result_arr);
         
         i += 8;
     }
@@ -856,16 +866,9 @@ impl RegimeFeatureCalculator {
     
     /// Добавляет новый снапшот в историю
     pub fn push(&mut self, ob: &OrderBook, timestamp_ms: i64) {
-        // Вычисляем mid_price
-        let best_bid = ob.bids.first().map(|l| l.price).unwrap_or(Decimal::ZERO);
-        let best_ask = ob.asks.first().map(|l| l.price).unwrap_or(Decimal::ZERO);
-        let mid_price = ((best_bid + best_ask) / Decimal::TWO).to_f64().unwrap_or(0.0);
-        
-        // Извлекаем данные первого уровня
-        let ask_p_0 = best_ask.to_f64().unwrap_or(0.0);
-        let ask_v_0 = ob.asks.first().map(|l| l.quantity.to_f64().unwrap_or(0.0)).unwrap_or(0.0);
-        let bid_p_0 = best_bid.to_f64().unwrap_or(0.0);
-        let bid_v_0 = ob.bids.first().map(|l| l.quantity.to_f64().unwrap_or(0.0)).unwrap_or(0.0);
+        // Получаем данные через публичные методы OrderBook
+        let (bid_p_0, bid_v_0, ask_p_0, ask_v_0) = ob.get_best_bid_ask_with_vol();
+        let mid_price = (bid_p_0 + ask_p_0) / 2.0;
         
         // Добавляем в историю
         self.timestamps.push_back(timestamp_ms);

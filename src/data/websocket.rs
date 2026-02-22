@@ -174,7 +174,7 @@ impl BybitPrivateWsClient {
             "args": [api_key, expires, signature]
         });
 
-        Ok(Message::Text(auth_msg.to_string()))
+        Ok(Message::Text(auth_msg.to_string().into()))
     }
 
     pub async fn run(&self, tx: Sender<serde_json::Value>, mut reconnect_rx: Receiver<ReconnectSignal>, token: CancellationToken) -> Result<()> {

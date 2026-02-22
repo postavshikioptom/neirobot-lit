@@ -621,7 +621,7 @@ impl BybitRestClient {
                 max_qty,
                 qty_step,
             },
-            price_filter: PriceFilter {
+            price_filter: crate::trading::types::PriceFilter {
                 tick_size,
                 price_precision,
                 min_price,

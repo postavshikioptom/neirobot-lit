@@ -33,7 +33,7 @@ pub fn cancel_all_sync(key: &str, secret: &str, symbol: &str) {
         .header("X-BAPI-SIGN", &signature)
         .header("X-BAPI-RECV-WINDOW", recv_window)
         .header("Content-Type", "application/json")
-        .send_string(&body);
+        .send(body);
 
     if let Err(e) = res {
         eprintln!("!!! EMERGENCY CANCEL FAILED: {} !!!", e);

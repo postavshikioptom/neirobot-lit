@@ -143,8 +143,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
             // Пытаемся подключить CUDA, при ошибке — откатываемся на CPU
             match builder.with_execution_providers([
                 ep::CUDA::default()
-                    .with_device_id(config.device_id as u32)
-                    .with_fp16(is_fp16)
+                    .with_device_id(config.device_id as i32)
                     .build()
             ]) {
                 Ok(b) => {
@@ -187,22 +186,16 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
             // Настройка TensorRT с изолированным кэшем и фиксированным профилем
             // Используем FP16 для оптимальной производительности на GPU
             let trt_options = ep::TensorRT::default()
-                .with_device_id(config.device_id as u32)
+                .with_device_id(config.device_id as i32)
                 .with_engine_cache(true)
                 .with_engine_cache_path(&cache_path)
                 .with_fp16(true)  // FP16 для GPU, INT8 требует отдельной калибровки TensorRT
-                .with_builder_optimization_level(3)
-                .with_options([
-                    ("trt_profile_min_shapes", shape_str.clone()),
-                    ("trt_profile_opt_shapes", shape_str.clone()),
-                    ("trt_profile_max_shapes", shape_str),
-                    ("trt_max_workspace_size", "1073741824".to_string()),
-                ]);
+                .with_builder_optimization_level(3);
 
             match builder.with_execution_providers([
                 trt_options.build(),
                 ep::CUDA::default()
-                    .with_device_id(config.device_id as u32)
+                    .with_device_id(config.device_id as i32)
                     .build()
             ]) {
                 Ok(b) => {
@@ -419,10 +412,10 @@ impl OnnxEngine {
         let computed_hash = compute_file_hash(model_path)?;
         
         // Сравниваем с хэшем из metadata
-        if computed_hash != metadata.onnx_hash {
+        if Some(computed_hash.clone()) != metadata.onnx_hash {
             error!(
                 "Model integrity check FAILED! Expected hash: {}, computed hash: {}",
-                metadata.onnx_hash, computed_hash
+                metadata.onnx_hash.as_deref().unwrap_or("unknown"), computed_hash
             );
             bail!(
                 "Model file integrity violation detected. The model file may be corrupted or tampered with. \
@@ -625,7 +618,9 @@ impl OnnxEngine {
             let regime_array = ndarray::Array1::from_vec(vec![regime_id_val]);
             inputs![Value::from_array(array)?, Value::from_array(regime_array)?]
         } else {
-            inputs![Value::from_array(array)?]
+            // Создаём пустой массив для второго входа, чтобы размер был совместим
+            let empty_regime = ndarray::Array1::<i64>::zeros(1);
+            inputs![Value::from_array(array)?, Value::from_array(empty_regime)?]
         };
         
         let build_us = start_build.elapsed().as_micros() as u64;
@@ -766,7 +761,9 @@ impl OnnxEngine {
             let regime_array = ndarray::Array1::from_vec(vec![regime_id_val]);
             inputs![Value::from_array(array)?, Value::from_array(regime_array)?]
         } else {
-            inputs![Value::from_array(array)?]
+            // Создаём пустой массив для второго входа, чтобы размер был совместим
+            let empty_regime = ndarray::Array1::<i64>::zeros(1);
+            inputs![Value::from_array(array)?, Value::from_array(empty_regime)?]
         };
         
         let build_us = start_build.elapsed().as_micros() as u64;

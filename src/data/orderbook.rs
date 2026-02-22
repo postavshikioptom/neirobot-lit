@@ -153,7 +153,7 @@ impl OrderBookSnapshot {
             }
             
             let remaining = size - cum_vol;
-            let vol_to_use = volume.min(&remaining);
+            let vol_to_use = volume.min(remaining);
             
             cum_vol += vol_to_use;
             cum_pv += price * vol_to_use;
@@ -802,7 +802,7 @@ impl OrderBook {
                 std::cmp::Ordering::Greater
             }
         }) {
-            Ok(idx) => levels[idx].1.to_f64(),
+            Ok(idx) => levels[idx].1.to_f64().unwrap_or(0.0),
             Err(_) => 0.0,
         }
     }

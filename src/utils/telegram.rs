@@ -55,14 +55,14 @@ impl TelegramWorker {
             
             let escaped_text = escape_markdown_v2(&text);
             
-            let params = [
-                ("chat_id", &self.chat_id),
-                ("text", &escaped_text),
-                ("parse_mode", &"MarkdownV2".to_string()),
-            ];
+            let params = serde_json::json!({
+                "chat_id": &self.chat_id,
+                "text": &escaped_text,
+                "parse_mode": "MarkdownV2",
+            });
 
             // Отправляем запрос, игнорируя ошибки (не блокируем воркер)
-            if let Err(e) = self.client.post(&url).form(&params).send().await {
+            if let Err(e) = self.client.post(&url).json(&params).send().await {
                 tracing::warn!("Failed to send Telegram message: {}", e);
             }
         }
