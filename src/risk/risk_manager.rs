@@ -360,8 +360,8 @@ impl RiskManager {
                 );
                 if let Err(e) = alert_mgr.send_alert(
                     crate::monitoring::alert_manager::AlertLevel::Warning,
-                    "Memory Leak",
-                    &msg,
+                    msg.clone(),
+                    "RiskManager".to_string(),
                 ) {
                     error!("Failed to send memory leak alert: {}", e);
                 }
@@ -583,7 +583,7 @@ impl RiskManager {
             if let Some(am) = &self.alert_manager {
                 am.send_alert(crate::monitoring::alert_manager::Alert::new(
                     crate::monitoring::alert_manager::AlertLevel::Critical,
-                    "CRITICAL_RISK_STOP: Price shock detected. Trading suspended.",
+                    "CRITICAL_RISK_STOP: Price shock detected. Trading suspended.".to_string(),
                     "RiskManager".to_string(),
                 ));
             }
@@ -1941,7 +1941,20 @@ impl RiskManager {
 
     /// Задача 233: Проверить спред и отклонение от Mark Price для выхода из режима шока
     pub fn is_market_stabilized(&self, ob: &OrderBookSnapshot) -> bool {
-        let spread_bps = ob.get_spread_bps();
+        // Вычисляем спред вручную из bid/ask
+        let bid = ob.bids.first().map(|(p, _)| *p).unwrap_or(0.0);
+        let ask = ob.asks.first().map(|(p, _)| *p).unwrap_or(0.0);
+        let spread_bps = if bid > 0.0 && ask > 0.0 {
+            let mid = (bid + ask) / 2.0;
+            if mid > 0.0 {
+                ((ask - bid) / mid) * 10000.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        
         let mid_price = ob.get_mid_price();
         let mark_price = ob.mark_price;
         
@@ -1969,6 +1982,92 @@ impl RiskManager {
         }
         
         true
+    }
+
+    // ============================================================================
+    // Мониторинг устаревших сигналов (Задача 169)
+    // ============================================================================
+
+    /// Регистрирует факт обработки сигнала (устаревший или свежий)
+    /// 
+    /// # Параметры
+    /// - `is_stale`: true если сигнал был устаревшим
+    pub fn register_signal_staleness(&mut self, is_stale: bool) {
+        let now_ms = Utc::now().timestamp_millis();
+        self.stale_signal_history.push_back((now_ms, is_stale));
+        
+        // Очищаем старые записи за пределами окна
+        let cutoff = now_ms - self.stale_signal_window_ms;
+        while let Some(&(ts, _)) = self.stale_signal_history.front() {
+            if ts < cutoff {
+                self.stale_signal_history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Alias для register_signal_staleness (Задача 169)
+    /// Регистрирует статус сигнала (свежий или устаревший) для отслеживания
+    pub fn report_stale_signal(&mut self, is_stale: bool) {
+        self.register_signal_staleness(is_stale);
+    }
+
+    /// Проверяет, не превышен ли порог устаревших сигналов (Circuit Breaker)
+    /// 
+    /// # Возвращает
+    /// - `true` если более 50% сигналов за последние 5 минут были устаревшими
+    pub fn check_stale_signal_circuit_breaker(&self) -> bool {
+        if self.stale_signal_history.is_empty() {
+            return false;
+        }
+
+        let total = self.stale_signal_history.len();
+        let stale_count = self.stale_signal_history.iter()
+            .filter(|(_, is_stale)| *is_stale)
+            .count();
+
+        let stale_ratio = stale_count as f64 / total as f64;
+        
+        if stale_ratio > 0.5 {
+            error!(
+                "CIRCUIT BREAKER: Stale signal ratio {:.1}% ({}/{}) exceeds 50% threshold",
+                stale_ratio * 100.0,
+                stale_count,
+                total
+            );
+            return true;
+        }
+
+        if stale_ratio > 0.3 {
+            warn!(
+                "WARNING: High stale signal ratio {:.1}% ({}/{})",
+                stale_ratio * 100.0,
+                stale_count,
+                total
+            );
+        }
+
+        false
+    }
+
+    /// Возвращает текущую статистику устаревших сигналов
+    /// 
+    /// # Возвращает
+    /// - (total_signals, stale_count, stale_ratio)
+    pub fn get_staleness_stats(&self) -> (usize, usize, f64) {
+        let total = self.stale_signal_history.len();
+        if total == 0 {
+            return (0, 0, 0.0);
+        }
+
+        let stale_count = self.stale_signal_history.iter()
+            .filter(|(_, is_stale)| *is_stale)
+            .count();
+
+        let stale_ratio = stale_count as f64 / total as f64;
+        
+        (total, stale_count, stale_ratio)
     }
 }
 
@@ -2219,92 +2318,6 @@ mod tests {
         
         // Благодаря saturating_sub не должно быть паники, lockout не активен
         assert!(!risk.is_in_lockout(&state, &bot_config));
-    }
-
-    // ============================================================================
-    // Мониторинг устаревших сигналов (Задача 169)
-    // ============================================================================
-
-    /// Регистрирует факт обработки сигнала (устаревший или свежий)
-    /// 
-    /// # Параметры
-    /// - `is_stale`: true если сигнал был устаревшим
-    pub fn register_signal_staleness(&mut self, is_stale: bool) {
-        let now_ms = Utc::now().timestamp_millis();
-        self.stale_signal_history.push_back((now_ms, is_stale));
-        
-        // Очищаем старые записи за пределами окна
-        let cutoff = now_ms - self.stale_signal_window_ms;
-        while let Some(&(ts, _)) = self.stale_signal_history.front() {
-            if ts < cutoff {
-                self.stale_signal_history.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Alias для register_signal_staleness (Задача 169)
-    /// Регистрирует статус сигнала (свежий или устаревший) для отслеживания
-    pub fn report_stale_signal(&mut self, is_stale: bool) {
-        self.register_signal_staleness(is_stale);
-    }
-
-    /// Проверяет, не превышен ли порог устаревших сигналов (Circuit Breaker)
-    /// 
-    /// # Возвращает
-    /// - `true` если более 50% сигналов за последние 5 минут были устаревшими
-    pub fn check_stale_signal_circuit_breaker(&self) -> bool {
-        if self.stale_signal_history.is_empty() {
-            return false;
-        }
-
-        let total = self.stale_signal_history.len();
-        let stale_count = self.stale_signal_history.iter()
-            .filter(|(_, is_stale)| *is_stale)
-            .count();
-
-        let stale_ratio = stale_count as f64 / total as f64;
-        
-        if stale_ratio > 0.5 {
-            error!(
-                "CIRCUIT BREAKER: Stale signal ratio {:.1}% ({}/{}) exceeds 50% threshold",
-                stale_ratio * 100.0,
-                stale_count,
-                total
-            );
-            return true;
-        }
-
-        if stale_ratio > 0.3 {
-            warn!(
-                "WARNING: High stale signal ratio {:.1}% ({}/{})",
-                stale_ratio * 100.0,
-                stale_count,
-                total
-            );
-        }
-
-        false
-    }
-
-    /// Возвращает текущую статистику устаревших сигналов
-    /// 
-    /// # Возвращает
-    /// - (total_signals, stale_count, stale_ratio)
-    pub fn get_staleness_stats(&self) -> (usize, usize, f64) {
-        let total = self.stale_signal_history.len();
-        if total == 0 {
-            return (0, 0, 0.0);
-        }
-
-        let stale_count = self.stale_signal_history.iter()
-            .filter(|(_, is_stale)| *is_stale)
-            .count();
-
-        let stale_ratio = stale_count as f64 / total as f64;
-        
-        (total, stale_count, stale_ratio)
     }
 
     // ============================================================================

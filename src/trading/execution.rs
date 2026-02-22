@@ -24,7 +24,7 @@ use crate::data::types::PublicTrade;
 use crate::data::types::OrderBookUpdateOwned;
 
 /// Стратегия исполнения ордера (задача 206: Smart Order Routing)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExecutionStrategy {
     /// Пассивная стратегия (Limit ордер на лучшей цене)
     Passive,

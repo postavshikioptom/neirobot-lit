@@ -240,27 +240,44 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
     };
 
     // 8. Сборка слоев с опциональным Telegram Layer
-    let registry = match telegram_layer {
-        Some(tg_layer) => registry.with(tg_layer),
-        None => registry,
-    };
-
-    // 9. Опциональный консольный слой с маскированием секретов и выбором формата
-    if config.console_enabled {
-        let console_masking_writer = MaskingMakeWriter::new(std::io::stdout, secrets);
-        let console_layer = fmt::layer()
-            .with_writer(console_masking_writer)
-            .with_ansi(true)
-            .with_timer(timer)
-            .with_thread_names(true)
-            .with_target(true);
-        match config.format.as_str() {
-            "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
-            "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
-            _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
-        };
+    if let Some(tg_layer) = telegram_layer {
+        let registry = registry.with(tg_layer);
+        
+        // 9. Опциональный консольный слой с маскированием секретов и выбором формата
+        if config.console_enabled {
+            let console_masking_writer = MaskingMakeWriter::new(std::io::stdout, secrets);
+            let console_layer = fmt::layer()
+                .with_writer(console_masking_writer)
+                .with_ansi(true)
+                .with_timer(timer)
+                .with_thread_names(true)
+                .with_target(true);
+            match config.format.as_str() {
+                "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
+                "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
+                _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
+            };
+        } else {
+            registry.init();
+        }
     } else {
-        registry.init();
+        // 9. Опциональный консольный слой с маскированием секретов и выбором формата
+        if config.console_enabled {
+            let console_masking_writer = MaskingMakeWriter::new(std::io::stdout, secrets);
+            let console_layer = fmt::layer()
+                .with_writer(console_masking_writer)
+                .with_ansi(true)
+                .with_timer(timer)
+                .with_thread_names(true)
+                .with_target(true);
+            match config.format.as_str() {
+                "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
+                "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
+                _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
+            };
+        } else {
+            registry.init();
+        }
     }
 
     let max_files = config.max_files;

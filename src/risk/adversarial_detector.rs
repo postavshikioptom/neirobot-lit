@@ -3,6 +3,7 @@ use crate::data::types::{OrderBookUpdateOwned, PublicTrade, Side};
 use std::collections::VecDeque;
 use smallvec::SmallVec;
 use wide::f64x2;
+use rust_decimal::prelude::ToPrimitive;
 
 /// Структура для отслеживания жизненного цикла уровня (для Spoofing detection)
 #[derive(Debug, Clone)]
@@ -254,7 +255,7 @@ impl AdversarialDetector {
 
         // SIMD обработка по 2 элементам (f64x2) для квадратов отклонений
         while i < simd_len {
-            let v = f64x2::from_slice_unaligned(&values[i..i+2]);
+            let v = f64x2::new([values[i], values[i+1]]);
             let diff = v - mean_vec;
             let squared = diff * diff;
             variance_sum_simd = variance_sum_simd + squared;
@@ -262,7 +263,7 @@ impl AdversarialDetector {
         }
 
         // Редуцировать вектор в скаляр
-        let mut variance_sum = variance_sum_simd.sum();
+        let mut variance_sum = variance_sum_simd.as_array()[0] + variance_sum_simd.as_array()[1];
 
         // Скалярный fallback для оставшегося элемента
         if simd_len < values.len() {
@@ -284,13 +285,13 @@ impl AdversarialDetector {
 
         // SIMD обработка по 2 элементам за раз через f64x2
         while i < simd_len {
-            let v = f64x2::from_slice_unaligned(&values[i..i+2]);
+            let v = f64x2::new([values[i], values[i+1]]);
             sum_simd = sum_simd + v;
             i += 2;
         }
 
         // Редуцировать вектор в скаляр (sum_simd[0] + sum_simd[1])
-        let sum = sum_simd.sum();
+        let sum = sum_simd.as_array()[0] + sum_simd.as_array()[1];
 
         // Скалярный fallback для оставшегося элемента
         if simd_len < values.len() {
@@ -324,12 +325,12 @@ impl AdversarialDetector {
 
         // SIMD обработка по 2 элементам
         while i < simd_len {
-            let v = f64x2::from_slice_unaligned(&values[i..i+2]);
+            let v = f64x2::new([values[i], values[i+1]]);
             sum_simd = sum_simd + v;
             i += 2;
         }
 
-        let mut sum = sum_simd.sum();
+        let mut sum = sum_simd.as_array()[0] + sum_simd.as_array()[1];
 
         // Скалярный fallback
         if simd_len < values.len() {

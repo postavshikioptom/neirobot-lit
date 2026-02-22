@@ -4,7 +4,7 @@ use crate::utils::timestamp_ms;
 use crate::utils::helpers::get_unix_ms;
 use tracing::{info, warn, debug};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::Zero;
+use rust_decimal::prelude::{Zero, FromPrimitive, ToPrimitive};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
@@ -182,7 +182,7 @@ impl PositionManager {
     }
     
     /// Отправляет обновление equity через broadcast канал с учетом throttling (Задача 221)
-    fn send_equity_update(&mut self, mid_price: Decimal) {
+    fn send_equity_update(&mut self, _mid_price: Decimal) {
         if let Some(ref tx) = self.equity_tx {
             let now = chrono::Utc::now().timestamp_millis();
             
@@ -495,6 +495,9 @@ impl PositionManager {
             order_link_id,
             position_idx,
             reduce_only: Some(true),
+            active_price: None,
+            smp_type: None,
+            trailing_stop: None,
         })
     }
 

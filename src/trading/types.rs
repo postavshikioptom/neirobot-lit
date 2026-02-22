@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use anyhow::{anyhow, Result};
+use rust_decimal::prelude::ToPrimitive;
 
 // ============================================================================
 // State Machine Types (Задача 136)

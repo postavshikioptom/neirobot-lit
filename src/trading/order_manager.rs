@@ -18,6 +18,7 @@ use crate::utils::logger::MarketImpactLog;
 use crate::utils::rate_limiter::RateLimiter;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::FromPrimitive;
 use tokio::sync::mpsc;
 
 pub struct OrderManager {
