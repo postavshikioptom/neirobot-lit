@@ -427,17 +427,17 @@ impl OnnxEngine {
             bail!(
                 "Model file integrity violation detected. The model file may be corrupted or tampered with. \
                 Expected hash: {}, computed hash: {}",
-                metadata.onnx_hash, computed_hash
+                metadata.onnx_hash.as_deref().unwrap_or("unknown"), computed_hash
             );
         }
         
         // Логируем успешную валидацию
         info!("✓ Model integrity check PASSED");
-        info!("Model version: {}", metadata.version);
+        info!("Model version: {}", metadata.version.as_deref().unwrap_or("unknown"));
         if let Some(mcc) = metadata.mcc_score {
             info!("Model MCC score: {:.4}", mcc);
         }
-        info!("Model hash: {}", metadata.onnx_hash);
+        info!("Model hash: {}", metadata.onnx_hash.as_deref().unwrap_or("unknown"));
         
         // 1. Инициализация сессии с выбранным Execution Provider
         let session = init_session(onnx_config, model_path, symbol, seq_len, input_features)?;
@@ -623,9 +623,9 @@ impl OnnxEngine {
             let regime_id_val = regime_id.unwrap_or(0) as i64;
             // regime_array всё еще аллоцирует малый массив, но это пренебрежимо мало (8 байт)
             let regime_array = ndarray::Array1::from_vec(vec![regime_id_val]);
-            inputs![array, regime_array]?
+            inputs![Value::from_array(array)?, Value::from_array(regime_array)?]
         } else {
-            inputs![array]?
+            inputs![Value::from_array(array)?]
         };
         
         let build_us = start_build.elapsed().as_micros() as u64;
@@ -764,9 +764,9 @@ impl OnnxEngine {
         let ort_input = if self.use_regime_embedding {
             let regime_id_val = regime_id.unwrap_or(0) as i64;
             let regime_array = ndarray::Array1::from_vec(vec![regime_id_val]);
-            inputs![array, regime_array]?
+            inputs![Value::from_array(array)?, Value::from_array(regime_array)?]
         } else {
-            inputs![array]?
+            inputs![Value::from_array(array)?]
         };
         
         let build_us = start_build.elapsed().as_micros() as u64;
@@ -859,7 +859,7 @@ impl OnnxEngine {
         let duration_us = start_total.elapsed().as_micros() as u64;
         
         Ok(InferenceResult {
-            signal: output.signal,
+            output: output.output,
             duration_us,
         })
     }

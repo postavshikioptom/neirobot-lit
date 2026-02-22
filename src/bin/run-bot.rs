@@ -415,6 +415,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         ws_connected: AtomicBool::new(true),
         emergency_mode: AtomicBool::new(false),
         start_time: tokio::time::Instant::now(),
+        config: full_config.monitoring.clone().unwrap_or_default(),
     });
 
     // Запуск задачи мониторинга ресурсов в фоновом рантайме (каждые 5 секунд)

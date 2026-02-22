@@ -333,13 +333,13 @@ impl RiskManager {
                     metrics.cpu_usage_pct,
                     bot_config.resource_thresholds.cpu_max_pct
                 );
-                if let Err(e) = alert_mgr.send_alert(
-                    crate::monitoring::alert_manager::AlertLevel::Warning,
-                    "System Resources",
-                    &msg,
-                ) {
-                    error!("Failed to send CPU alert: {}", e);
-                }
+                alert_mgr.send_alert(
+                    crate::monitoring::alert_manager::Alert::new(
+                        crate::monitoring::alert_manager::AlertLevel::Warning,
+                        msg,
+                        "System Resources".to_string(),
+                    )
+                );
             }
         } else if self.current_scale < 1.0 && metrics.cpu_usage_pct < bot_config.resource_thresholds.cpu_max_pct * 0.8 {
             // Восстанавливаем лимиты, если CPU упал ниже 80% от порога
@@ -358,13 +358,13 @@ impl RiskManager {
                     metrics.memory_rss_kb / 1024,
                     bot_config.resource_thresholds.leak_detection_window
                 );
-                if let Err(e) = alert_mgr.send_alert(
-                    crate::monitoring::alert_manager::AlertLevel::Warning,
-                    msg.clone(),
-                    "RiskManager".to_string(),
-                ) {
-                    error!("Failed to send memory leak alert: {}", e);
-                }
+                alert_mgr.send_alert(
+                    crate::monitoring::alert_manager::Alert::new(
+                        crate::monitoring::alert_manager::AlertLevel::Warning,
+                        msg,
+                        "RiskManager".to_string(),
+                    )
+                );
             }
         }
     }

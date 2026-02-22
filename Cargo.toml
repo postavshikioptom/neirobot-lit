@@ -57,7 +57,7 @@ libc = "0.2.180"
 core_affinity = "0.8.3"
 hdrhistogram = "7.5.4"
 parking_lot = "0.12.5"
-axum = { version = "0.8.8", features = ["json", "ws"] }
+axum = { version = "0.7", features = ["json"] }
 ureq = "3.2.0"
 prometheus = "0.14"
 metrics = "0.24.3"

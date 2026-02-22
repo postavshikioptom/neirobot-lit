@@ -14,7 +14,9 @@ pub fn init_metrics_exporter(port: u16) -> Result<()> {
     
     // Создаем builder и устанавливаем адрес через переменную окружения
     // metrics-exporter-prometheus использует METRICS_EXPORTER_PROMETHEUS_LISTEN_ADDRESS
-    std::env::set_var("METRICS_EXPORTER_PROMETHEUS_LISTEN_ADDRESS", addr.to_string());
+    unsafe {
+        std::env::set_var("METRICS_EXPORTER_PROMETHEUS_LISTEN_ADDRESS", addr.to_string());
+    }
     
     // Регистрируем описания метрик для улучшения читаемости в Prometheus/Grafana
     
@@ -34,13 +36,11 @@ pub fn init_metrics_exporter(port: u16) -> Result<()> {
     // === Метрики PnL ===
     metrics::describe_gauge!(
         "bot_realized_pnl_bps",
-        metrics::Unit::BasisPoints,
         "Realized PnL in basis points"
     );
     
     metrics::describe_gauge!(
         "bot_unrealized_pnl_bps",
-        metrics::Unit::BasisPoints,
         "Unrealized PnL in basis points"
     );
     

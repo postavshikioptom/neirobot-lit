@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::Duration;
-use sysinfo::{Networks, Pid, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tokio::sync::broadcast;
 use tokio::time;
 use tracing::{debug, error, info, warn};
@@ -72,14 +72,14 @@ impl ResourceProfiler {
 
         // Получаем PID текущего процесса
         let current_pid = sysinfo::get_current_pid()
-            .context("Failed to get current process PID")?;
+            .map_err(|e| anyhow::anyhow!("Failed to get current process PID: {}", e))?;
 
         // Инициализируем System с минимальными обновлениями
         let system = System::new_with_specifics(
-            RefreshKind::new()
-                .with_processes(ProcessRefreshKind::new())
-                .with_cpu()
-                .with_memory(),
+            RefreshKind::everything()
+                .with_processes(ProcessRefreshKind::everything())
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
         );
 
         // Инициализируем Networks
@@ -288,12 +288,10 @@ impl ResourceProfiler {
     /// Получить текущие метрики (синхронно)
     pub fn get_current_metrics(&mut self) -> Result<SystemMetricsUpdate> {
         // Обновляем информацию
-        self.system.refresh_process_specifics(
-            self.current_pid,
-            ProcessRefreshKind::new()
-                .with_cpu()
-                .with_memory()
-                .with_disk_usage(),
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            false,
+            ProcessRefreshKind::everything(),
         );
 
         let process = self.system.process(self.current_pid)
