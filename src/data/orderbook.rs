@@ -315,16 +315,16 @@ impl OrderBook {
 
         // 1. Топ-25 Bids (уже отсортированы по убыванию, от лучшей цены к худшей)
         for (price, qty) in self.bids.iter().take(25) {
-            let _ = write!(buffer, "{}:{},", price.normalize(), qty.normalize());
+            let _ = write!(buffer, "{}:{}|", price.normalize(), qty.normalize());
         }
 
         // 2. Топ-25 Asks (отсортированы по возрастанию, от лучшей цены к худшей)
         for (price, qty) in self.asks.iter().take(25) {
-            let _ = write!(buffer, "{}:{},", price.normalize(), qty.normalize());
+            let _ = write!(buffer, "{}:{}|", price.normalize(), qty.normalize());
         }
 
-        // 3. Удаляем последний символ , перед хешированием
-        if buffer.ends_with(',') {
+        // 3. Удаляем последний символ | перед хешированием
+        if buffer.ends_with('|') {
             buffer.pop();
         }
 
@@ -968,9 +968,9 @@ mod tests {
         let cs = ob.calculate_checksum();
         
         // Вычисляем ожидаемый CRC32 от строки в формате Bybit V5
-        // Формат: price:size,price:size,...
+        // Формат: price:qty|price:qty|...
         // Bids сначала (50000:1.5), потом Asks (50001:2.5)
-        let expected_string = "50000:1.5,50001:2.5";
+        let expected_string = "50000:1.5|50001:2.5";
         let expected_cs = crc32fast::hash(expected_string.as_bytes());
         
         assert_eq!(cs, expected_cs, "Checksum must match Bybit V5 CRC32 IEEE algorithm");
