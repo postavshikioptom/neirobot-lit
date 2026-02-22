@@ -1866,23 +1866,39 @@ async fn handle_market_update(
         0
     };
 
-    // 2. Валидация Checksum (Задача 049)
-    if exchange_config.websocket.verify_checksum {
-        if let Some(expected_cs) = update.checksum {
-            if !ob.verify_checksum(expected_cs) {
-                tracing::error!("[{}] Checksum mismatch! Triggering reconnect...", execution.symbol);
-                // Отправляем сигнал на немедленный реконнект в WebSocket
-                let _ = ws_reconnect_tx.send(crate::data::websocket::ReconnectSignal::Immediate).await;
-                return Err(anyhow::anyhow!("Checksum mismatch"));
-            }
-        }
-    }
-
-    // 3. Применяем обновление в стакан
+    // 2. Применяем обновление в стакан
     let start_lob = std::time::Instant::now();
     ob.apply_update(&update);
     use neirobot_lit::monitoring::latency::HOT_PATH_STATS;
     HOT_PATH_STATS.record_lob(start_lob.elapsed().as_micros() as u64);
+
+    // 3. Валидация Checksum ПОСЛЕ применения обновления (Задача 180)
+    // Bybit требует проверять контрольную сумму после применения обновления к стакану
+    if exchange_config.websocket.verify_checksum {
+        if let Some(expected_cs) = update.checksum {
+            if !ob.verify_checksum(expected_cs) {
+                // Вызываем health_monitor для накопления ошибок
+                let limit_reached = execution.risk_manager.health_monitor.checksum_mismatch();
+                
+                if limit_reached {
+                    // Лимит превышен - выполняем полное восстановление
+                    tracing::error!(
+                        "[{}] Max checksum mismatches reached! Clearing OrderBook and triggering reconnect...", 
+                        execution.symbol
+                    );
+                    
+                    // Очищаем стакан перед реконнектом
+                    ob.clear();
+                    
+                    // Отправляем сигнал на немедленный реконнект в WebSocket
+                    let _ = ws_reconnect_tx.send(crate::data::websocket::ReconnectSignal::Immediate).await;
+                    
+                    return Err(anyhow::anyhow!("Checksum mismatch limit exceeded"));
+                }
+                // Если лимит не достигнут, продолжаем работу (мягкая обработка ошибки)
+            }
+        }
+    }
     
     // Задача 191: Получаем lock-free снапшот для чтения данных
     // Это гарантирует, что весь цикл Inference -> Execution работает с одним неизменным срезом данных
