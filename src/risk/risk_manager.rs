@@ -678,6 +678,13 @@ impl RiskManager {
             bail!("Risk: Trading is blocked due to HardStop (Drawdown limit reached)");
         }
 
+        // Задача 169: Проверка circuit breaker для устаревших сигналов
+        if self.check_stale_signal_circuit_breaker() {
+            self.is_blocked = true;
+            error!("CRITICAL_RISK_STOP: Stale signal circuit breaker triggered (>50% stale signals in last 5min)");
+            bail!("Risk: Stale signal circuit breaker triggered");
+        }
+
         let current_equity = self.initial_equity + current_pnl;
 
         // 1. Проверка Max Drawdown от глобального пика (Cumulative)
@@ -2235,6 +2242,12 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// Alias для register_signal_staleness (Задача 169)
+    /// Регистрирует статус сигнала (свежий или устаревший) для отслеживания
+    pub fn report_stale_signal(&mut self, is_stale: bool) {
+        self.register_signal_staleness(is_stale);
     }
 
     /// Проверяет, не превышен ли порог устаревших сигналов (Circuit Breaker)

@@ -320,7 +320,8 @@ async fn test_funding_rate_filter_blocks_adverse_entry() {
     // Устанавливаем высокий funding rate (50 bps = 0.05%)
     let funding_rate = 0.0005;  // 50 bps
     let next_funding_time = neirobot_lit::utils::helpers::unix_ms() + 60_000;  // 1 minute from now
-    execution.update_funding_info(funding_rate, next_funding_time);
+    let mark_price = Decimal::from_f64(50000.0).unwrap();  // Примерная цена BTC
+    execution.update_funding_info(funding_rate, next_funding_time, mark_price);
     
     // Пытаемся открыть Long позицию (Buy) при positive funding rate (adverse)
     // Confidence = 0.7 (ниже порога 0.75)
@@ -343,7 +344,8 @@ async fn test_funding_rate_filter_allows_high_confidence_entry() {
     // Высокий funding rate
     let funding_rate = 0.0005;  // 50 bps
     let next_funding_time = neirobot_lit::utils::helpers::unix_ms() + 60_000;
-    execution.update_funding_info(funding_rate, next_funding_time);
+    let mark_price = Decimal::from_f64(50000.0).unwrap();
+    execution.update_funding_info(funding_rate, next_funding_time, mark_price);
     
     // Пытаемся открыть Long позицию с высокой уверенностью (0.8 >= 0.75)
     let confidence = 0.8;
@@ -365,7 +367,8 @@ async fn test_funding_rate_filter_allows_favorable_direction() {
     // Высокий positive funding rate
     let funding_rate = 0.0005;  // 50 bps
     let next_funding_time = neirobot_lit::utils::helpers::unix_ms() + 60_000;
-    execution.update_funding_info(funding_rate, next_funding_time);
+    let mark_price = Decimal::from_f64(50000.0).unwrap();
+    execution.update_funding_info(funding_rate, next_funding_time, mark_price);
     
     // Пытаемся открыть Short позицию (Sell) при positive funding rate (благоприятно)
     // Confidence = 0.5 (низкая)
@@ -388,7 +391,8 @@ async fn test_funding_rate_filter_allows_low_rate() {
     // Низкий funding rate (10 bps < 30 bps)
     let funding_rate = 0.0001;  // 10 bps
     let next_funding_time = neirobot_lit::utils::helpers::unix_ms() + 60_000;
-    execution.update_funding_info(funding_rate, next_funding_time);
+    let mark_price = Decimal::from_f64(50000.0).unwrap();
+    execution.update_funding_info(funding_rate, next_funding_time, mark_price);
     
     // Пытаемся открыть Long позицию (Buy) при positive funding rate (adverse)
     // Но ставка низкая, поэтому должно быть разрешено
@@ -412,7 +416,8 @@ async fn test_funding_rate_filter_blocks_near_settlement() {
     let funding_rate = 0.0005;  // 50 bps
     // Клиринг через 1 минуту (в окне 5 минут)
     let next_funding_time = neirobot_lit::utils::helpers::unix_ms() + 60_000;
-    execution.update_funding_info(funding_rate, next_funding_time);
+    let mark_price = Decimal::from_f64(50000.0).unwrap();
+    execution.update_funding_info(funding_rate, next_funding_time, mark_price);
     
     // Пытаемся открыть Long позицию с низкой уверенностью
     let confidence = 0.5;
@@ -435,7 +440,8 @@ async fn test_funding_rate_filter_allows_far_from_settlement() {
     let funding_rate = 0.0005;  // 50 bps
     // Клиринг через 1 час (далеко от окна 5 минут)
     let next_funding_time = neirobot_lit::utils::helpers::unix_ms() + 3_600_000;
-    execution.update_funding_info(funding_rate, next_funding_time);
+    let mark_price = Decimal::from_f64(50000.0).unwrap();
+    execution.update_funding_info(funding_rate, next_funding_time, mark_price);
     
     // Пытаемся открыть Long позицию с низкой уверенностью
     let confidence = 0.5;

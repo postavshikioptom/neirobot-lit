@@ -96,28 +96,32 @@ impl BotTestHarness {
     /// Подача сигнала в движок
     pub async fn inject_signal(
         &mut self,
-        signal: Signal,
+        signal_side: crate::ml::types::SignalSide,
         prob: f32,
         rest_client: &impl BybitRestClientTrait,
     ) -> Result<()> {
-        let probs = match signal {
-            Signal::Up => Array2::from_shape_vec((1, 3), vec![0.0, prob, 1.0 - prob]).unwrap(),
-            Signal::Down => Array2::from_shape_vec((1, 3), vec![0.0, 1.0 - prob, prob]).unwrap(),
-            Signal::Flat => Array2::from_shape_vec((1, 3), vec![prob, (1.0 - prob) / 2.0, (1.0 - prob) / 2.0]).unwrap(),
+        let probs = match signal_side {
+            crate::ml::types::SignalSide::Up => Array2::from_shape_vec((1, 3), vec![0.0, prob, 1.0 - prob]).unwrap(),
+            crate::ml::types::SignalSide::Down => Array2::from_shape_vec((1, 3), vec![0.0, 1.0 - prob, prob]).unwrap(),
+            crate::ml::types::SignalSide::Flat => Array2::from_shape_vec((1, 3), vec![prob, (1.0 - prob) / 2.0, (1.0 - prob) / 2.0]).unwrap(),
         };
         
-        let output = InferenceOutput { 
-            probs,
-            signal: signal,
-            probabilities: vec![0.0, 0.0, 0.0], // Заглушка
-            source_timestamp_ms: crate::utils::helpers::unix_ms(),
+        let result = crate::ml::onnx::InferenceResult {
+            output: InferenceOutput { 
+                probs,
+                signal: Signal::new(signal_side, crate::utils::helpers::unix_ms()),
+                probabilities: vec![0.0, 0.0, 0.0], // Заглушка
+                entropy: None,
+                drift_detected: false,
+            },
+            duration_us: 1000,
         };
         
         let best_bid = Decimal::from_f64(49990.0).unwrap();
         let best_ask = Decimal::from_f64(50010.0).unwrap();
         
         self.engine.on_inference_output(
-            output,
+            result,
             50000.0,
             best_bid,
             Decimal::from(100),

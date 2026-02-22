@@ -28,7 +28,7 @@ impl From<OnnxExecutionMode> for ExecutionMode {
 /// Результат инференса с метриками производительности (Задача 169)
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
-    pub output: InferenceOutput,
+    pub output: crate::ml::types::InferenceOutput,
     pub duration_us: u64, // Время выполнения модели в микросекундах
 }
 
@@ -597,7 +597,7 @@ impl OnnxEngine {
     /// Выполняет инференс модели с использованием пре-аллоцированного буфера (Задача №197)
     /// Обеспечивает передачу данных в рантайм ONNX без лишнего копирования (Zero-copy)
     #[inline(always)]
-    pub fn predict_with_buffer(&self, regime_id: Option<usize>) -> Result<InferenceOutput> {
+    pub fn predict_with_buffer(&self, regime_id: Option<usize>) -> Result<InferenceResult> {
         let start_build = Instant::now();
 
         // 1. Создаем ndarray View (Batch=1, Channels, Levels, Seq) напрямую из пре-аллоцированного буфера
@@ -692,13 +692,15 @@ impl OnnxEngine {
             }
         }
 
-        Ok(InferenceOutput {
-            signal: Signal::from(signal_idx),
-            probabilities: probs.to_vec(),
-            probs: ndarray::Array2::from_shape_vec((1, 3), probs.to_vec()).unwrap(),
-            source_timestamp_ms: 0, // Будет установлено вызывающей стороной
-            entropy,
-            drift_detected,
+        Ok(InferenceResult {
+            output: InferenceOutput {
+                signal: Signal::from(signal_idx),
+                probabilities: probs.to_vec(),
+                probs: ndarray::Array2::from_shape_vec((1, 3), probs.to_vec()).unwrap(),
+                entropy,
+                drift_detected,
+            },
+            duration_us: run_us,
         })
     }
 
@@ -714,7 +716,7 @@ impl OnnxEngine {
     /// # Аргументы
     /// * `input_data` - Входные данные модели (seq_len * input_features)
     /// * `regime_id` - Опциональный ID режима рынка (если модель использует regime embedding)
-    pub fn predict(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceOutput> {
+    pub fn predict(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
         let start_build = Instant::now();
 
         // 1. Валидация размера входных данных (должен соответствовать batch=1)
@@ -837,13 +839,28 @@ impl OnnxEngine {
             }
         }
 
-        Ok(InferenceOutput {
-            signal: Signal::from(signal_idx),
-            probabilities: probs.to_vec(),
-            probs: ndarray::Array2::from_shape_vec((1, 3), probs.to_vec()).unwrap(),
-            source_timestamp_ms: 0, // Будет установлено вызывающей стороной
-            entropy,
-            drift_detected,
+        Ok(InferenceResult {
+            output: InferenceOutput {
+                signal: Signal::from(signal_idx),
+                probabilities: probs.to_vec(),
+                probs: ndarray::Array2::from_shape_vec((1, 3), probs.to_vec()).unwrap(),
+                entropy,
+                drift_detected,
+            },
+            duration_us: run_us,
+        })
+    }
+
+    /// Задача 169: Метод для получения результата инференса с метриками производительности
+    /// Возвращает InferenceResult с duration_us для отслеживания задержки
+    pub fn predict_with_metrics(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
+        let start_total = Instant::now();
+        let output = self.predict(input_data, regime_id)?;
+        let duration_us = start_total.elapsed().as_micros() as u64;
+        
+        Ok(InferenceResult {
+            signal: output.signal,
+            duration_us,
         })
     }
 

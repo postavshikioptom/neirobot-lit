@@ -99,21 +99,81 @@ pub struct ModelRegistry {
     pub entries: Vec<ModelRegistryEntry>,
 }
 
-/// Сигналы предсказания модели (согласно задаче 023)
+/// Тип сигнала предсказания модели (согласно задаче 023)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Signal {
+pub enum SignalSide {
     Flat = 0,
     Up = 1,
     Down = 2,
 }
 
-impl From<usize> for Signal {
+impl From<usize> for SignalSide {
     fn from(v: usize) -> Self {
         match v {
-            1 => Signal::Up,
-            2 => Signal::Down,
-            _ => Signal::Flat,
+            1 => SignalSide::Up,
+            2 => SignalSide::Down,
+            _ => SignalSide::Flat,
         }
+    }
+}
+
+/// Сигнал предсказания модели с метаданными (Задача 169)
+/// Содержит направление торговли и время получения исходного снепшота стакана
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signal {
+    pub side: SignalSide,
+    /// Время получения исходного снепшота стакана (receive_ts) в миллисекундах (Задача 169)
+    pub source_timestamp_ms: u64,
+}
+
+impl Signal {
+    /// Создать новый сигнал с указанным типом и временем
+    pub fn new(side: SignalSide, source_timestamp_ms: u64) -> Self {
+        Signal {
+            side,
+            source_timestamp_ms,
+        }
+    }
+
+    /// Создать сигнал Up с нулевым timestamp (для обратной совместимости)
+    pub fn up() -> Self {
+        Signal::new(SignalSide::Up, 0)
+    }
+
+    /// Создать сигнал Down с нулевым timestamp (для обратной совместимости)
+    pub fn down() -> Self {
+        Signal::new(SignalSide::Down, 0)
+    }
+
+    /// Создать сигнал Flat с нулевым timestamp (для обратной совместимости)
+    pub fn flat() -> Self {
+        Signal::new(SignalSide::Flat, 0)
+    }
+
+    // Для обратной совместимости - методы для проверки типа сигнала
+    pub fn is_up(&self) -> bool {
+        self.side == SignalSide::Up
+    }
+
+    pub fn is_down(&self) -> bool {
+        self.side == SignalSide::Down
+    }
+
+    pub fn is_flat(&self) -> bool {
+        self.side == SignalSide::Flat
+    }
+}
+
+// Для обратной совместимости - реализация PartialEq между Signal и SignalSide
+impl PartialEq<SignalSide> for Signal {
+    fn eq(&self, other: &SignalSide) -> bool {
+        self.side == *other
+    }
+}
+
+impl PartialEq<Signal> for SignalSide {
+    fn eq(&self, other: &Signal) -> bool {
+        *self == other.side
     }
 }
 
@@ -128,16 +188,22 @@ pub struct SignalWithTimestamp {
 /// Результат инференса модели LiT
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceOutput {
-    pub signal: Signal,             // Up, Down, Flat
+    pub signal: Signal,             // Up, Down, Flat (+ timestamp)
     pub probabilities: Vec<f32>,    // [prob_flat, prob_up, prob_down] - matches Signal enum indices
     /// Матрица формы [Horizons, 3], где 3 — это классы [Flat, Up, Down]
     pub probs: Array2<f32>,
-    /// Время получения исходного снепшота стакана (receive_ts) в миллисекундах (Задача 169)
-    pub source_timestamp_ms: u64,
     /// Энтропия предсказания H = -Σ p_i * log(p_i) (задача 224)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entropy: Option<f32>,
     /// Флаг обнаружения дрейфа модели (задача 224)
     #[serde(default)]
     pub drift_detected: bool,
+}
+
+
+// Для обратной совместимости - преобразование usize в Signal
+impl From<usize> for Signal {
+    fn from(v: usize) -> Self {
+        Signal::new(SignalSide::from(v), 0)
+    }
 }

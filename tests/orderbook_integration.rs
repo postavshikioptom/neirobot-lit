@@ -8,53 +8,81 @@ mod tests {
     use smallvec::SmallVec;
 
     // Импортируем необходимые типы из основного крейта
-    // Примечание: эти импорты будут работать после компиляции проекта
-    // use neirobot_lit::data::orderbook::OrderBook;
-    // use neirobot_lit::data::types::{OrderBookUpdate, PriceLevel, Side};
+    use neirobot_lit::data::orderbook::OrderBook;
+    use neirobot_lit::data::types::{OrderBookUpdateOwned, Side};
 
     /// Тест 1: Проверка расчета VWAP для Buy ордера
     /// Создаем мок стакана с известными объемами и проверяем VWAP
     #[test]
     fn test_vwap_calculation_buy() {
-        // Мок стакана:
-        // Asks: 100 @ 1.0, 100 @ 1.01, 100 @ 1.02
-        // Для size=150: VWAP = (100*1.0 + 50*1.01) / 150 = 150.5 / 150 = 1.00333...
-        
-        // Ожидаемый результат: VWAP ≈ 1.00333
-        let expected_vwap = 1.00333;
+        let mut ob = OrderBook::new("TESTUSDT");
+        let update = OrderBookUpdateOwned {
+            symbol: "TESTUSDT".to_string(),
+            update_id: 1,
+            timestamp_ms: 1000,
+            bids: vec![],
+            asks: vec![
+                (Decimal::from_f64(1.0).unwrap(), Decimal::from_f64(100.0).unwrap()),
+                (Decimal::from_f64(1.01).unwrap(), Decimal::from_f64(100.0).unwrap()),
+                (Decimal::from_f64(1.02).unwrap(), Decimal::from_f64(100.0).unwrap()),
+            ],
+        };
+        ob.apply_update(&update);
+
+        // Для size=150: VWAP = (100*1.0 + 50*1.01) / 150 = 150.5 / 150 = 1.003333...
+        let vwap = ob.get_execution_vwap(Side::Buy, 150.0).expect("Should have liquidity");
+        let expected_vwap = 1.0033333333333333;
         let tolerance = 0.00001;
         
-        // Проверяем, что расчет VWAP корректен
-        // (Реальный тест будет использовать OrderBook::get_execution_vwap)
-        assert!((expected_vwap - 1.00333).abs() < tolerance);
+        assert!((vwap - expected_vwap).abs() < tolerance, "VWAP mismatch: actual={}, expected={}", vwap, expected_vwap);
     }
 
     /// Тест 2: Проверка расчета VWAP для Sell ордера
     /// Создаем мок стакана и проверяем VWAP для продажи
     #[test]
     fn test_vwap_calculation_sell() {
-        // Мок стакана:
-        // Bids: 100 @ 0.99, 100 @ 0.98, 100 @ 0.97
-        // Для size=150: VWAP = (100*0.99 + 50*0.98) / 150 = 148.0 / 150 = 0.98666...
-        
-        let expected_vwap = 0.98666;
+        let mut ob = OrderBook::new("TESTUSDT");
+        let update = OrderBookUpdateOwned {
+            symbol: "TESTUSDT".to_string(),
+            update_id: 1,
+            timestamp_ms: 1000,
+            bids: vec![
+                (Decimal::from_f64(0.99).unwrap(), Decimal::from_f64(100.0).unwrap()),
+                (Decimal::from_f64(0.98).unwrap(), Decimal::from_f64(100.0).unwrap()),
+                (Decimal::from_f64(0.97).unwrap(), Decimal::from_f64(100.0).unwrap()),
+            ],
+            asks: vec![],
+        };
+        ob.apply_update(&update);
+
+        // Для size=150: VWAP = (100*0.99 + 50*0.98) / 150 = 148.0 / 150 = 0.986666...
+        let vwap = ob.get_execution_vwap(Side::Sell, 150.0).expect("Should have liquidity");
+        let expected_vwap = 0.9866666666666667;
         let tolerance = 0.00001;
         
-        assert!((expected_vwap - 0.98666).abs() < tolerance);
+        assert!((vwap - expected_vwap).abs() < tolerance, "VWAP mismatch: actual={}, expected={}", vwap, expected_vwap);
     }
 
     /// Тест 3: Проверка обработки недостаточной ликвидности
     /// Если размер ордера больше доступного объема, должен вернуться None
     #[test]
     fn test_vwap_insufficient_liquidity() {
-        // Мок стакана с малым объемом
-        // Asks: 10 @ 1.0, 10 @ 1.01
-        // Для size=100: должен вернуться None (недостаточно ликвидности)
+        let mut ob = OrderBook::new("TESTUSDT");
+        let update = OrderBookUpdateOwned {
+            symbol: "TESTUSDT".to_string(),
+            update_id: 1,
+            timestamp_ms: 1000,
+            bids: vec![],
+            asks: vec![
+                (Decimal::from_f64(1.0).unwrap(), Decimal::from_f64(10.0).unwrap()),
+                (Decimal::from_f64(1.01).unwrap(), Decimal::from_f64(10.0).unwrap()),
+            ],
+        };
+        ob.apply_update(&update);
         
-        let total_available = 20.0;
-        let requested_size = 100.0;
-        
-        assert!(requested_size > total_available);
+        // Доступно всего 20 лотов. Запрашиваем 100.
+        let vwap = ob.get_execution_vwap(Side::Buy, 100.0);
+        assert!(vwap.is_none(), "Should return None when liquidity is insufficient");
     }
 
     /// Тест 4: Проверка переключения стратегий входа
@@ -93,21 +121,22 @@ mod tests {
         assert!(slippage_bps3 > max_bps * 1.5);
     }
 
-    /// Тест 5: Проверка direction-aware логики проскальзывания
-    /// Для Buy: VWAP > mid означает положительное проскальзывание
-    /// Для Sell: VWAP < mid означает положительное проскальзывание
     #[test]
     fn test_direction_aware_slippage() {
+        let best_bid = 99.5;
+        let best_ask = 100.5;
         let mid = 100.0;
         
-        // Buy: VWAP = 100.5 (выше mid) -> положительное проскальзывание
-        let vwap_buy = 100.5;
-        let slippage_buy = ((vwap_buy - mid) / mid) * 10000.0;
+        // Buy: VWAP = 101.0 (выше mid) -> положительное проскальзывание
+        // Slippage = (101.0 - 100.5) / 100.5 * 10000 = 49.75 bps
+        let vwap_buy = 101.0;
+        let slippage_buy = (vwap_buy - best_ask) / best_ask * 10000.0;
         assert!(slippage_buy > 0.0);
         
-        // Sell: VWAP = 99.5 (ниже mid) -> положительное проскальзывание
-        let vwap_sell = 99.5;
-        let slippage_sell = ((mid - vwap_sell) / mid) * 10000.0;
+        // Sell: VWAP = 99.0 (ниже mid) -> положительное проскальзывание
+        // Slippage = (99.5 - 99.0) / 99.5 * 10000 = 50.25 bps
+        let vwap_sell = 99.0;
+        let slippage_sell = (best_bid - vwap_sell) / best_bid * 10000.0;
         assert!(slippage_sell > 0.0);
     }
 

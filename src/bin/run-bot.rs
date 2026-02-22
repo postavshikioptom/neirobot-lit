@@ -1637,7 +1637,9 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     }
                     WsData::Ticker(ticker) => {
                         // Обновление информации о фандинге (Задача 170)
-                        execution.update_funding_info(ticker.funding_rate, ticker.next_funding_time);
+                        // Получаем mark_price из orderbook для расчета фандинга
+                        let mark_price = Decimal::from_f64(ob.current_snapshot.load().mark_price).unwrap_or_default();
+                        execution.update_funding_info(ticker.funding_rate, ticker.next_funding_time, mark_price);
                     }
                     WsData::MarkPrice(symbol, mark_price) => {
                         // Задача 233: Обновление маркированной цены
@@ -1983,8 +1985,12 @@ async fn handle_market_update(
         let start_inf = std::time::Instant::now();
         
         // Выполняем инференс напрямую из заполненного буфера (Zero-copy)
-        let inference = engine.predict_with_buffer(Some(regime_id)).context("Inference prediction failed")?;
+        let mut inference = engine.predict_with_buffer(Some(regime_id)).context("Inference prediction failed")?;
         let inference_micros = start_inf.elapsed().as_micros() as u64;
+        
+        // Задача 169: Устанавливаем timestamp источника сигнала (receive_ts из snapshot)
+        // Это время получения исходного снепшота стакана для проверки свежести сигнала
+        inference.source_timestamp_ms = snapshot.timestamp_ms as u64;
 
         // Логирование высокой задержки (задача 047, задача 082)
         if inference_micros > 50_000 {

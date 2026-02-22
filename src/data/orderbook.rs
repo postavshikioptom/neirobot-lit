@@ -654,43 +654,12 @@ impl OrderBook {
             return f64::MAX;
         }
 
-        // Проходим по уровням, накапливая объем в USD и рассчитывая VWAP
-        let mut filled_usd = 0.0;
-        let mut total_qty = 0.0;      // Количество активов (asset qty)
-        let mut weighted_sum = 0.0;   // Сумма(price * qty)
-
-        for (price, volume) in levels.iter() {
-            let p = price.to_f64().unwrap_or(0.0);
-            let v = volume.to_f64().unwrap_or(0.0);
-            
-            if p <= 0.0 || v <= 0.0 {
-                continue;
-            }
-
-            let level_usd = p * v;
-            let remaining_usd = target_size_quote - filled_usd;
-
-            if level_usd >= remaining_usd {
-                // Этот уровень полностью покрывает оставшийся объем
-                let qty_needed = remaining_usd / p;
-                weighted_sum += p * qty_needed;
-                total_qty += qty_needed;
-                filled_usd += remaining_usd;
-                break;
-            } else {
-                // Берем весь уровень
-                weighted_sum += p * v;
-                total_qty += v;
-                filled_usd += level_usd;
-            }
-        }
-
-        if total_qty <= 0.0 || filled_usd <= 0.0 {
-            return f64::MAX; // Недостаточно ликвидности
-        }
-
-        // Рассчитываем VWAP = сумма(price * qty) / сумма(qty)
-        let vwap = weighted_sum / total_qty;
+        // Рассчитываем VWAP через оптимизированный метод с бинарным поиском (задача 168)
+        let size_base = target_size_quote / best_price;
+        let vwap = match self.get_execution_vwap(side, size_base) {
+            Some(v) => v,
+            None => return f64::MAX, // Недостаточно ликвидности
+        };
         
         // Отклонение в базисных пунктах (bps)
         // Для Buy: если VWAP > best_price, то проскальзывание положительное

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
 
-use crate::ml::onnx::OnnxEngine;
+use crate::ml::onnx::{OnnxEngine, InferenceResult};
 use crate::ml::types::InferenceOutput;
 use crate::config::types::{OnnxConfig, BotConfig};
 use crate::monitoring::alert_manager::{AlertManager, Alert, AlertLevel};
@@ -158,8 +158,8 @@ impl HotSwapEngine {
             let start = Instant::now();
             
             match engine.predict(&dummy_data, regime_id) {
-                Ok(_) => {
-                    let latency_us = start.elapsed().as_micros() as u64;
+                Ok(result) => {
+                    let latency_us = result.duration_us;
                     latencies.push(latency_us);
                 }
                 Err(e) => {
@@ -423,7 +423,7 @@ impl HotSwapEngine {
     }
     
     /// Выполняет инференс с текущей моделью
-    pub fn predict(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceOutput> {
+    pub fn predict(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
         let engine = self.engine.load();
         engine.predict(input_data, regime_id)
     }

@@ -100,6 +100,8 @@ pub struct ExecutionEngine {
     pub next_funding_time: u64,
     // Задача 202: Очередь ордеров, ожидающих захвата цены через 100мс
     pub pending_price_checks: VecDeque<(String, u64)>, // (order_link_id, fill_time_ms)
+    // Задача 149/168: Время последнего слайса для неблокирующего rate limiting
+    pub last_slice_time: Instant,
 }
 
 impl ExecutionEngine {
@@ -183,6 +185,7 @@ impl ExecutionEngine {
             current_funding_rate: 0.0,
             next_funding_time: 0,
             pending_price_checks: VecDeque::new(), // Задача 202: Инициализация очереди для захвата цены через 100мс
+            last_slice_time: Instant::now(),
         }
     }
 
@@ -207,7 +210,17 @@ impl ExecutionEngine {
     }
     
     /// Обновление текущей ставки финансирования и времени следующего клиринга (Задача 170)
-    pub fn update_funding_info(&mut self, funding_rate: f64, next_funding_time: u64) {
+    pub fn update_funding_info(&mut self, funding_rate: f64, next_funding_time: u64, mark_price: Decimal) {
+        // Детектирование settlement: если next_funding_time изменился и стал больше старого значения,
+        // значит произошел клиринг и нужно применить фандинг
+        if self.next_funding_time > 0 && next_funding_time > self.next_funding_time {
+            // Settlement occurred! Применяем фандинг используя СТАВКУ из ПРЕДЫДУЩЕГО периода
+            self.position_manager.apply_funding(self.current_funding_rate, mark_price);
+            debug!("[{}] Funding settlement detected! Applied funding rate: {:.6} at mark_price: {}", 
+                self.symbol, self.current_funding_rate, mark_price);
+        }
+        
+        // Обновляем сохраненные значения
         self.current_funding_rate = funding_rate;
         self.next_funding_time = next_funding_time;
         debug!("[{}] Updated funding rate: {:.6} ({}%), next settlement: {}", 
@@ -384,7 +397,7 @@ impl ExecutionEngine {
     /// Расчет мультипликатора силы сигнала (Задача 110)
     #[inline(always)]
     fn get_signal_multiplier(&self, signal: Signal, probs: &[f32; 3]) -> f64 {
-        if signal == Signal::Flat {
+        if signal.is_flat() {
             return 0.0;
         }
 
@@ -1443,7 +1456,48 @@ impl ExecutionEngine {
     /// Применяет защитный гейт для входа: проверка токсичности потока и других рисков
     /// 
     /// Возвращает ExecutionAction::Execute если все проверки пройдены, иначе ExecutionAction::Skip
-    fn can_execute(&mut self, orderbook_update: &OrderBookUpdateOwned) -> ExecutionAction {
+    /// Публичная обертка для тестирования гейтов (Задача 169)
+    #[cfg(test)]
+    pub fn can_execute_public(&mut self, orderbook_update: &OrderBookUpdateOwned, signal: &crate::ml::types::Signal) -> ExecutionAction {
+        self.can_execute(orderbook_update, signal)
+    }
+
+    fn can_execute(&mut self, orderbook_update: &OrderBookUpdateOwned, signal: &crate::ml::types::Signal) -> ExecutionAction {
+        // Задача 169: Проверка свежести сигнала (Signal Staleness Check) - финальный гейт
+        let current_time_ms = crate::utils::helpers::unix_ms();
+        let signal_age_ms = current_time_ms - signal.source_timestamp_ms;
+        
+        if signal_age_ms > self.bot_config.max_signal_age_ms {
+            tracing::warn!(
+                "[{}] [Stale Signal] Age {}ms > {}ms limit. Skipping execution.",
+                self.symbol, signal_age_ms, self.bot_config.max_signal_age_ms
+            );
+            
+            // Регистрируем устаревший сигнал
+            self.risk_manager.register_signal_staleness(true);
+            
+            // Проверяем circuit breaker
+            if self.risk_manager.check_stale_signal_circuit_breaker() {
+                tracing::error!(
+                    "[{}] CIRCUIT BREAKER TRIGGERED: Too many stale signals. Entering emergency mode.",
+                    self.symbol
+                );
+                self.emergency_mode = true;
+            }
+            
+            match self.bot_config.staleness_action {
+                crate::config::types::StalenessAction::Skip => {
+                    return ExecutionAction::Skip;
+                },
+                crate::config::types::StalenessAction::LogOnly => {
+                    tracing::warn!("[{}] Proceeding with stale signal (LogOnly mode)", self.symbol);
+                },
+            }
+        } else {
+            // Регистрируем свежий сигнал
+            self.risk_manager.register_signal_staleness(false);
+        }
+        
         // Проверка адверсариальной активности (VPIN, Layering, Spoofing)
         let is_toxic = self.adversarial_detector.update_and_check(orderbook_update, &self.pending_trades);
         self.pending_trades.clear(); // Очищаем накопленные сделки для следующего обновления
@@ -1479,6 +1533,30 @@ impl ExecutionEngine {
         
         // Задача 169: Сохраняем timestamp источника сигнала для проверки свежести
         self.last_signal_timestamp_ms = output.source_timestamp_ms;
+        
+        // Задача 169: Проверка синхронизации времени с биржей (Clock Skew Check)
+        // Это критично для корректного расчета возраста сигнала
+        match crate::utils::helpers::check_clock_skew(
+            &exchange_config.rest_api_url,
+            self.bot_config.max_clock_skew_ms,
+        ).await {
+            Ok(delta) => {
+                if delta.abs() > self.bot_config.max_clock_skew_ms {
+                    error!(
+                        "[{}] CRITICAL: Clock skew {}ms exceeds limit {}ms. Signal age calculations unreliable. Skipping signal.",
+                        self.symbol, delta, self.bot_config.max_clock_skew_ms
+                    );
+                    self.risk_manager.register_signal_staleness(true);
+                    return Ok(());
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "[{}] WARNING: Failed to check clock skew: {}. Proceeding with caution.",
+                    self.symbol, e
+                );
+            }
+        }
         
         // 0. Проверка аварийного режима (Emergency Mode) - Задача 107
         if self.emergency_mode {
@@ -1654,7 +1732,8 @@ impl ExecutionEngine {
 
         // 4.0. Проверка адверсариальной активности (Задача 165: Anti-Adversarial Protection, Пункт 3 плана)
         // Применяет защитный гейт через метод can_execute() для определения ExecutionAction
-        match self.can_execute(orderbook_update) {
+        // Задача 169: Передаем signal для проверки свежести сигнала
+        match self.can_execute(orderbook_update, &output.signal) {
             ExecutionAction::Execute => {
                 // Продолжаем с исполнением сигнала
             }
@@ -1666,9 +1745,9 @@ impl ExecutionEngine {
 
         // 4.2. Защита от осцилляций (Throttling) - Задача 148
         let now_ms = timestamp_ms() as i64;
-        let is_flip = match effective_signal {
-            Signal::Up => position.qty.is_sign_negative(),
-            Signal::Down => position.qty.is_sign_positive(),
+        let is_flip = match effective_signal.side {
+            crate::ml::types::SignalSide::Up => position.qty.is_sign_negative(),
+            crate::ml::types::SignalSide::Down => position.qty.is_sign_positive(),
             _ => false,
         };
 
@@ -1681,7 +1760,7 @@ impl ExecutionEngine {
                     "[{}] SIGNAL OSCILLATION: Suppressing flip {} -> {} (elapsed {}ms < {}ms). Active orders: {:?}",
                     symbol,
                     if position.qty.is_sign_positive() { "Long" } else { "Short" },
-                    match effective_signal { Signal::Up => "Up", Signal::Down => "Down", _ => "Flat" },
+                    match effective_signal.side { crate::ml::types::SignalSide::Up => "Up", crate::ml::types::SignalSide::Down => "Down", _ => "Flat" },
                     elapsed,
                     self.bot_config.min_flip_interval_ms,
                     active_ids
@@ -1721,15 +1800,15 @@ impl ExecutionEngine {
                         if position.qty.is_sign_positive() { "Long" } else { "Short" },
                         prob_up, prob_down, exit_th_f
                     );
-                    self.execute_trade(side, Signal::Flat, &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(side, Signal::flat(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
                     return Ok(());
                 }
             }
         }
 
         // 5. Логика исполнения на основе отфильтрованного сигнала
-        match effective_signal {
-            Signal::Up => {
+        match effective_signal.side {
+            crate::ml::types::SignalSide::Up => {
                 if position.qty.is_sign_negative() || position.qty.is_zero() {
                     // Проверка OBI гейта перед покупкой
                     if !self.risk_manager.check_imbalance_gate(OrderSide::Buy, current_obi, &self.bot_config) {
@@ -1737,10 +1816,10 @@ impl ExecutionEngine {
                         return Ok(());
                     }
                     // Если мы в кэше или в шорте — покупаем (переворот или вход)
-                    self.execute_trade(OrderSide::Buy, Signal::Up, &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(OrderSide::Buy, Signal::up(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
                 }
             }
-            Signal::Down => {
+            crate::ml::types::SignalSide::Down => {
                 if position.qty.is_sign_positive() || position.qty.is_zero() {
                     // Проверка OBI гейта перед продажей
                     if !self.risk_manager.check_imbalance_gate(OrderSide::Sell, current_obi, &self.bot_config) {
@@ -1748,15 +1827,15 @@ impl ExecutionEngine {
                         return Ok(());
                     }
                     // Если мы в кэше или в лонге — продаем (переворот или вход)
-                    self.execute_trade(OrderSide::Sell, Signal::Down, &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(OrderSide::Sell, Signal::down(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
                 }
             }
-            Signal::Flat => {
+            crate::ml::types::SignalSide::Flat => {
                 if self.close_on_flat && !position.qty.is_zero() {
                     // Закрытие текущей позиции при сигнале Flat
                     let side = if position.qty.is_sign_positive() { OrderSide::Sell } else { OrderSide::Buy };
                     info!("[{}] Closing position due to Flat signal", self.symbol);
-                    self.execute_trade(side, Signal::Flat, &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(side, Signal::flat(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
                 }
             }
         }
@@ -1868,13 +1947,13 @@ impl ExecutionEngine {
                 "[{}] Contradictory signal ignored: Up({:.4})>{:.4} AND Down({:.4})>{:.4}",
                 self.symbol, prob_up, long_th, prob_down, short_th
             );
-            return Signal::Flat;
+            return Signal::flat();
         }
 
         if prob_up > long_th {
-            Signal::Up
+            Signal::up()
         } else if prob_down > short_th {
-            Signal::Down
+            Signal::down()
         } else {
             // Если уверенность ниже порогов, считаем сигнал нейтральным
             if prob_up > 0.4 || prob_down > 0.4 {
@@ -1883,7 +1962,7 @@ impl ExecutionEngine {
                     self.symbol, prob_up, long_th, prob_down, short_th
                 );
             }
-            Signal::Flat
+            Signal::flat()
         }
     }
 
@@ -1900,52 +1979,6 @@ impl ExecutionEngine {
         rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
     ) -> Result<()> {
-        // Задача 169: Проверка свежести сигнала (Signal Staleness Check)
-        let mut is_stale = false;
-        if self.last_signal_timestamp_ms > 0 {
-            let current_time_ms = crate::utils::helpers::unix_ms();
-            let signal_age_ms = current_time_ms - self.last_signal_timestamp_ms;
-            
-            if signal_age_ms > self.bot_config.max_signal_age_ms {
-                is_stale = true;
-                warn!(
-                    "[{}] [Stale Signal] Age {}ms > {}ms limit. Signal: {:?}",
-                    self.symbol, signal_age_ms, self.bot_config.max_signal_age_ms, signal
-                );
-                
-                match self.bot_config.staleness_action {
-                    crate::config::types::StalenessAction::Skip => {
-                        info!("[{}] Skipping stale signal", self.symbol);
-                        // Регистрируем устаревший сигнал перед выходом
-                        self.risk_manager.register_signal_staleness(true);
-                        
-                        // Проверяем circuit breaker
-                        if self.risk_manager.check_stale_signal_circuit_breaker() {
-                            error!("[{}] CIRCUIT BREAKER TRIGGERED: Too many stale signals. Entering emergency mode.", self.symbol);
-                            self.emergency_mode = true;
-                        }
-                        
-                        return Ok(());
-                    },
-                    crate::config::types::StalenessAction::LogOnly => {
-                        warn!("[{}] Proceeding with stale signal (LogOnly mode)", self.symbol);
-                    },
-                }
-            } else {
-                debug!("[{}] Signal freshness OK: age {}ms", self.symbol, signal_age_ms);
-            }
-        }
-        
-        // Регистрируем статус сигнала для мониторинга
-        self.risk_manager.register_signal_staleness(is_stale);
-        
-        // Проверяем circuit breaker даже для свежих сигналов (для накопленной статистики)
-        if self.risk_manager.check_stale_signal_circuit_breaker() {
-            error!("[{}] CIRCUIT BREAKER TRIGGERED: Too many stale signals. Entering emergency mode.", self.symbol);
-            self.emergency_mode = true;
-            return Ok(());
-        }
-        
         // Задача 170: Фильтр по ставкам финансирования (Funding Rate Arbitrage Filter)
         let max_confidence = probs.iter().cloned().fold(0.0f32, f32::max) as f64;
         if self.should_block_by_funding_rate(side, max_confidence) {
@@ -2206,10 +2239,10 @@ impl ExecutionEngine {
             
             // Если превышен лимит размера позиции, пробуем урезать объем
             if error_msg.contains("MaxPositionSize violated") {
-                // Вычисляем максимально допустимый остаток
-                let max_size = if let Some(max_pos) = self.bot_config.max_position_size {
+                // Вычисляем максимально допустимый остаток (Задача 042: Приоритет у лимитов риска)
+                let max_size = if let Some(max_pos) = self.bot_config.risk.max_position_size {
                     max_pos
-                } else if let Some(max_pos) = self.bot_config.risk.max_position_size {
+                } else if let Some(max_pos) = self.bot_config.max_position_size {
                     max_pos
                 } else {
                     // Если лимит не установлен, возвращаем ошибку
@@ -2698,7 +2731,13 @@ impl ExecutionEngine {
                                             "[{}] Rate limiting: waiting {}ms before next slice",
                                             self.symbol, rate_limit_delay_ms
                                         );
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(rate_limit_delay_ms)).await;
+                                        
+                                        // Задача 149/168: Неблокирующая задержка вместо sleep
+                                        if self.last_slice_time.elapsed() < tokio::time::Duration::from_millis(rate_limit_delay_ms) {
+                                            debug!("[{}] Slicing rate limited: skipping this tick", self.symbol);
+                                            return Ok(None);
+                                        }
+                                        self.last_slice_time = Instant::now();
                                         
                                         // Выставляем следующий слайс
                                         if let Err(e) = self.order_manager.place_limit_order(
