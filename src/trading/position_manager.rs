@@ -1,6 +1,7 @@
 use crate::trading::types::{OrderSide, FillEvent, MarketInfo, CreateOrderRequest};
 use crate::config::types::TimeDecayConfig;
 use crate::utils::timestamp_ms;
+use crate::utils::helpers::get_unix_ms;
 use tracing::{info, warn, debug};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
@@ -28,6 +29,8 @@ pub struct Position {
     pub tsl_active: bool,            // Флаг состояния активации трейлинга
     // Задача 170: Учет фандинга
     pub accumulated_funding: Decimal, // Накопленный фандинг (отрицательный = мы платим, положительный = нам платят)
+    // Задача 164: Накопленные рибейты от Maker-сделок
+    pub total_rebates: Decimal,
 }
 
 impl Position {
@@ -79,7 +82,7 @@ impl PositionManager {
                 unrealized_pnl_pct: Decimal::zero(),
                 mark_pnl: Decimal::zero(),
                 leverage,
-                updated_at: timestamp_ms(),
+                updated_at: get_unix_ms(),
                 opened_at: None,
                 completed_tp_stages: HashSet::new(),
                 initial_size: 0.0,
@@ -88,6 +91,7 @@ impl PositionManager {
                 current_stop_loss: 0.0,
                 tsl_active: false,
                 accumulated_funding: Decimal::zero(),
+                total_rebates: Decimal::zero(),
             },
             min_qty_step,
             equity_tx: None,
@@ -233,6 +237,11 @@ impl PositionManager {
         // Учет комиссий сразу уменьшает realized PnL
         self.position.realized_pnl -= fill.exec_fee;
         
+        // Задача 164: Учет рибейтов для Maker-сделок
+        if fill.is_maker {
+            self.position.total_rebates += fill.exec_fee.abs();
+        }
+        
         let qty_change = if fill.side == OrderSide::Buy { fill.exec_qty } else { -fill.exec_qty };
         let old_qty = self.position.qty;
         let new_qty = old_qty + qty_change;
@@ -248,7 +257,7 @@ impl PositionManager {
         // Задача 166: Установка side и initial_size при открытии позиции
         // Задача 167: Инициализация TSL при открытии позиции
         if old_qty.is_zero() && !new_qty.is_zero() {
-            self.position.opened_at = Some(timestamp_ms());
+            self.position.opened_at = Some(get_unix_ms());
             self.position.side = fill.side;
             self.position.initial_size = new_qty.abs().to_f64().unwrap_or(0.0);
             self.position.completed_tp_stages.clear(); // Сброс этапов TP
@@ -304,7 +313,7 @@ impl PositionManager {
             // Задача 163: При флипе обновляем opened_at для новой позиции
             // Задача 166: При флипе обновляем side и initial_size для новой позиции
             // Задача 167: При флипе переинициализируем TSL для новой позиции
-            self.position.opened_at = Some(timestamp_ms());
+            self.position.opened_at = Some(get_unix_ms());
             self.position.side = fill.side;
             self.position.initial_size = new_qty.abs().to_f64().unwrap_or(0.0);
             self.position.completed_tp_stages.clear(); // Сброс этапов TP
@@ -346,7 +355,7 @@ impl PositionManager {
             debug!("[{}] Position closed, opened_at, TP stages and TSL reset", self.position.symbol);
         }
         
-        self.position.updated_at = timestamp_ms();
+        self.position.updated_at = get_unix_ms();
         
         info!(
             "[{}] Position state: qty={}, avg_price={}, realized_pnl={}", 
@@ -378,7 +387,7 @@ impl PositionManager {
     pub fn set_position(&mut self, qty: Decimal, avg_price: Decimal) {
         self.position.qty = qty;
         self.position.avg_price = avg_price;
-        self.position.updated_at = timestamp_ms();
+        self.position.updated_at = get_unix_ms();
     }
 
     /// Принудительная синхронизация с биржей (Источник Истины)
@@ -399,11 +408,22 @@ impl PositionManager {
             );
             self.position.qty = remote_qty;
             self.position.avg_price = remote_avg_price;
-            self.position.updated_at = timestamp_ms();
+            self.position.updated_at = get_unix_ms();
         } else {
             debug!(
                 "[{}] Position sync OK. Local: {}, Remote: {}", 
                 self.position.symbol, self.position.qty, remote_qty
+            );
+        }
+
+        // Задача 163: Инициализация opened_at при синхронизации с биржей
+        // Если позиция не нулевая на бирже, но opened_at не установлен (бот перезагрузился без стейта),
+        // устанавливаем текущее время как время открытия
+        if !remote_qty.is_zero() && self.position.opened_at.is_none() {
+            self.position.opened_at = Some(get_unix_ms());
+            info!(
+                "[{}] Initialized opened_at during sync: remote_qty={}, opened_at={}",
+                self.position.symbol, remote_qty, self.position.opened_at.unwrap()
             );
         }
 
@@ -436,10 +456,11 @@ impl PositionManager {
 
     /// Обновление серии убытков на основе PnL закрытой сделки (Задача 115, 118)
     /// Примечание: loss_streak и last_loss_timestamp_ms передаются как изменяемые ссылки, так как они хранятся в BotState
-    pub fn update_streak(&self, trade_pnl: Decimal, loss_streak: &mut usize, last_loss_timestamp_ms: &mut i64) {
+    /// timestamp_ms используется для отслеживания времени последнего убытка (вместо системного времени)
+    pub fn update_streak(&self, trade_pnl: Decimal, loss_streak: &mut usize, last_loss_timestamp_ms: &mut i64, timestamp_ms: u64) {
         if trade_pnl < Decimal::ZERO {
             *loss_streak += 1;
-            *last_loss_timestamp_ms = chrono::Utc::now().timestamp_millis();
+            *last_loss_timestamp_ms = timestamp_ms as i64;
             warn!("[{}] Loss registered. Streak: {}", self.position.symbol, loss_streak);
         } else if trade_pnl > Decimal::ZERO {
             // Сброс серии И выход из блокировки при профите

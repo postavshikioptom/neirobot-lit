@@ -443,3 +443,56 @@ async fn test_funding_rate_filter_allows_far_from_settlement() {
     
     assert!(!should_block, "Entry should be allowed: far from settlement window");
 }
+
+#[tokio::test]
+async fn test_tsl_extreme_tracking_with_small_steps() {
+    // Задача 167: Проверка исправления бага отслеживания extreme_water_mark
+    // Даже если цена выросла меньше чем на tsl_step_bps, extreme_water_mark должен обновиться
+    
+    let symbol = "BTCUSDT";
+    let mut execution = setup_test_engine(symbol, Some(1.0));
+    
+    execution.bot_config.trailing_stop.tsl_mode = neirobot_lit::config::types::TSLMode::Bot;
+    execution.bot_config.trailing_stop.tsl_activation_bps = 100; // 1%
+    execution.bot_config.trailing_stop.tsl_distance_bps = 50;   // 0.5%
+    execution.bot_config.trailing_stop.tsl_step_bps = 20;       // 0.2% шаг обновления SL
+    
+    // 1. Открываем покупку на 100.0
+    let fill = FillEvent {
+        symbol: symbol.to_string(),
+        side: OrderSide::Buy,
+        exec_qty: Decimal::from_f64(1.0).unwrap(),
+        exec_price: Decimal::from_f64(100.0).unwrap(),
+        exec_id: "test_fill_1".to_string(),
+        order_id: "order_1".to_string(),
+        order_link_id: None,
+        timestamp: 1000,
+        is_maker: true,
+        exec_fee: Decimal::ZERO,
+    };
+    execution.position_manager.update_from_fill(fill);
+    
+    // 2. Активируем TSL (Mid = 101.1, > 1% профита)
+    execution.update_tsl(101.1);
+    let pos = execution.position_manager.get_position();
+    assert!(pos.tsl_active);
+    assert_eq!(pos.extreme_water_mark, 101.1);
+    // SL = 101.1 * 0.995 = 100.5945
+    let initial_sl = pos.current_stop_loss;
+    
+    // 3. Малое движение вверх (Mid = 101.2, рост +0.1% < 0.2% шага)
+    // extreme_water_mark должен стать 101.2, но SL не должен измениться
+    execution.update_tsl(101.2);
+    let pos = execution.position_manager.get_position();
+    assert_eq!(pos.extreme_water_mark, 101.2, "Extreme water mark must update even on small moves");
+    assert_eq!(pos.current_stop_loss, initial_sl, "Stop loss should NOT update if move < step_bps");
+    
+    // 4. Еще одно малое движение (Mid = 101.35, суммарно от initial_sl рост достаточный)
+    // 101.35 * 0.995 = 100.84325
+    // 100.84325 - 100.5945 = 0.24875. 
+    // Относительно 100.0 это 0.248% > 0.2% шага. SL должен обновиться.
+    execution.update_tsl(101.35);
+    let pos = execution.position_manager.get_position();
+    assert_eq!(pos.extreme_water_mark, 101.35);
+    assert!(pos.current_stop_loss > initial_sl, "Stop loss should update now");
+}

@@ -79,7 +79,7 @@ pub fn encrypt(plaintext: &str, master_password: &str) -> Result<String> {
     let master_key = MasterKey::from_password(master_password, &salt)?;
 
     // Создаем cipher
-    let key = Key::<Aes256Gcm>::clone_from_slice(master_key.as_bytes());
+    let key = Key::<Aes256Gcm>::from(*master_key.as_bytes());
     let cipher = Aes256Gcm::new(&key);
 
     // Генерируем случайный nonce
@@ -143,11 +143,12 @@ pub fn decrypt(encrypted: &str, master_password: &str) -> Result<String> {
     let master_key = MasterKey::from_password(master_password, salt)?;
 
     // Создаем cipher
-    let key = Key::<Aes256Gcm>::clone_from_slice(master_key.as_bytes());
+    let key = Key::<Aes256Gcm>::from(*master_key.as_bytes());
     let cipher = Aes256Gcm::new(&key);
 
     // Создаем nonce
-    let nonce = *Nonce::from_slice(nonce_bytes);
+    let nonce_array: &[u8; 12] = nonce_bytes.try_into().context("Invalid nonce size")?;
+    let nonce = Nonce::from(*nonce_array);
 
     // Расшифровываем
     let plaintext_bytes = cipher

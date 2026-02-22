@@ -71,6 +71,9 @@ pub struct Order {
     // Задача 108: Order Chasing tracking
     pub chase_count: usize,        // Счетчик попыток переставления ордера
     pub last_chase_ts: i64,        // Timestamp последней попытки погони (в миллисекундах)
+    // Задача 167: Параметры для Exchange-side TSL
+    pub tsl_trailing_stop: Option<String>,
+    pub tsl_active_price: Option<String>,
 }
 
 impl Order {
@@ -112,6 +115,8 @@ impl Order {
             urgency: 0.5,              // Задача 208: Default urgency
             chase_count: 0,                // Задача 108: Инициализируем счетчик погони
             last_chase_ts: 0,              // Задача 108: Инициализируем timestamp
+            tsl_trailing_stop: None,       // Задача 167: TSL параметры
+            tsl_active_price: None,
         }
     }
 
@@ -692,6 +697,8 @@ impl Order {
             // Задача 108: Order Chasing tracking для восстановленных ордеров
             chase_count: 0,
             last_chase_ts: 0,
+            tsl_trailing_stop: None,
+            tsl_active_price: None,
         }
     }
 

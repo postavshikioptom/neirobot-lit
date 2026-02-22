@@ -1476,6 +1476,35 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     // Триггер реконнекта для WebSocket (задача 048)
                     ws_reconnect_tx.send(ReconnectSignal::Immediate).await.ok();
                 }
+                
+                // Задача 163: Проверка Time Decay на таймере (каждую секунду)
+                // Это обеспечивает выход даже если нет рыночных обновлений
+                let position = execution.position_manager.get_position();
+                if execution.risk_manager.check_time_stop(position, &config.bot) {
+                    let side = if position.qty.is_sign_positive() { "Long" } else { "Short" };
+                    let opened_at = position.opened_at.unwrap_or(0);
+                    let now = neirobot_lit::utils::helpers::get_unix_ms();
+                    let age_ms = now.saturating_sub(opened_at);
+                    let limit_ms = if position.qty.is_sign_positive() {
+                        config.bot.time_decay.max_age_long_ms
+                    } else {
+                        config.bot.time_decay.max_age_short_ms
+                    };
+                    
+                    error!(
+                        "[Risk] TIME STOP TRIGGERED: Side: {}, Age: {}ms, Limit: {}ms. Executing emergency market close.",
+                        side, age_ms, limit_ms
+                    );
+                    
+                    // Инкрементируем метрику
+                    if let Some(counter) = neirobot_lit::monitoring::prometheus::TIME_DECAY_EXIT_COUNTER.get() {
+                        counter.with_label_values(&[execution.symbol.as_str()]).inc();
+                    }
+                    
+                    if let Err(e) = execution.emergency_market_close(rest_client, &config.exchange).await {
+                        error!("Emergency market close failed on time stop: {}", e);
+                    }
+                }
             }
             _ = reconciliation_interval.tick() => {
                 debug!("Periodic reconciliation triggered for {}", symbol);

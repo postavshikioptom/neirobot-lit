@@ -240,10 +240,9 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
     };
 
     // 8. Сборка слоев с опциональным Telegram Layer
-    let registry = if let Some(tg_layer) = telegram_layer {
-        registry.with(tg_layer)
-    } else {
-        registry
+    let registry = match telegram_layer {
+        Some(tg_layer) => registry.with(tg_layer),
+        None => registry,
     };
 
     // 9. Опциональный консольный слой с маскированием секретов и выбором формата

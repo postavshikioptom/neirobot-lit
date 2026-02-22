@@ -561,6 +561,9 @@ fn default_price_band_cooldown_sec() -> u64 { 60 } // 60 секунд базов
 fn default_max_mark_deviation() -> f64 { 0.02 } // 2% максимального отклонения мида от марки
 fn default_max_spread_bps_shock() -> f64 { 15.0 } // 15 bps максимального спреда для выхода из шока
 
+// Задача 164: Soft Limit для Maker-рибейтов
+fn default_taker_ratio_limit() -> f64 { 0.2 } // 20% - максимальное допустимое соотношение Taker-сделок
+
 /// Эталон цены для проверки отклонения (Задача 177)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PriceReferenceSource {
@@ -692,6 +695,10 @@ pub struct RiskDefaultsConfig {
     pub max_mark_deviation: f64,
     #[serde(default = "default_max_spread_bps_shock")]
     pub max_spread_bps_shock: f64,
+
+    // Задача 164: Soft Limit для Maker-рибейтов
+    #[serde(default = "default_taker_ratio_limit")]
+    pub taker_ratio_limit: f64,
 }
 
 pub type RiskConfig = RiskDefaultsConfig;
@@ -751,6 +758,7 @@ impl Default for RiskDefaultsConfig {
             price_band_cooldown_sec: default_price_band_cooldown_sec(),
             max_mark_deviation: default_max_mark_deviation(),
             max_spread_bps_shock: default_max_spread_bps_shock(),
+            taker_ratio_limit: default_taker_ratio_limit(),
         }
     }
 }

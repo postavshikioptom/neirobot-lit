@@ -223,6 +223,11 @@ pub trait BybitRestClientTrait: Send + Sync {
     ) -> Result<crate::data::types::OrderBookUpdateOwned>;
 
     async fn get_api_key_info(&self) -> Result<ApiKeyInfoResponse>;
+
+    async fn set_trading_stop(
+        &self,
+        body: &crate::trading::types::TradingStopRequest,
+    ) -> Result<()>;
 }
 
 pub struct BybitRestClient {
@@ -973,5 +978,14 @@ impl BybitRestClientTrait for BybitRestClient {
 
     async fn get_api_key_info(&self) -> Result<ApiKeyInfoResponse> {
         self.get_api_key_info().await
+    }
+
+    async fn set_trading_stop(
+        &self,
+        body: &crate::trading::types::TradingStopRequest,
+    ) -> Result<()> {
+        let endpoint = "/v5/position/trading-stop";
+        let _: crate::trading::types::TradingStopResponse = self.post(endpoint, body).await?;
+        Ok(())
     }
 }

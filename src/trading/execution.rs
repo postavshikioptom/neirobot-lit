@@ -3,7 +3,7 @@ use crate::trading::order_manager::OrderManager;
 use crate::trading::position_manager::{PositionManager, Position};
 use crate::trading::rest_client::{BybitRestClient, BybitRestClientTrait};
 use crate::risk::risk_manager::RiskManager;
-use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest};
+use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest, ExecutionAction};
 use crate::trading::types::BotState;
 use crate::config::types::{BotConfig, ExchangeConfig};
 use crate::utils::trade_logger::TradeRecord;
@@ -267,23 +267,28 @@ impl ExecutionEngine {
     pub fn select_strategy(
         &self,
         signal: &Signal,
+        side: OrderSide,
+        strength: f32,
         order_book: &OrderBook,
         order_size: Decimal,
     ) -> ExecutionInstruction {
         let sor_config = &self.bot_config.sor;
-        let best_bid = order_book.best_bid();
-        let best_ask = order_book.best_ask();
+        let (best_bid, best_ask) = order_book.get_best_bid_ask();
+        let best_bid = Decimal::from_f64(best_bid).unwrap_or(Decimal::ZERO);
+        let best_ask = Decimal::from_f64(best_ask).unwrap_or(Decimal::ZERO);
         let mid_price = (best_bid + best_ask) / Decimal::from(2);
         
         // Получаем объем на лучшем уровне
-        let level_volume = if signal.side == OrderSide::Buy {
-            order_book.get_ask_volume_at_level(0)
+        let level_volume = if side == OrderSide::Buy {
+            let vol = order_book.get_volume_at_best(crate::data::types::Side::Buy);
+            Decimal::from_f64(vol).unwrap_or(Decimal::ZERO)
         } else {
-            order_book.get_bid_volume_at_level(0)
+            let vol = order_book.get_volume_at_best(crate::data::types::Side::Sell);
+            Decimal::from_f64(vol).unwrap_or(Decimal::ZERO)
         };
         
         // Определяем стратегию
-        let strategy = if signal.strength > sor_config.critical_signal {
+        let strategy = if strength > sor_config.critical_signal {
             // Агрессивная стратегия при сильном сигнале
             ExecutionStrategy::Aggressive
         } else if level_volume > Decimal::ZERO {
@@ -318,7 +323,7 @@ impl ExecutionEngine {
         let price = match strategy {
             ExecutionStrategy::Passive | ExecutionStrategy::Iceberg { .. } => {
                 // Для Passive и Iceberg используем лучшую цену на противоположной стороне
-                if signal.side == OrderSide::Buy {
+                if side == OrderSide::Buy {
                     best_ask
                 } else {
                     best_bid
@@ -886,6 +891,15 @@ impl ExecutionEngine {
                 mark_pnl: Decimal::ZERO,
                 leverage: pos_info.leverage,
                 updated_at: crate::utils::timestamp_ms(),
+                opened_at: None,
+                completed_tp_stages: Default::default(),
+                initial_size: 0.0,
+                side: crate::trading::types::OrderSide::Buy,
+                extreme_water_mark: 0.0,
+                current_stop_loss: 0.0,
+                tsl_active: false,
+                accumulated_funding: Decimal::ZERO,
+                total_rebates: Decimal::ZERO,
             }
         } else {
             Position {
@@ -898,6 +912,15 @@ impl ExecutionEngine {
                 mark_pnl: Decimal::ZERO,
                 leverage: Decimal::ONE,
                 updated_at: crate::utils::timestamp_ms(),
+                opened_at: None,
+                completed_tp_stages: Default::default(),
+                initial_size: 0.0,
+                side: crate::trading::types::OrderSide::Buy,
+                extreme_water_mark: 0.0,
+                current_stop_loss: 0.0,
+                tsl_active: false,
+                accumulated_funding: Decimal::ZERO,
+                total_rebates: Decimal::ZERO,
             }
         };
 
@@ -1011,41 +1034,11 @@ impl ExecutionEngine {
                 let close_size = position.initial_size * stage.close_pct;
                 let close_size_decimal = Decimal::from_f64(close_size).unwrap_or(Decimal::ZERO);
 
-                // Проверяем минимальный лот
-                if close_size_decimal < self.market_info.min_order_qty {
-                    if self.bot_config.tp_close_all_on_min_qty {
-                        warn!(
-                            "[{}] TP Stage {}: close_size {} < min_qty {}. Closing entire position.",
-                            self.symbol, stage_idx, close_size_decimal, self.market_info.min_order_qty
-                        );
-                        // Закрываем всю позицию
-                        self.execute_partial_close(
-                            position.qty.abs(),
-                            position.side,
-                            best_bid,
-                            best_ask,
-                            rest_client,
-                            exchange_config,
-                        ).await?;
-                        
-                        // Помечаем все этапы как выполненные
-                        let mut pos_mut = self.position_manager.get_position().clone();
-                        for i in 0..self.bot_config.tp_stages.len() {
-                            pos_mut.completed_tp_stages.insert(i);
-                        }
-                        break;
-                    } else {
-                        warn!(
-                            "[{}] TP Stage {}: close_size {} < min_qty {}. Skipping stage.",
-                            self.symbol, stage_idx, close_size_decimal, self.market_info.min_order_qty
-                        );
-                        continue;
-                    }
-                }
-
                 // Выполняем частичное закрытие
+                // Проверка min_qty и логика tp_close_all_on_min_qty теперь в place_limit_order (order_manager.rs)
                 self.execute_partial_close(
                     close_size_decimal,
+                    position.qty.abs(),
                     position.side,
                     best_bid,
                     best_ask,
@@ -1068,6 +1061,7 @@ impl ExecutionEngine {
     async fn execute_partial_close(
         &mut self,
         size: Decimal,
+        position_qty: Decimal,
         position_side: OrderSide,
         best_bid: Decimal,
         best_ask: Decimal,
@@ -1080,24 +1074,15 @@ impl ExecutionEngine {
             OrderSide::Sell => OrderSide::Buy,  // Закрываем Short через Buy
         };
 
-        // Рассчитываем цену с maker_offset для минимизации комиссий
-        let tick_size = self.market_info.tick_size;
-        let maker_offset_ticks = self.bot_config.maker_offset_step_ticks;
-        let offset = tick_size * Decimal::from(maker_offset_ticks);
-        
         let mid_price = (best_bid + best_ask) / Decimal::from(2); // Задача 201: Для логирования slippage
 
-        let limit_price = match order_side {
-            OrderSide::Buy => best_ask + offset,   // Покупаем чуть выше ask
-            OrderSide::Sell => best_bid - offset,  // Продаем чуть ниже bid
-        };
-
         info!(
-            "[{}] Executing partial close: {} {} @ {} (maker offset: {} ticks)",
-            self.symbol, order_side, size, limit_price, maker_offset_ticks
+            "[{}] Executing partial close: {} {} (maker offset: {} ticks will be applied in place_limit_order)",
+            self.symbol, order_side, size, self.bot_config.maker_offset_step_ticks
         );
 
-        // Выставляем лимитный ордер с Post-Only и reduce_only
+        // Задача 166: Выставляем лимитный ордер с Post-Only и reduce_only
+        // Расчет Maker-цены и проверка min_qty теперь в place_limit_order
         let _order_link_id = self.order_manager.place_limit_order(
             rest_client,
             &mut self.risk_manager,
@@ -1105,11 +1090,14 @@ impl ExecutionEngine {
             exchange_config,
             None,
             order_side,
-            limit_price,
+            mid_price, // Будет использована как fallback если не reduce_only
             size,
             true,  // post_only = true для минимизации комиссий
             true,  // reduce_only = true для закрытия позиции
-            mid_price, // Задача 201: Signal price для анализа slippage
+            mid_price,
+            Some(best_bid),
+            Some(best_ask),
+            Some(position_qty),
         ).await?;
 
         Ok(())
@@ -1156,16 +1144,19 @@ impl ExecutionEngine {
         // Шаг 2: Обновляем extreme_water_mark
         let distance_bps = config.tsl_distance_bps as f64;
         let mut new_extreme = position.extreme_water_mark;
+        let mut updated_extreme = false;
         
         if position.side == OrderSide::Buy {
             // Для Long: отслеживаем максимум
             if mid_price > new_extreme {
                 new_extreme = mid_price;
+                updated_extreme = true;
             }
         } else {
             // Для Short: отслеживаем минимум
             if mid_price < new_extreme {
                 new_extreme = mid_price;
+                updated_extreme = true;
             }
         }
 
@@ -1178,26 +1169,40 @@ impl ExecutionEngine {
             new_extreme * (1.0 + distance_bps / 10000.0)
         };
 
-        // Шаг 4: Применяем фильтр шага (step_bps)
+        // Шаг 4: Обновляем extreme_water_mark ВСЕГДА при улучшении цены
+        if updated_extreme {
+            position.extreme_water_mark = new_extreme;
+        }
+
+        // Шаг 5: Применяем фильтр шага (step_bps) ТОЛЬКО для current_stop_loss
         let step_bps = config.tsl_step_bps as f64;
         let current_sl = position.current_stop_loss;
+        let mut should_update_sl = false;
         
         if current_sl > 0.0 {
             let sl_change_bps = (new_sl - current_sl).abs() / current_sl * 10000.0;
-            if sl_change_bps < step_bps {
-                // Изменение меньше минимального шага, не обновляем
-                return;
+            if sl_change_bps >= step_bps {
+                should_update_sl = true;
             }
+        } else {
+            // Если это первое обновление (current_sl = 0), обновляем
+            should_update_sl = true;
         }
 
-        // Шаг 5: Обновляем состояние
-        position.extreme_water_mark = new_extreme;
-        position.current_stop_loss = new_sl;
-
-        debug!(
-            "[{}] TSL updated: extreme={:.8}, new_sl={:.8}, distance_bps={}",
-            self.symbol, new_extreme, new_sl, distance_bps
-        );
+        if should_update_sl {
+            position.current_stop_loss = new_sl;
+            debug!(
+                "[{}] TSL updated: extreme={:.8}, new_sl={:.8}, distance_bps={}",
+                self.symbol, new_extreme, new_sl, distance_bps
+            );
+        } else {
+            debug!(
+                "[{}] TSL extreme updated: {:.8}, but sl update suppressed by step filter (change={:.2} bps < {:.2} bps)",
+                self.symbol, new_extreme,
+                (new_sl - current_sl).abs() / current_sl * 10000.0,
+                step_bps
+            );
+        }
     }
 
     /// Проверяет триггер TSL и закрывает позицию при пересечении (Задача 167)
@@ -1434,6 +1439,26 @@ impl ExecutionEngine {
         Ok(())
     }
 
+    /// Проверка возможности исполнения сигнала (Задача 165: Anti-Adversarial Protection, Пункт 3 плана)
+    /// Применяет защитный гейт для входа: проверка токсичности потока и других рисков
+    /// 
+    /// Возвращает ExecutionAction::Execute если все проверки пройдены, иначе ExecutionAction::Skip
+    fn can_execute(&mut self, orderbook_update: &OrderBookUpdateOwned) -> ExecutionAction {
+        // Проверка адверсариальной активности (VPIN, Layering, Spoofing)
+        let is_toxic = self.adversarial_detector.update_and_check(orderbook_update, &self.pending_trades);
+        self.pending_trades.clear(); // Очищаем накопленные сделки для следующего обновления
+        
+        if is_toxic {
+            tracing::warn!(
+                "[{}] Adversarial protection: Toxic flow detected, skipping signal",
+                self.symbol
+            );
+            return ExecutionAction::Skip;
+        }
+
+        ExecutionAction::Execute
+    }
+
     /// Точка входа для новых предсказаний модели
     pub async fn on_inference_output(
         &mut self, 
@@ -1627,14 +1652,16 @@ impl ExecutionEngine {
         self.pending_slice_signal = Some(signal_with_ts);
         self.last_signal_price = mid_price.to_f64().unwrap_or(0.0);
 
-        // 4.0. Проверка адверсариальной активности (Задача 165)
-        // Передаем накопленные сделки для расчета VPIN
-        let is_toxic = self.adversarial_detector.update_and_check(orderbook_update, &self.pending_trades);
-        self.pending_trades.clear(); // Очищаем накопленные сделки
-        
-        if is_toxic {
-            tracing::warn!("[Adversarial] Toxic flow detected, skipping signal");
-            return Ok(());
+        // 4.0. Проверка адверсариальной активности (Задача 165: Anti-Adversarial Protection, Пункт 3 плана)
+        // Применяет защитный гейт через метод can_execute() для определения ExecutionAction
+        match self.can_execute(orderbook_update) {
+            ExecutionAction::Execute => {
+                // Продолжаем с исполнением сигнала
+            }
+            ExecutionAction::Skip => {
+                tracing::warn!("[{}] can_execute returned Skip, aborting inference signal processing", self.symbol);
+                return Ok(());
+            }
         }
 
         // 4.2. Защита от осцилляций (Throttling) - Задача 148
@@ -2389,6 +2416,9 @@ impl ExecutionEngine {
                 use_post_only,
                 false, // reduce_only = false для открытия позиции
                 mid_price, // Задача 202: Signal price для отслеживания expected_price
+                None, // best_bid - не используется для обычных входов
+                None, // best_ask - не используется для обычных входов
+                None, // position_qty - не используется для обычных входов
             ).await?;
         }
 
@@ -2513,6 +2543,26 @@ impl ExecutionEngine {
             
             self.log_trade(fill_event.clone(), realized_pnl);
             
+            // Задача 167: Активация Exchange-side TSL при первом исполнении ордера открытия
+            if let Some(order) = self.order_manager.get_order_mut(&order_link_id) {
+                if order.tsl_trailing_stop.is_some() {
+                    let req = crate::trading::types::TradingStopRequest {
+                        category: exchange_config.bybit.category.clone(),
+                        symbol: self.symbol.clone(),
+                        trailing_stop: order.tsl_trailing_stop.take(), // .take() гарантирует выполнение только один раз
+                        active_price: order.tsl_active_price.take(),
+                        position_idx: self.bot_config.position_idx,
+                    };
+                    
+                    info!("[{}] Activating Exchange-side TSL for order {}: ts={:?}, active={:?}", 
+                        self.symbol, order_link_id, req.trailing_stop, req.active_price);
+                        
+                    if let Err(e) = rest_client.set_trading_stop(&req).await {
+                        error!("[{}] Failed to activate Exchange-side TSL: {}", self.symbol, e);
+                    }
+                }
+            }
+            
             // Задача 173: Обновление статистики волатильности PnL (Поддержка частичных закрытий)
             if let Some(trade_pnl) = realized_pnl {
                 if fill_event.exec_qty > Decimal::ZERO {
@@ -2530,7 +2580,7 @@ impl ExecutionEngine {
                 // Обновляем серию убытков ТОЛЬКО при полном закрытии позиции (Задача 115, исправление Multiple Fills Bug)
                 if position_closed {
                     let mut state_guard = self.state.lock().await;
-                    self.position_manager.update_streak(trade_pnl, &mut state_guard.loss_streak, &mut state_guard.last_loss_timestamp_ms);
+                    self.position_manager.update_streak(trade_pnl, &mut state_guard.loss_streak, &mut state_guard.last_loss_timestamp_ms, update.timestamp);
                 }
             }
             
@@ -2663,6 +2713,9 @@ impl ExecutionEngine {
                                             self.bot_config.post_only,
                                             false, // reduce_only = false для открытия позиции
                                             mid_price, // Задача 201: Signal price для анализа slippage
+                                            None, // best_bid - не используется для обычных входов
+                                            None, // best_ask - не используется для обычных входов
+                                            None, // position_qty - не используется для обычных входов
                                         ).await {
                                             error!("[{}] Failed to place next slice: {}", self.symbol, e);
                                             // Очищаем состояние нарезки при ошибке
@@ -2789,6 +2842,9 @@ impl ExecutionEngine {
                     true, // Снова пробуем Post-Only
                     false, // reduce_only = false для открытия позиции
                     mid_price, // Задача 201: Signal price для анализа slippage
+                    None, // best_bid - не используется для обычных входов
+                    None, // best_ask - не используется для обычных входов
+                    None, // position_qty - не используется для обычных входов
                 ).await?;
 
                 // Сохраняем состояние после выставления нового ордера
@@ -2847,6 +2903,9 @@ impl ExecutionEngine {
                         false, // GTC (Taker)
                         false, // reduce_only = false для открытия позиции
                         mid_price, // Задача 201: Signal price для анализа slippage
+                        None, // best_bid - не используется для обычных входов
+                        None, // best_ask - не используется для обычных входов
+                        None, // position_qty - не используется для обычных входов
                     ).await?;
 
                     let _ = self.save_current_state();
@@ -2948,6 +3007,9 @@ impl ExecutionEngine {
                         false, // GTC (Taker)
                         false, // reduce_only = false для открытия позиции
                         mid_price, // Задача 201: Signal price для анализа slippage
+                        None, // best_bid - не используется для обычных входов
+                        None, // best_ask - не используется для обычных входов
+                        None, // position_qty - не используется для обычных входов
                     ).await?;
 
                     let _ = self.save_current_state();
@@ -3048,6 +3110,9 @@ impl ExecutionEngine {
                                     false, // GTC (Taker)
                                     false, // reduce_only = false
                                     mid_price,
+                                    None, // best_bid - не используется для обычных входов
+                                    None, // best_ask - не используется для обычных входов
+                                    None, // position_qty - не используется для обычных входов
                                 ).await?;
 
                                 info!("[{}] Aggressive order placed for {} at price {}", self.symbol, id, aggressive_price);
@@ -3144,6 +3209,9 @@ impl ExecutionEngine {
                         false, // GTC
                         false, // reduce_only = false для открытия позиции
                         mid_price, // Задача 201: Signal price для анализа slippage
+                        None, // best_bid - не используется для обычных входов
+                        None, // best_ask - не используется для обычных входов
+                        None, // position_qty - не используется для обычных входов
                     ).await?;
 
                     let _ = self.save_current_state();
@@ -3405,6 +3473,9 @@ impl ExecutionEngine {
             self.bot_config.post_only,
             false, // reduce_only = false для открытия позиции
             mid_price, // Задача 201: Signal price для анализа slippage
+            None, // best_bid - не используется для обычных входов
+            None, // best_ask - не используется для обычных входов
+            None, // position_qty - не используется для обычных входов
         ).await?;
 
         // 3. Переносим счетчик погони
@@ -3461,7 +3532,8 @@ impl ExecutionEngine {
                         order_copy.set_mid_price_100ms(mid_price_f64);
                         
                         // Отправляем обновленный лог в канал
-                        if let Some(log) = self.order_manager.create_execution_quality_log(&order_copy, &self.bot_config.bot_path) {
+                        let bot_path = std::path::Path::new("bots").join(&self.symbol);
+                        if let Some(log) = self.order_manager.create_execution_quality_log(&order_copy, &bot_path) {
                             let _ = self.execution_quality_tx.try_send(log);
                         }
                         

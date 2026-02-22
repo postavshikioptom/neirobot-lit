@@ -290,6 +290,8 @@ impl OrderManager {
     /// Задача 136: Ордер создается в состоянии Created, затем переходит в PendingNew
     /// перед отправкой запроса на биржу.
     /// Задача 166: Добавлен параметр reduce_only для частичного закрытия позиций
+    /// Задача 166: Добавлены параметры best_bid, best_ask для расчета Maker-цены внутри метода
+    /// Задача 166: Добавлен параметр position_qty для проверки min_qty при TP close
     /// Задача 202: Добавлен параметр mid_price для отслеживания expected_price
     pub async fn place_limit_order(
         &mut self,
@@ -304,6 +306,9 @@ impl OrderManager {
         post_only: bool,
         reduce_only: bool,
         mid_price: Decimal,
+        best_bid: Option<Decimal>,
+        best_ask: Option<Decimal>,
+        position_qty: Option<Decimal>,
     ) -> Result<String> {
         let order_link_id = self.generate_order_link_id(&bot_config.symbol);
         
@@ -312,13 +317,61 @@ impl OrderManager {
             bail!("Duplicate order_link_id: {}", order_link_id);
         }
 
+        // Задача 166: Проверка min_qty для reduce_only ордеров (TP close)
+        let min_qty = Decimal::from_str(&exchange_config.bybit.min_order_qty)
+            .unwrap_or(Decimal::ZERO);
+        let final_qty = if reduce_only && qty < min_qty {
+            if bot_config.tp_close_all_on_min_qty {
+                // Закрываем всю позицию
+                if let Some(full_qty) = position_qty {
+                    warn!(
+                        "[{}] TP close qty {} < min_qty {}. Closing entire position with qty {}.",
+                        bot_config.symbol, qty, min_qty, full_qty
+                    );
+                    full_qty
+                } else {
+                    warn!(
+                        "[{}] TP close qty {} < min_qty {} but position_qty not provided. Using qty as is.",
+                        bot_config.symbol, qty, min_qty
+                    );
+                    qty
+                }
+            } else {
+                warn!(
+                    "[{}] TP close qty {} < min_qty {} and tp_close_all_on_min_qty is false. Skipping order.",
+                    bot_config.symbol, qty, min_qty
+                );
+                bail!("Order qty {} less than min_qty {} and tp_close_all_on_min_qty is false", qty, min_qty);
+            }
+        } else {
+            qty
+        };
+
+        // Задача 166: Расчет Maker-цены для reduce_only ордеров (TP close)
+        let final_price = if reduce_only && best_bid.is_some() && best_ask.is_some() {
+            let best_bid = best_bid.unwrap();
+            let best_ask = best_ask.unwrap();
+            let tick_size = exchange_config.bybit.tick_size
+                .parse::<Decimal>()
+                .unwrap_or(Decimal::from_f64(0.01).unwrap());
+            let maker_offset_ticks = bot_config.maker_offset_step_ticks;
+            let offset = tick_size * Decimal::from(maker_offset_ticks);
+            
+            match side {
+                OrderSide::Buy => best_bid - offset,
+                OrderSide::Sell => best_ask + offset,
+            }
+        } else {
+            price
+        };
+
         // Создаем новый ордер в состоянии Created
         let mut order = Order::new(
             order_link_id.clone(),
             bot_config.symbol.clone(),
             side,
-            price.to_f64().unwrap_or(0.0),
-            qty.to_f64().unwrap_or(0.0),
+            final_price.to_f64().unwrap_or(0.0),
+            final_qty.to_f64().unwrap_or(0.0),
             timestamp_ms(),
         );
         
@@ -342,8 +395,8 @@ impl OrderManager {
         risk_manager.register_order_intent(
             order_link_id.clone(),
             side,
-            price.to_f64().unwrap_or(0.0),
-            qty.to_f64().unwrap_or(0.0),
+            final_price.to_f64().unwrap_or(0.0),
+            final_qty.to_f64().unwrap_or(0.0),
         );
 
         let time_in_force = if post_only { "PostOnly" } else { "GTC" }.to_string();
@@ -351,10 +404,21 @@ impl OrderManager {
         // Задача 167: Подготовка параметров TSL для Exchange-side режима
         let (trailing_stop, active_price) = if bot_config.trailing_stop.tsl_mode == crate::config::types::TSLMode::Exchange && !reduce_only {
             // Для Exchange-side режима при открытии позиции (не reduce_only)
-            let distance_bps = bot_config.trailing_stop.tsl_distance_bps;
-            let trailing_stop_str = distance_bps.to_string();
-            let active_price_str = price.to_string();
-            (Some(trailing_stop_str), Some(active_price_str))
+            let distance_bps = bot_config.trailing_stop.tsl_distance_bps as f64;
+            let activation_bps = bot_config.trailing_stop.tsl_activation_bps as f64;
+            let order_price_f = final_price.to_f64().unwrap_or(0.0);
+            
+            // 1. Дистанция отступа в абсолютных единицах цены
+            let absolute_distance = order_price_f * (distance_bps / 10000.0);
+            
+            // 2. Цена активации (Profit-only Activation) с учетом стороны
+            let activation_price_f = if side == crate::trading::types::OrderSide::Buy {
+                order_price_f * (1.0 + activation_bps / 10000.0)
+            } else {
+                order_price_f * (1.0 - activation_bps / 10000.0)
+            };
+            
+            (Some(format!("{:.8}", absolute_distance)), Some(format!("{:.8}", activation_price_f)))
         } else {
             (None, None)
         };
@@ -364,8 +428,8 @@ impl OrderManager {
             symbol: bot_config.symbol.to_uppercase(),
             side: side.to_string(),
             order_type: "Limit".to_string(),
-            qty: qty.to_string(),
-            price: Some(price.to_string()),
+            qty: final_qty.to_string(),
+            price: Some(final_price.to_string()),
             time_in_force,
             order_link_id: order_link_id.clone(),
             position_idx: bot_config.position_idx,
@@ -379,6 +443,10 @@ impl OrderManager {
                 None
             },
         };
+
+        // Сохраняем параметры TSL в объект Order для последующей активации при Fill (Задача 167)
+        order.tsl_trailing_stop = request.trailing_stop.clone();
+        order.tsl_active_price = request.active_price.clone();
 
         // Задача 202: Установка sent_time_us перед отправкой запроса
         let sent_time_us = std::time::SystemTime::now()
@@ -1527,6 +1595,8 @@ impl OrderManager {
             order.is_post_only,
             false, // reduce_only
             mid_price,
+            None, // best_bid
+            None, // best_ask
         ).await?;
         
         // Обновляем Iceberg-метаданные в новом ордере
@@ -1616,6 +1686,8 @@ impl OrderManager {
             post_only,
             reduce_only,
             mid_price,
+            None, // best_bid
+            None, // best_ask
         ).await?;
         
         // Обновляем Iceberg-метаданные в созданном ордере

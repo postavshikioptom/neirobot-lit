@@ -68,10 +68,7 @@ impl RegimeDetector {
         let window = self.config.window;
         
         // Получаем данные из стакана
-        let best_bid = orderbook.best_bid_price();
-        let best_ask = orderbook.best_ask_price();
-        let bid_vol = orderbook.best_bid_volume();
-        let ask_vol = orderbook.best_ask_volume();
+        let (best_bid, bid_vol, best_ask, ask_vol) = orderbook.get_best_bid_ask_with_vol();
         
         if best_bid == 0.0 || best_ask == 0.0 {
             warn!("Invalid orderbook data: bid={}, ask={}", best_bid, best_ask);

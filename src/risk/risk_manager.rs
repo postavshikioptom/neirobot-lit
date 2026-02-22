@@ -1449,7 +1449,7 @@ impl RiskManager {
         }
 
         // Получаем текущее время
-        let now = crate::utils::timestamp_ms();
+        let now = crate::utils::helpers::get_unix_ms();
 
         // Проверяем возраст позиции
         position.is_aged(now, &bot_config.time_decay)
@@ -1474,14 +1474,15 @@ impl RiskManager {
     }
     
     /// Задача 164: Получение скорректированного offset с учетом Soft Limit
-    /// Если taker_ratio > 0.2, увеличиваем offset для более глубокого захода в стакан
+    /// Если taker_ratio > taker_ratio_limit, увеличиваем offset для более глубокого захода в стакан
     pub fn get_adjusted_maker_offset(&self, base_offset_ticks: u32) -> u32 {
         let taker_ratio = self.get_taker_ratio();
+        let limit = self.config.taker_ratio_limit;
         
-        if taker_ratio > 0.2 {
+        if taker_ratio > limit {
             // Увеличиваем offset пропорционально превышению порога
             // Например, при taker_ratio = 0.3 (превышение на 0.1), увеличиваем на 50%
-            let excess = taker_ratio - 0.2;
+            let excess = taker_ratio - limit;
             let multiplier = 1.0 + (excess * 5.0); // 5x множитель для агрессивного увеличения
             let adjusted = (base_offset_ticks as f64 * multiplier).ceil() as u32;
             
@@ -1500,6 +1501,12 @@ impl RiskManager {
     pub fn reset_fill_counters(&mut self) {
         self.maker_fills_count = 0;
         self.taker_fills_count = 0;
+    }
+    
+    /// Задача 164: Проверка необходимости принудительно устанавливать Post-Only флаг
+    /// Возвращает true если taker_ratio превысил limit (Soft Limit активирован)
+    pub fn should_force_post_only(&self) -> bool {
+        self.get_taker_ratio() > self.config.taker_ratio_limit
     }
 
     // ============================================================================

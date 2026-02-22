@@ -308,6 +308,22 @@ pub struct AmendOrderRequest {
     pub trigger_price: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradingStopRequest {
+    pub category: String,
+    pub symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trailing_stop: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_price: Option<String>,
+    pub position_idx: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradingStopResponse {}
+
 /// Type alias для совместимости с документацией задачи
 pub type AmendParams = AmendOrderRequest;
 
@@ -321,7 +337,31 @@ pub struct AmendOrderResult {
 /// Type alias для совместимости с документацией задачи
 pub type AmendedResponse = AmendOrderResult;
 
+// ============================================================================
+// Execution Control (Задача 165: Anti-Adversarial Protection)
+// ============================================================================
 
+/// Статус выполнения сигнала - результат проверок безопасности перед входом
+/// Позволяет вызывающей стороне отличить успешное выполнение от намеренного пропуска
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionAction {
+    /// Сигнал одобрен, можно исполнить вход в позицию
+    Execute,
+    /// Сигнал отклонен (токсичный поток, недостаточно средств, режим остановки и т.д.)
+    Skip,
+    /// Частичное закрытие позиции при достижении уровня TP (Задача 166)
+    PartialClose,
+}
+
+impl std::fmt::Display for ExecutionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutionAction::Execute => write!(f, "Execute"),
+            ExecutionAction::Skip => write!(f, "Skip"),
+            ExecutionAction::PartialClose => write!(f, "PartialClose"),
+        }
+    }
+}
 
 // ============================================================================
 // Функции save_state/load_state перенесены в state.rs (Задача 107)

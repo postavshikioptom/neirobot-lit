@@ -28,12 +28,12 @@ pub fn cancel_all_sync(key: &str, secret: &str, symbol: &str) {
     let url = format!("{}/v5/order/cancel-all", base_url);
 
     let res = ureq::post(&url)
-        .set("X-BAPI-API-KEY", key)
-        .set("X-BAPI-TIMESTAMP", &ts)
-        .set("X-BAPI-SIGN", &signature)
-        .set("X-BAPI-RECV-WINDOW", recv_window)
-        .set("Content-Type", "application/json")
-        .send_string(&body);
+        .header("X-BAPI-API-KEY", key)
+        .header("X-BAPI-TIMESTAMP", &ts)
+        .header("X-BAPI-SIGN", &signature)
+        .header("X-BAPI-RECV-WINDOW", recv_window)
+        .header("Content-Type", "application/json")
+        .send_bytes(body.as_bytes());
 
     if let Err(e) = res {
         eprintln!("!!! EMERGENCY CANCEL FAILED: {} !!!", e);
