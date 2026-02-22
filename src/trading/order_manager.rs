@@ -203,6 +203,8 @@ impl OrderManager {
                 // Распознавание причины отмены Post-Only
                 if let Some(ref reason) = event.reason {
                     if reason.contains("CancelByPostOnly") || reason.contains("PostOnly") {
+                        // Задача 175: Учет Post-Only реджектов через WebSocket
+                        risk_manager.report_rejection();
                         OrderState::Rejected("PostOnly".to_string())
                     } else {
                         OrderState::Cancelled
@@ -212,6 +214,8 @@ impl OrderManager {
                 }
             }
             OrderStatus::Rejected | OrderStatus::PostOnlyRejected => {
+                // Задача 175: Учет всех реджектов через WebSocket
+                risk_manager.report_rejection();
                 OrderState::Rejected(event.reason.clone().unwrap_or_default())
             }
             OrderStatus::Expired => OrderState::Expired,
@@ -461,6 +465,7 @@ impl OrderManager {
 
         match result {
             Ok(res) => {
+                // Задача 175: Сброс счетчика последовательных ошибок при успешном приеме ордера биржей
                 risk_manager.report_success();
                 
                 // Задача 202: Установка confirmed_time_us при получении подтверждения

@@ -687,6 +687,17 @@ impl RiskManager {
             bail!("Risk: Too many consecutive rejections");
         }
 
+        // Очистка устаревших меток перед проверкой window (Задача 175: Исправление Stale Data)
+        let now = Utc::now().timestamp_millis() as u64;
+        let window_start = now.saturating_sub(self.config.rejection_window_ms);
+        while let Some(&ts) = self.rejection_history.front() {
+            if ts < window_start {
+                self.rejection_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
         let window_rejections = self.rejection_history.len() as u32;
         if window_rejections >= self.config.max_total_rejections_in_window {
             self.is_blocked = true;

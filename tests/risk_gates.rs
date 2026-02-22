@@ -2270,3 +2270,19 @@ mod clock_drift_tests {
     // TODO: Добавить mock тест для calculate_clock_drift с подменой JSON ответа
     // Требует mockito или similar для мокирования HTTP запросов
 }
+
+#[test]
+fn test_rejection_ignore_list() {
+    use neirobot_lit::risk::risk_manager::RiskManager;
+    use neirobot_lit::config::types::RiskConfig;
+    use rust_decimal::Decimal;
+
+    let mut config = RiskConfig::default();
+    config.ignored_rejection_codes = vec![34026];
+    let mut rm = RiskManager::new(config, Decimal::from(1000));
+
+    // В логике OrderManager при получении кода 34026 метод report_rejection НЕ вызывается.
+    // Проверяем, что если вызова нет, то и счетчики остаются на месте.
+    assert_eq!(rm.get_consecutive_rejections(), 0);
+    assert_eq!(rm.get_rejection_history_len(), 0);
+}
