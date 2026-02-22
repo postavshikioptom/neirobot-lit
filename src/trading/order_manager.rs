@@ -191,6 +191,9 @@ impl OrderManager {
             // Задача 137: Применяем apply_trade вместо transition для учета фильтров лота и проверки пыли
             order.apply_trade(delta_qty, lot_filter);
             
+            // Задача 179: Обновляем filled_qty в интенте для корректной работы check_stale_orders
+            risk_manager.update_order_intent_filled_qty(order_link_id, new_executed_qty);
+            
             fill_info = Some((fill_event, realized_pnl, position_closed, entry_price));
         }
 
