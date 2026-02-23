@@ -282,7 +282,7 @@ impl ExecutionEngine {
         signal: &Signal,
         side: OrderSide,
         strength: f32,
-        order_book: &OrderBook,
+        order_book: &crate::data::orderbook::OrderBookSnapshot,
         order_size: Decimal,
     ) -> ExecutionInstruction {
         let sor_config = &self.bot_config.sor;
@@ -1522,7 +1522,7 @@ impl ExecutionEngine {
         bid_vol: Decimal,
         best_ask: Decimal,
         ask_vol: Decimal,
-        orderbook: &crate::data::orderbook::OrderBook,
+        orderbook: &crate::data::orderbook::OrderBookSnapshot,
         orderbook_update: &OrderBookUpdateOwned,
         rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
@@ -1975,7 +1975,7 @@ impl ExecutionEngine {
         best_bid: Decimal, 
         best_ask: Decimal, 
         mid_price: Decimal,
-        orderbook: &crate::data::orderbook::OrderBook,
+        orderbook: &crate::data::orderbook::OrderBookSnapshot,
         rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
     ) -> Result<()> {
@@ -2469,7 +2469,7 @@ impl ExecutionEngine {
         exchange_config: &ExchangeConfig,
         best_bid: Decimal,
         best_ask: Decimal,
-        orderbook: &crate::data::orderbook::OrderBook,
+        orderbook: &crate::data::orderbook::OrderBookSnapshot,
     ) -> Result<()> {
         let order_link_id = update.order_link_id.clone();
         
@@ -3272,16 +3272,26 @@ impl ExecutionEngine {
     /// 
     /// Это гарантирует, что механизм не будет мешать торговле на разных монетах,
     /// включая те с большими спредами (альткойны, низколиквидные пары).
-    fn calculate_adaptive_threshold(&self, orderbook: &crate::data::orderbook::OrderBook) -> Decimal {
+    fn calculate_adaptive_threshold(&self, orderbook: &crate::data::orderbook::OrderBookSnapshot) -> Decimal {
         // Если адаптивные пороги выключены, используем статический порог
         if !self.bot_config.adaptive_thresholds_enabled {
             return self.bot_config.chase_threshold_bps;
         }
 
-        // Получаем текущую волатильность и спред в базисных пунктах
-        let volatility_bps = orderbook.get_volatility_bps();
-        let spread_bps = orderbook.get_spread_bps();
-        let (_, buffer_fill_percent, volatility_level) = orderbook.get_volatility_status();
+        // Получаем текущую волатильность и спред из снапшота (Задача 191)
+        let volatility_bps = orderbook.volatility_bps;
+        let spread_bps = orderbook.spread_bps;
+        
+        // Для volatility_level используем упрощенную логику на основе volatility_bps
+        let volatility_level = if volatility_bps < 50.0 {
+            "Low"
+        } else if volatility_bps < 150.0 {
+            "Medium"
+        } else {
+            "High"
+        };
+        
+        let buffer_fill_percent = 100.0; // Снапшот всегда полный
 
         // Применяем инверсную формулу: порог уменьшается при росте риска
         let base = self.bot_config.base_threshold_bps;
@@ -3338,7 +3348,7 @@ impl ExecutionEngine {
         exchange_config: &ExchangeConfig,
         best_bid: Decimal,
         best_ask: Decimal,
-        orderbook: &crate::data::orderbook::OrderBook,  // Задача 210: Добавлен для адаптивных порогов
+        orderbook: &crate::data::orderbook::OrderBookSnapshot,  // Задача 210: Добавлен для адаптивных порогов
     ) -> Result<()> {
         let now = timestamp_ms() as i64;
         let mid = (best_bid + best_ask) / Decimal::from(2);

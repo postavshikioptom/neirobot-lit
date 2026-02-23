@@ -24,6 +24,8 @@ pub struct OrderBookSnapshot {
     pub asks: Vec<(f64, f64)>, // (price, volume)
     pub checksum: u32, // Задача 191: контрольная сумма для lock-free доступа
     pub mark_price: f64, // Задача 233: маркированная цена для проверки отклонения
+    pub volatility_bps: f64, // Задача 191: волатильность в базисных пунктах
+    pub spread_bps: f64, // Задача 191: спред в базисных пунктах
 }
 
 impl OrderBookSnapshot {
@@ -195,6 +197,18 @@ impl OrderBookSnapshot {
             None => 1000.0, // Высокое проскальзывание если ликвидности совсем нет
         }
     }
+
+    /// Возвращает объем на указанном уровне asks
+    #[inline(always)]
+    pub fn get_ask_volume_at_level(&self, level: usize) -> f64 {
+        self.asks.get(level).map(|(_, v)| *v).unwrap_or(0.0)
+    }
+
+    /// Возвращает объем на указанном уровне bids
+    #[inline(always)]
+    pub fn get_bid_volume_at_level(&self, level: usize) -> f64 {
+        self.bids.get(level).map(|(_, v)| *v).unwrap_or(0.0)
+    }
 }
 
 pub struct OrderBook {
@@ -283,6 +297,8 @@ impl OrderBook {
                 .collect(),
             checksum: self.calculate_checksum(), // Задача 191: добавляем контрольную сумму
             mark_price: self.mark_price, // Задача 233: сохраняем маркированную цену
+            volatility_bps: self.get_volatility_bps(), // Задача 191: волатильность
+            spread_bps: self.get_spread_bps(), // Задача 191: спред
         }
     }
 
@@ -498,6 +514,10 @@ impl OrderBook {
             
             // Обновляем контрольную сумму
             snapshot_mut.checksum = self.calculate_checksum();
+            
+            // Задача 191: обновляем метрики волатильности и спреда
+            snapshot_mut.volatility_bps = self.get_volatility_bps();
+            snapshot_mut.spread_bps = self.get_spread_bps();
             
             // Сохраняем переиспользованный Arc обратно
             self.current_snapshot.store(current_arc);
@@ -979,58 +999,134 @@ mod tests {
     #[test]
     fn test_lock_free_concurrent_access() {
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
+        use std::time::Duration;
         
         // Создаем OrderBook и оборачиваем в Arc для многопоточного доступа
-        let mut ob = OrderBook::new("BTCUSDT");
+        let ob = Arc::new(std::sync::Mutex::new(OrderBook::new("BTCUSDT")));
         
         // Инициализируем начальный снапшот
-        let mut bids = SmallVec::new();
-        bids.push(PriceLevel { price: 50000.0, size: 1.0 });
-        ob.apply_update(&OrderBookUpdate {
-            symbol: "BTCUSDT".into(),
-            timestamp_ms: 1000,
-            last_update_id: 1,
-            is_snapshot: true,
-            bids,
-            asks: SmallVec::from_buf([PriceLevel { price: 50001.0, size: 2.0 }; 1]),
-            checksum: None,
-        });
+        {
+            let mut ob_guard = ob.lock().unwrap();
+            let mut bids = SmallVec::new();
+            bids.push(PriceLevel { price: 50000.0, size: 1.0 });
+            ob_guard.apply_update(&OrderBookUpdate {
+                symbol: "BTCUSDT".into(),
+                timestamp_ms: 1000,
+                last_update_id: 1,
+                is_snapshot: true,
+                bids,
+                asks: SmallVec::from_buf([PriceLevel { price: 50001.0, size: 2.0 }; 1]),
+                checksum: None,
+            });
+        }
         
-        // Получаем Arc из текущего снапшота для чтения из других потоков
-        let snapshot_arc = ob.current_snapshot.load_full();
-        
-        // Запускаем несколько читающих потоков
+        // Флаг для остановки потоков
+        let stop_flag = Arc::new(AtomicBool::new(false));
         let mut handles = vec![];
-        for i in 0..10 {
-            let snap = Arc::clone(&snapshot_arc);
-            let handle = thread::spawn(move || {
-                // Каждый поток читает данные из снапшота
-                for _ in 0..1000 {
+        
+        // Поток записи (имитация WebSocket) - постоянно обновляет снапшот
+        let ob_write = Arc::clone(&ob);
+        let stop_write = Arc::clone(&stop_flag);
+        let write_handle = thread::spawn(move || {
+            let mut update_id = 2u64;
+            while !stop_write.load(Ordering::Relaxed) {
+                let mut ob_guard = ob_write.lock().unwrap();
+                
+                // Обновляем цены
+                let new_bid_price = 50000.0 + (update_id as f64 * 0.1) % 10.0;
+                let new_ask_price = 50001.0 + (update_id as f64 * 0.1) % 10.0;
+                
+                let mut bids = SmallVec::new();
+                bids.push(PriceLevel { price: new_bid_price, size: 1.0 + (update_id as f64 % 5.0) });
+                
+                let mut asks = SmallVec::new();
+                asks.push(PriceLevel { price: new_ask_price, size: 2.0 + (update_id as f64 % 5.0) });
+                
+                ob_guard.apply_update(&OrderBookUpdate {
+                    symbol: "BTCUSDT".into(),
+                    timestamp_ms: 1000 + update_id,
+                    last_update_id: update_id,
+                    is_snapshot: false,
+                    bids,
+                    asks,
+                    checksum: None,
+                });
+                
+                update_id += 1;
+                drop(ob_guard);
+                thread::sleep(Duration::from_micros(100));
+            }
+        });
+        handles.push(write_handle);
+        
+        // Несколько потоков чтения (имитация Strategy) - постоянно читают снапшот
+        for i in 0..5 {
+            let ob_read = Arc::clone(&ob);
+            let stop_read = Arc::clone(&stop_flag);
+            let read_handle = thread::spawn(move || {
+                let mut read_count = 0;
+                while !stop_read.load(Ordering::Relaxed) {
+                    let ob_guard = ob_read.lock().unwrap();
+                    
+                    // Загружаем снапшот (lock-free операция)
+                    let snap = ob_guard.current_snapshot.load();
+                    
+                    // Проверяем консистентность данных
                     let mid = snap.get_mid_price();
                     let (bid, ask) = snap.get_best_bid_ask();
                     let (bid2, bid_vol, ask2, ask_vol) = snap.get_best_bid_ask_with_vol();
                     let flat = snap.get_flat_snapshot();
                     
-                    // Проверяем консистентность данных
-                    assert!(mid > 0.0, "Thread {} got invalid mid price", i);
-                    assert_eq!(bid, bid2, "Thread {} got inconsistent bid", i);
-                    assert_eq!(ask, ask2, "Thread {} got inconsistent ask", i);
-                    assert_eq!(flat.len(), LOB_DEPTH * 4, "Thread {} got invalid flat snapshot length", i);
+                    // Проверяем, что данные консистентны
+                    assert!(mid > 0.0, "Reader {} got invalid mid price", i);
+                    assert_eq!(bid, bid2, "Reader {} got inconsistent bid", i);
+                    assert_eq!(ask, ask2, "Reader {} got inconsistent ask", i);
+                    assert_eq!(flat.len(), LOB_DEPTH * 4, "Reader {} got invalid flat snapshot length", i);
+                    
+                    // Проверяем, что снапшот имеет правильную структуру
+                    assert!(snap.bids.len() > 0, "Reader {} got empty bids", i);
+                    assert!(snap.asks.len() > 0, "Reader {} got empty asks", i);
+                    assert_eq!(snap.bids.len(), snap.asks.len(), "Reader {} got mismatched bid/ask lengths", i);
+                    
+                    read_count += 1;
+                    drop(ob_guard);
+                    thread::sleep(Duration::from_micros(50));
                 }
+                read_count
             });
-            handles.push(handle);
+            handles.push(read_handle);
         }
+        
+        // Даем потокам время на выполнение
+        thread::sleep(Duration::from_millis(500));
+        
+        // Останавливаем все потоки
+        stop_flag.store(true, Ordering::Relaxed);
         
         // Ждем завершения всех потоков
-        for handle in handles {
-            handle.join().expect("Thread panicked");
+        let mut total_reads = 0;
+        for (idx, handle) in handles.into_iter().enumerate() {
+            if idx == 0 {
+                // Поток записи
+                handle.join().expect("Write thread panicked");
+            } else {
+                // Потоки чтения
+                let read_count = handle.join().expect("Read thread panicked");
+                total_reads += read_count;
+                println!("Reader {} completed {} reads", idx - 1, read_count);
+            }
         }
         
-        // Проверяем, что данные остались консистентными
-        let final_snap = ob.current_snapshot.load();
-        assert_eq!(final_snap.get_mid_price(), 50000.5);
-        assert_eq!(final_snap.bids.len(), 1);
-        assert_eq!(final_snap.asks.len(), 1);
+        println!("Total reads across all readers: {}", total_reads);
+        
+        // Проверяем, что данные остались консистентными после всех операций
+        let ob_guard = ob.lock().unwrap();
+        let final_snap = ob_guard.current_snapshot.load();
+        assert!(final_snap.get_mid_price() > 0.0, "Final snapshot has invalid mid price");
+        assert_eq!(final_snap.bids.len(), final_snap.asks.len(), "Final snapshot has mismatched bid/ask lengths");
+        assert!(final_snap.bids.len() > 0, "Final snapshot has empty bids");
+        assert!(final_snap.asks.len() > 0, "Final snapshot has empty asks");
     }
 }
