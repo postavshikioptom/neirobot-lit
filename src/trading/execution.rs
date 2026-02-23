@@ -3099,66 +3099,63 @@ impl ExecutionEngine {
                 &id,
                 max_switches,
             ).await {
-                Ok(switched) => {
-                    if switched {
-                        // Переключение успешно, выставляем агрессивный ордер
-                        let (side, qty) = {
-                            let o = self.order_manager.get_by_client_id(&id).unwrap();
-                            let remaining = o.remaining_qty();
-                            (o.side, Decimal::from_f64_retain(remaining).unwrap_or(Decimal::ZERO))
+                Ok(Some((side, remaining, _original_price))) => {
+                    // Переключение успешно, выставляем агрессивный ордер
+                    let qty = Decimal::from_f64_retain(remaining).unwrap_or(Decimal::ZERO);
+
+                    if qty >= self.market_info.min_order_qty {
+                        // Выставляем Market или Cross-Limit ордер
+                        let aggressive_price = match side {
+                            OrderSide::Buy => best_ask,
+                            OrderSide::Sell => best_bid,
                         };
 
-                        if qty >= self.market_info.min_order_qty {
-                            // Выставляем Market или Cross-Limit ордер
-                            let aggressive_price = match side {
-                                OrderSide::Buy => best_ask,
-                                OrderSide::Sell => best_bid,
-                            };
-
-                            let mid_price = (best_bid + best_ask) / Decimal::from(2);
-                            
-                            // Проверка цены ордера
-                            match self.risk_manager.validate_order_price(aggressive_price, mid_price, self.market_info.tick_size) {
-                                Ok(valid) => {
-                                    if !valid {
-                                        debug!("[{}] Aggressive order price validation failed", self.symbol);
-                                        continue;
-                                    }
-                                },
-                                Err(e) => {
-                                    debug!("[{}] Aggressive order price validation error: {}", self.symbol, e);
+                        let mid_price = (best_bid + best_ask) / Decimal::from(2);
+                        
+                        // Проверка цены ордера
+                        match self.risk_manager.validate_order_price(aggressive_price, mid_price, self.market_info.tick_size) {
+                            Ok(valid) => {
+                                if !valid {
+                                    debug!("[{}] Aggressive order price validation failed", self.symbol);
                                     continue;
                                 }
-                            }
-
-                            // Проверяем лимит открытых ордеров
-                            let pending = self.order_manager.count_pending_orders();
-                            if !self.risk_manager.check_orders_limit_gate(pending) {
-                                warn!("[{}] Max Open Orders Gate closed. Skipping aggressive order", self.symbol);
-                            } else {
-                                // Выставляем агрессивный ордер (Taker)
-                                self.order_manager.place_limit_order(
-                                    rest_client,
-                                    &mut self.risk_manager,
-                                    &self.bot_config,
-                                    exchange_config,
-                                    None,
-                                    side,
-                                    aggressive_price,
-                                    qty,
-                                    false, // GTC (Taker)
-                                    false, // reduce_only = false
-                                    mid_price,
-                                    None, // best_bid - не используется для обычных входов
-                                    None, // best_ask - не используется для обычных входов
-                                    None, // position_qty - не используется для обычных входов
-                                ).await?;
-
-                                info!("[{}] Aggressive order placed for {} at price {}", self.symbol, id, aggressive_price);
-                                let _ = self.save_current_state();
+                            },
+                            Err(e) => {
+                                debug!("[{}] Aggressive order price validation error: {}", self.symbol, e);
+                                continue;
                             }
                         }
+
+                        // Проверяем лимит открытых ордеров
+                        let pending = self.order_manager.count_pending_orders();
+                        if !self.risk_manager.check_orders_limit_gate(pending) {
+                            warn!("[{}] Max Open Orders Gate closed. Skipping aggressive order", self.symbol);
+                        } else {
+                            // Выставляем агрессивный ордер (Taker)
+                            self.order_manager.place_limit_order(
+                                rest_client,
+                                &mut self.risk_manager,
+                                &self.bot_config,
+                                exchange_config,
+                                None,
+                                side,
+                                aggressive_price,
+                                qty,
+                                false, // GTC (Taker)
+                                false, // reduce_only = false
+                                mid_price,
+                                None, // best_bid - не используется для обычных входов
+                                None, // best_ask - не используется для обычных входов
+                                None, // position_qty - не используется для обычных входов
+                            ).await?;
+
+                            info!("[{}] Aggressive order placed for {} at price {}", self.symbol, id, aggressive_price);
+                            let _ = self.save_current_state();
+                        }
                     }
+                }
+                Ok(None) => {
+                    // Переключение не требуется или ордер уже исполнен
                 }
                 Err(e) => {
                     warn!("[{}] Switch trigger failed for order {}: {}", self.symbol, id, e);

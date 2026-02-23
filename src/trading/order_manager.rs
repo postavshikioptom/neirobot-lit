@@ -20,6 +20,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::prelude::FromPrimitive;
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 
 pub struct OrderManager {
     active_orders: HashMap<String, Order>, // Задача 136: Используем новую Order
@@ -610,8 +611,8 @@ impl OrderManager {
         // Rate limiting перед REST API запросом (Задача 063)
         self.rate_limiter.wait().await;
         
-        // Отправка запроса
-        let result: Result<serde_json::Value> = rest_client.post("/v5/order/cancel", &request).await;
+        // Отправка запроса (Задача 209: Использование специализированного метода cancel_order)
+        let result: Result<serde_json::Value> = rest_client.cancel_order(&request).await;
 
         match result {
             Ok(_) => {
@@ -813,8 +814,8 @@ impl OrderManager {
         // Rate limiting перед REST API запросом (Задача 063)
         self.rate_limiter.wait().await;
         
-        // Отправка запроса на массовую отмену
-        let result: Result<serde_json::Value> = rest_client.post("/v5/order/cancel-all", &request).await;
+        // Отправка запроса на массовую отмену (Задача 209: Использование специализированного метода cancel_all_orders)
+        let result: Result<serde_json::Value> = rest_client.cancel_all_orders(&request).await;
 
         match result {
             Ok(_) => {
@@ -1374,7 +1375,7 @@ impl OrderManager {
 
     /// Задача 208: Безопасное переключение Passive -> Aggressive
     /// Паттерн: cancel -> confirm -> send aggressive order
-    /// Использует tokio::select! для параллельного ожидания исполнения и отмены
+    /// Использует tokio::time::timeout для безопасного ожидания отмены
     pub async fn handle_switch_trigger(
         &mut self,
         rest_client: &impl BybitRestClientTrait,
@@ -1383,27 +1384,27 @@ impl OrderManager {
         exchange_config: &ExchangeConfig,
         order_link_id: &str,
         max_switches: u8,
-    ) -> Result<bool> {
+    ) -> Result<Option<(OrderSide, f64, f64)>> {
         // Получаем ордер
         let order = match self.active_orders.get_mut(order_link_id) {
             Some(o) => o,
             None => {
                 warn!("Order {} not found for switch trigger", order_link_id);
-                return Ok(false);
+                return Ok(None);
             }
         };
 
         // Проверяем лимит переключений
         if order.switch_count >= max_switches {
             info!("Order {} reached max switches limit ({})", order_link_id, max_switches);
-            return Ok(false);
+            return Ok(None);
         }
 
         // Проверяем, есть ли еще что исполнять
         let remaining = order.remaining_qty();
         if remaining <= 0.0 {
             info!("Order {} has no remaining qty to switch", order_link_id);
-            return Ok(false);
+            return Ok(None);
         }
 
         info!("Switching order {} to aggressive mode. Remaining: {}", order_link_id, remaining);
@@ -1416,34 +1417,39 @@ impl OrderManager {
             order_id: None,
         };
 
-        // Шаг 2: Дождаться ответа на отмену
-        let cancel_result: Result<serde_json::Value> = rest_client.post("/v5/order/cancel", &cancel_request).await;
+        // Шаг 2: Дождаться ответа на отмену с таймаутом (защита от зависаний)
+        let timeout_duration = Duration::from_millis(1000); 
+        let cancel_result = timeout(timeout_duration, rest_client.cancel_order(&cancel_request)).await;
 
         match cancel_result {
-            Ok(_) => {
+            Ok(Ok(_)) => {
                 risk_manager.report_success();
                 info!("Cancel request confirmed for order {}", order_link_id);
                 
                 // Шаг 3: Проверяем remaining_size после отмены
                 if let Some(order) = self.active_orders.get_mut(order_link_id) {
                     let remaining_after_cancel = order.remaining_qty();
+                    let side = order.side;
+                    let price = order.price;
                     
                     if remaining_after_cancel > 0.0 {
                         // Увеличиваем счетчик переключений
                         order.switch_count += 1;
                         info!("Order {} switched to aggressive. Switch count: {}", order_link_id, order.switch_count);
                         
-                        // Обновляем состояние ордера
+                        // Обновляем состояние ордера (это переместит его в историю)
                         self.update_order(order_link_id, None, OrderState::Cancelled, None);
-                        return Ok(true);
+                        
+                        // Возвращаем данные для агрессивного ордера
+                        return Ok(Some((side, remaining_after_cancel, price)));
                     } else {
                         info!("Order {} was fully filled before cancel confirmation", order_link_id);
-                        return Ok(false);
+                        return Ok(None);
                     }
                 }
-                Ok(false)
+                Ok(None)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let err_str = e.to_string();
                 
                 // Проверяем, был ли ордер уже исполнен или удален
@@ -1451,24 +1457,33 @@ impl OrderManager {
                     warn!("Order {} not found on exchange (already filled or deleted)", order_link_id);
                     
                     // Проверяем локальное состояние
-                    if let Some(order) = self.active_orders.get(order_link_id) {
+                    let mut result = None;
+                    if let Some(order) = self.active_orders.get_mut(order_link_id) {
                         let remaining = order.remaining_qty();
                         if remaining > 0.0 {
                             // Ордер был отменен на бирже, но у нас есть остаток
-                            if let Some(o) = self.active_orders.get_mut(order_link_id) {
-                                o.switch_count += 1;
-                            }
-                            self.update_order(order_link_id, None, OrderState::Cancelled, None);
-                            return Ok(true);
+                            order.switch_count += 1;
+                            let side = order.side;
+                            let price = order.price;
+                            result = Some((side, remaining, price));
                         }
                     }
-                    return Ok(false);
+                    
+                    if result.is_some() {
+                        self.update_order(order_link_id, None, OrderState::Cancelled, None);
+                    }
+                    return Ok(result);
                 }
                 
                 // Другие ошибки
                 risk_manager.report_rejection();
                 error!("Failed to cancel order {} for switch: {}", order_link_id, e);
                 bail!("Switch trigger failed for {}: {}", order_link_id, e)
+            }
+            Err(_) => {
+                // Таймаут
+                warn!("Cancel timeout for order {}. Skipping aggressive order to avoid double position.", order_link_id);
+                Ok(None)
             }
         }
     }
@@ -1767,18 +1782,53 @@ impl OrderManager {
             }
         }
 
-        // 3. Массовая отмена найденных ордеров
-        for link_id in orders_to_cancel {
-            warn!("[Cleanup] Cancelling stale/untracked order: {}", link_id);
-            // Используем force=true, так как ордер может не быть в active_orders
-            let _ = self.cancel_order(
-                rest_client,
-                risk_manager,
-                bot_config,
-                exchange_config,
-                &link_id,
-                true, // force
-            ).await;
+        // 3. Массовая отмена найденных ордеров с применением порога mass_cancel_threshold (Задача 209)
+        // Логика: если количество ордеров для отмены > mass_cancel_threshold, вызываем cancel_all_orders
+        // вместо цикла одиночных отмен для оптимизации лимитов API
+        
+        if orders_to_cancel.len() > exchange_config.mass_cancel_threshold {
+            // Используем массовую отмену для экономии лимитов API
+            warn!(
+                "[Cleanup] Found {} orders to cancel (threshold: {}). Using cancel-all instead of individual cancellations",
+                orders_to_cancel.len(),
+                exchange_config.mass_cancel_threshold
+            );
+            
+            // Вызываем cancel_all_orders для атомарной отмены всех ордеров
+            match self.cancel_all_orders(rest_client, risk_manager, bot_config, exchange_config).await {
+                Ok(_) => {
+                    info!("[Cleanup] Successfully cancelled all {} stale/untracked orders", orders_to_cancel.len());
+                }
+                Err(e) => {
+                    warn!("[Cleanup] Failed to cancel all orders: {}. Attempting individual cancellations...", e);
+                    // Fallback: отменяем ордера по одному, если массовая отмена не сработала
+                    for link_id in orders_to_cancel {
+                        warn!("[Cleanup] Cancelling stale/untracked order: {}", link_id);
+                        let _ = self.cancel_order(
+                            rest_client,
+                            risk_manager,
+                            bot_config,
+                            exchange_config,
+                            &link_id,
+                            true, // force
+                        ).await;
+                    }
+                }
+            }
+        } else {
+            // Используем одиночные отмены для небольшого количества ордеров
+            for link_id in orders_to_cancel {
+                warn!("[Cleanup] Cancelling stale/untracked order: {}", link_id);
+                // Используем force=true, так как ордер может не быть в active_orders
+                let _ = self.cancel_order(
+                    rest_client,
+                    risk_manager,
+                    bot_config,
+                    exchange_config,
+                    &link_id,
+                    true, // force
+                ).await;
+            }
         }
         
         Ok(())

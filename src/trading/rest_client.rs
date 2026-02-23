@@ -228,6 +228,16 @@ pub trait BybitRestClientTrait: Send + Sync {
         &self,
         body: &crate::trading::types::TradingStopRequest,
     ) -> Result<()>;
+
+    async fn cancel_order<T: Serialize + Send + Sync>(
+        &self,
+        body: &T,
+    ) -> Result<serde_json::Value>;
+
+    async fn cancel_all_orders<T: Serialize + Send + Sync>(
+        &self,
+        body: &T,
+    ) -> Result<serde_json::Value>;
 }
 
 pub struct BybitRestClient {
@@ -848,6 +858,17 @@ impl BybitRestClient {
         }).await
     }
 
+    /// Отмена одного ордера (Задача 209: Специализированный метод для одиночной отмены)
+    pub async fn cancel_order<T: Serialize>(&self, body: &T) -> Result<serde_json::Value> {
+        self.post("/v5/order/cancel", body).await
+    }
+
+    /// Массовая отмена всех ордеров по символу (Задача 209: Оптимизация массовых отмен)
+    /// Использует эндпоинт POST /v5/order/cancel-all для атомарной отмены всех ордеров символа
+    pub async fn cancel_all_orders<T: Serialize>(&self, body: &T) -> Result<serde_json::Value> {
+        self.post("/v5/order/cancel-all", body).await
+    }
+
     /// Получение текущего эквити аккаунта (USDT) с ретраями (Задача 111)
     pub async fn get_equity_with_retry(&self, _retries: u32) -> Result<Decimal> {
         // Мы используем существующий механизм execute_with_retry, 
@@ -987,5 +1008,19 @@ impl BybitRestClientTrait for BybitRestClient {
         let endpoint = "/v5/position/trading-stop";
         let _: crate::trading::types::TradingStopResponse = self.post(endpoint, body).await?;
         Ok(())
+    }
+
+    async fn cancel_order<T: Serialize + Send + Sync>(
+        &self,
+        body: &T,
+    ) -> Result<serde_json::Value> {
+        self.cancel_order(body).await
+    }
+
+    async fn cancel_all_orders<T: Serialize + Send + Sync>(
+        &self,
+        body: &T,
+    ) -> Result<serde_json::Value> {
+        self.cancel_all_orders(body).await
     }
 }
