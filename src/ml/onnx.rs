@@ -533,7 +533,8 @@ impl OnnxEngine {
         }
 
         // 5. Инициализация нормализатора для SIMD-ускоренной нормализации (Задача 193)
-        let normalizer = if let Some(norm_params) = &metadata.normalization {
+        let normalizer = {
+            let norm_params = &metadata.normalization;
             match norm_params.scaler_type.as_str() {
                 "winsor_robust" => {
                     let winsor_limits = norm_params.winsor_limits
@@ -555,7 +556,7 @@ impl OnnxEngine {
                         }
                     }
                     
-                    Some(Normalizer::new_winsor_robust(winsor_low, winsor_high, medians.clone(), iqrs.clone()))
+                    Normalizer::new_winsor_robust(winsor_low, winsor_high, medians.clone(), iqrs.clone())
                 }
                 "robust" => {
                     let medians = norm_params.median
@@ -564,7 +565,7 @@ impl OnnxEngine {
                     let iqrs = norm_params.iqr
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("IQR parameters missing for robust scaler"))?;
-                    Some(Normalizer::new_robust(medians.clone(), iqrs.clone()))
+                    Normalizer::new_robust(medians.clone(), iqrs.clone())
                 }
                 "zscore" | _ => {
                     let means = norm_params.mean
@@ -573,12 +574,9 @@ impl OnnxEngine {
                     let stds = norm_params.std
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("Std parameters missing for zscore scaler"))?;
-                    Some(Normalizer::new(means.clone(), stds.clone()))
+                    Normalizer::new(means.clone(), stds.clone())
                 }
             }
-        } else {
-            warn!("Normalization parameters not found in metadata. Proceeding without normalization.");
-            None
         };
         
         info!("Normalizer initialized for SIMD-accelerated feature normalization");
@@ -613,7 +611,7 @@ impl OnnxEngine {
             use_regime_embedding,
             num_regimes,
             input_buffer,
-            normalizer,
+            normalizer: Some(normalizer),
             confidence_tracker,
             bot_config: bot_config.cloned(),
         };

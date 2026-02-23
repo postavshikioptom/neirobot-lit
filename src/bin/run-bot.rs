@@ -1581,7 +1581,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                                     &config.exchange,
                                     Decimal::from_f64(best_bid).unwrap_or_default(),
                                     Decimal::from_f64(best_ask).unwrap_or_default(),
-                                    &snap  // Задача 191: Передаем снапшот вместо живого стакана
+                                    &ob  // Задача 191: Передаем живой стакан для консистентности
                                 ).await {
                                     error!("Failed to handle private order update: {}", e);
                                 }
@@ -1678,7 +1678,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                             &config.exchange,
                             Decimal::from_f64(best_bid).unwrap_or_default(),
                             Decimal::from_f64(best_ask).unwrap_or_default(),
-                            &snap  // Задача 191: Передаем снапшот вместо живого стакана
+                            &ob  // Задача 191: Передаем живой стакан для адаптивных порогов
                         ).await {
                             error!("Failed to check and chase orders: {}", e);
                         }
@@ -2106,7 +2106,7 @@ async fn handle_market_update(
             Decimal::from_f64(bid_vol).unwrap_or_default(),
             Decimal::from_f64(best_ask).unwrap_or_default(),
             Decimal::from_f64(ask_vol).unwrap_or_default(),
-            &snapshot,  // Задача 191: Передаем снапшот вместо живого стакана для консистентности
+            &ob,  // Задача 191: Передаем живой стакан вместо снапшота для консистентности
             &update,
             rest_client,
             exchange_config,

@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use rand::Rng;
+use rust_decimal::prelude::FromPrimitive;
 
 #[inline(always)]
 pub fn now_ms() -> u64 {
@@ -72,8 +73,8 @@ impl RollingPriceStats {
         self.last_ts = trade.timestamp;
 
         // 2. Добавление новой сделки (VWAP)
-        self.sum_pv += trade.price * trade.size;
-        self.sum_vol += trade.size;
+        self.sum_pv += Decimal::from_f64(trade.price * trade.size).unwrap_or(Decimal::ZERO);
+        self.sum_vol += Decimal::from_f64(trade.size).unwrap_or(Decimal::ZERO);
         self.trades.push_back(trade);
 
         // 3. Очистка старых данных (Sliding Window)

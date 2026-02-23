@@ -1,4 +1,4 @@
-use crate::data::orderbook::{OrderBook, OrderBookSnapshot};
+use crate::data::orderbook::OrderBook;
 use crate::data::types::Side;
 use anyhow::{Result, bail};
 use rust_decimal::Decimal;
@@ -27,7 +27,7 @@ pub trait RiskGate {
         intent: &OrderIntent,
         current_pos: &Position,
         mid_price: Decimal,
-        ob: &OrderBookSnapshot
+        ob: &OrderBook
     ) -> RiskResult;
 }
 
@@ -35,7 +35,7 @@ pub trait RiskGate {
 pub struct MaxPositionGate;
 impl RiskGate for MaxPositionGate {
     #[inline(always)]
-    fn check(&self, config: &RiskConfig, manager: &RiskManager, intent: &OrderIntent, current_pos: &Position, _mid_price: Decimal, _ob: &OrderBookSnapshot) -> RiskResult {
+    fn check(&self, config: &RiskConfig, manager: &RiskManager, intent: &OrderIntent, current_pos: &Position, _mid_price: Decimal, _ob: &OrderBook) -> RiskResult {
         let order_qty = Decimal::from_f64(intent.qty).unwrap_or_default();
         let signed_qty = match intent.side {
             OrderSide::Buy => order_qty,
@@ -65,7 +65,7 @@ impl RiskGate for MaxPositionGate {
 pub struct PriceDeviationGate;
 impl RiskGate for PriceDeviationGate {
     #[inline(always)]
-    fn check(&self, config: &RiskConfig, _manager: &RiskManager, intent: &OrderIntent, _current_pos: &Position, mid_price: Decimal, _ob: &OrderBookSnapshot) -> RiskResult {
+    fn check(&self, config: &RiskConfig, _manager: &RiskManager, intent: &OrderIntent, _current_pos: &Position, mid_price: Decimal, _ob: &OrderBook) -> RiskResult {
         let order_price = Decimal::from_f64(intent.price).unwrap_or_default();
         let limit = match config.max_price_deviation_pct {
             Some(l) => l,
@@ -88,7 +88,7 @@ impl RiskGate for PriceDeviationGate {
 pub struct SlippageCheckGate;
 impl RiskGate for SlippageCheckGate {
     #[inline(always)]
-    fn check(&self, config: &RiskConfig, manager: &RiskManager, intent: &OrderIntent, _current_pos: &Position, _mid_price: Decimal, ob: &OrderBookSnapshot) -> RiskResult {
+    fn check(&self, config: &RiskConfig, manager: &RiskManager, intent: &OrderIntent, _current_pos: &Position, _mid_price: Decimal, ob: &OrderBook) -> RiskResult {
         let side = match intent.side {
             OrderSide::Buy => Side::Buy,
             OrderSide::Sell => Side::Sell,
@@ -102,7 +102,7 @@ impl RiskGate for SlippageCheckGate {
 pub struct NotionalLimitGate;
 impl RiskGate for NotionalLimitGate {
     #[inline(always)]
-    fn check(&self, config: &RiskConfig, _manager: &RiskManager, intent: &OrderIntent, current_pos: &Position, mid_price: Decimal, _ob: &OrderBookSnapshot) -> RiskResult {
+    fn check(&self, config: &RiskConfig, _manager: &RiskManager, intent: &OrderIntent, current_pos: &Position, mid_price: Decimal, _ob: &OrderBook) -> RiskResult {
         let order_price = Decimal::from_f64(intent.price).unwrap_or_default();
         let order_qty = Decimal::from_f64(intent.qty).unwrap_or_default();
         
@@ -143,7 +143,7 @@ impl RiskGate for NotionalLimitGate {
 pub struct PriceBandViolationGate;
 impl RiskGate for PriceBandViolationGate {
     #[inline(always)]
-    fn check(&self, config: &RiskConfig, _manager: &RiskManager, intent: &OrderIntent, _current_pos: &Position, _mid_price: Decimal, ob: &OrderBookSnapshot) -> RiskResult {
+    fn check(&self, config: &RiskConfig, _manager: &RiskManager, intent: &OrderIntent, _current_pos: &Position, _mid_price: Decimal, ob: &OrderBook) -> RiskResult {
         let order_price = intent.price;
         let mark_price = ob.mark_price;
         
@@ -178,7 +178,7 @@ pub enum RiskGateKind {
 
 impl RiskGate for RiskGateKind {
     #[inline(always)]
-    fn check(&self, config: &RiskConfig, manager: &RiskManager, intent: &OrderIntent, current_pos: &Position, mid_price: Decimal, ob: &OrderBookSnapshot) -> RiskResult {
+    fn check(&self, config: &RiskConfig, manager: &RiskManager, intent: &OrderIntent, current_pos: &Position, mid_price: Decimal, ob: &OrderBook) -> RiskResult {
         match self {
             RiskGateKind::MaxPosition(g) => g.check(config, manager, intent, current_pos, mid_price, ob),
             RiskGateKind::PriceDeviation(g) => g.check(config, manager, intent, current_pos, mid_price, ob),
@@ -371,7 +371,7 @@ impl RiskManager {
 
     /// Основная проверка рисков через статическую диспетчеризацию (Задача №198)
     #[inline(always)]
-    pub fn check_risk(&self, intent: &OrderIntent, current_pos: &Position, ob: &OrderBookSnapshot) -> RiskResult {
+    pub fn check_risk(&self, intent: &OrderIntent, current_pos: &Position, ob: &OrderBook) -> RiskResult {
         let mid_price = ob.get_mid_price_dec();
         for gate in &self.gates {
             match gate.check(&self.config, self, intent, current_pos, mid_price, ob) {
@@ -388,7 +388,7 @@ impl RiskManager {
     pub fn check_liquidity_filter_internal_snapshot(
         &self,
         config: &RiskConfig,
-        ob: &OrderBookSnapshot,
+        ob: &OrderBook,
         side: Side,
         size_usd: f64,
     ) -> RiskResult {
@@ -1990,10 +1990,9 @@ impl RiskManager {
     }
 
     /// Задача 233: Проверить спред и отклонение от Mark Price для выхода из режима шока
-    pub fn is_market_stabilized(&self, ob: &OrderBookSnapshot) -> bool {
+    pub fn is_market_stabilized(&self, ob: &OrderBook) -> bool {
         // Вычисляем спред вручную из bid/ask
-        let bid = ob.bids.first().map(|(p, _)| *p).unwrap_or(0.0);
-        let ask = ob.asks.first().map(|(p, _)| *p).unwrap_or(0.0);
+        let (bid, _, ask, _) = ob.get_best_bid_ask_with_vol();
         let spread_bps = if bid > 0.0 && ask > 0.0 {
             let mid = (bid + ask) / 2.0;
             if mid > 0.0 {
@@ -2006,7 +2005,7 @@ impl RiskManager {
         };
         
         let mid_price = ob.get_mid_price();
-        let mark_price = ob.mark_price;
+        let mark_price = ob.get_mark_price();
         
         if mark_price <= 0.0 {
             return spread_bps < self.config.max_spread_bps_shock;

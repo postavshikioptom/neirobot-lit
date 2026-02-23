@@ -1623,6 +1623,7 @@ impl OrderManager {
             mid_price,
             None, // best_bid
             None, // best_ask
+            None, // position_qty
         ).await?;
         
         // Обновляем Iceberg-метаданные в новом ордере
@@ -1715,6 +1716,7 @@ impl OrderManager {
             mid_price,
             None, // best_bid
             None, // best_ask
+            None, // position_qty
         ).await?;
         
         // Обновляем Iceberg-метаданные в созданном ордере

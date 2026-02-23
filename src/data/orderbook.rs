@@ -253,6 +253,8 @@ impl OrderBook {
             asks: Vec::new(),
             checksum: 0,
             mark_price: 0.0,
+            spread_bps: 0.0,
+            volatility_bps: 0.0,
         };
         
         Self {

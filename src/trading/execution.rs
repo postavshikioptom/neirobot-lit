@@ -20,8 +20,7 @@ use crate::utils::timestamp_ms;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use crate::utils::helpers::RollingPriceStats;
-use crate::data::types::PublicTrade;
-use crate::data::types::OrderBookUpdateOwned;
+use crate::data::types::{PublicTrade, OrderBookUpdateOwned, Side};
 
 /// Стратегия исполнения ордера (задача 206: Smart Order Routing)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -282,7 +281,7 @@ impl ExecutionEngine {
         signal: &Signal,
         side: OrderSide,
         strength: f32,
-        order_book: &crate::data::orderbook::OrderBookSnapshot,
+        order_book: &crate::data::orderbook::OrderBook,
         order_size: Decimal,
     ) -> ExecutionInstruction {
         let sor_config = &self.bot_config.sor;
@@ -808,7 +807,7 @@ impl ExecutionEngine {
     /// Экстренное закрытие позиций (Panic Exit) с таймаутом и ретраями
     pub async fn emergency_market_close(
         &mut self,
-        rest_client: &BybitRestClient,
+        rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
     ) -> Result<()> {
         let timeout_ms = self.bot_config.emergency_timeout_ms;
@@ -821,7 +820,7 @@ impl ExecutionEngine {
 
     async fn perform_panic_exit(
         &mut self,
-        rest_client: &BybitRestClient,
+        rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
     ) -> Result<()> {
         warn!("PANIC EXIT STARTED for {}", self.symbol);
@@ -1363,7 +1362,7 @@ impl ExecutionEngine {
         side: crate::data::types::Side,
         size: f64,
         mid_price: f64,
-        orderbook: &crate::data::orderbook::OrderBookSnapshot,
+        orderbook: &crate::data::orderbook::OrderBook,
     ) -> (crate::config::types::EntryStyle, Option<f64>) {
         use crate::data::types::Side;
         use crate::config::types::EntryStyle;
@@ -1522,7 +1521,7 @@ impl ExecutionEngine {
         bid_vol: Decimal,
         best_ask: Decimal,
         ask_vol: Decimal,
-        orderbook: &crate::data::orderbook::OrderBookSnapshot,
+        orderbook: &crate::data::orderbook::OrderBook,
         orderbook_update: &OrderBookUpdateOwned,
         rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
@@ -1800,7 +1799,7 @@ impl ExecutionEngine {
                         if position.qty.is_sign_positive() { "Long" } else { "Short" },
                         prob_up, prob_down, exit_th_f
                     );
-                    self.execute_trade(side, Signal::flat(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(side, Signal::flat(), &fused_probs, best_bid, best_ask, mid_price, orderbook, orderbook_update, rest_client, exchange_config).await?;
                     return Ok(());
                 }
             }
@@ -1816,7 +1815,7 @@ impl ExecutionEngine {
                         return Ok(());
                     }
                     // Если мы в кэше или в шорте — покупаем (переворот или вход)
-                    self.execute_trade(OrderSide::Buy, Signal::up(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(OrderSide::Buy, Signal::up(), &fused_probs, best_bid, best_ask, mid_price, orderbook, orderbook_update, rest_client, exchange_config).await?;
                 }
             }
             crate::ml::types::SignalSide::Down => {
@@ -1827,7 +1826,7 @@ impl ExecutionEngine {
                         return Ok(());
                     }
                     // Если мы в кэше или в лонге — продаем (переворот или вход)
-                    self.execute_trade(OrderSide::Sell, Signal::down(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(OrderSide::Sell, Signal::down(), &fused_probs, best_bid, best_ask, mid_price, orderbook, orderbook_update, rest_client, exchange_config).await?;
                 }
             }
             crate::ml::types::SignalSide::Flat => {
@@ -1835,7 +1834,7 @@ impl ExecutionEngine {
                     // Закрытие текущей позиции при сигнале Flat
                     let side = if position.qty.is_sign_positive() { OrderSide::Sell } else { OrderSide::Buy };
                     info!("[{}] Closing position due to Flat signal", self.symbol);
-                    self.execute_trade(side, Signal::flat(), &fused_probs, best_bid, best_ask, mid_price, orderbook, rest_client, exchange_config).await?;
+                    self.execute_trade(side, Signal::flat(), &fused_probs, best_bid, best_ask, mid_price, orderbook, orderbook_update, rest_client, exchange_config).await?;
                 }
             }
         }
@@ -1975,7 +1974,8 @@ impl ExecutionEngine {
         best_bid: Decimal, 
         best_ask: Decimal, 
         mid_price: Decimal,
-        orderbook: &crate::data::orderbook::OrderBookSnapshot,
+        orderbook: &crate::data::orderbook::OrderBook,
+        orderbook_update: &OrderBookUpdateOwned,
         rest_client: &impl BybitRestClientTrait,
         exchange_config: &ExchangeConfig,
     ) -> Result<()> {
@@ -2083,7 +2083,7 @@ impl ExecutionEngine {
                 
                 // Задача 168: Проверка адверсариальной активности перед AggressiveMarket
                 // Если поток токсичен, отменяем вход
-                let is_toxic = self.adversarial_detector.is_flow_toxic();
+                let is_toxic = self.adversarial_detector.update_and_check(orderbook_update, &self.pending_trades);
                 if is_toxic {
                     warn!(
                         "[{}] AggressiveMarket entry REJECTED: Toxic flow detected by AdversarialDetector",
@@ -2400,9 +2400,9 @@ impl ExecutionEngine {
         // Задача 207: Проверка необходимости использования Iceberg-ордера
         // Если размер ордера значительно превышает объем на лучшем уровне, используем Iceberg
         let level_volume = if side == OrderSide::Buy {
-            orderbook.get_ask_volume_at_level(0)
+            orderbook.take_snapshot().get_ask_volume_at_level(0)
         } else {
-            orderbook.get_bid_volume_at_level(0)
+            orderbook.take_snapshot().get_bid_volume_at_level(0)
         };
         
         let should_use_iceberg = if level_volume > 0.0 {
@@ -2469,7 +2469,7 @@ impl ExecutionEngine {
         exchange_config: &ExchangeConfig,
         best_bid: Decimal,
         best_ask: Decimal,
-        orderbook: &crate::data::orderbook::OrderBookSnapshot,
+        orderbook: &crate::data::orderbook::OrderBook,
     ) -> Result<()> {
         let order_link_id = update.order_link_id.clone();
         
@@ -2625,13 +2625,23 @@ impl ExecutionEngine {
                 let mid_price = (best_bid + best_ask) / Decimal::from(2);
                 let mid_price_f64 = mid_price.to_f64().unwrap_or(0.0);
                 
-                if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
-                    if order.iceberg_total_size.is_some() {
-                        // Обновляем iceberg_filled_total перед проверкой refill
-                        if let Some(order_mut) = self.order_manager.get_order_mut(&order_link_id) {
-                            order_mut.iceberg_filled_total += order_mut.executed_qty;
-                        }
-                        
+                // Проверяем, является ли это Iceberg-ордером
+                let is_iceberg = {
+                    if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
+                        order.iceberg_total_size.is_some()
+                    } else {
+                        false
+                    }
+                };
+                
+                if is_iceberg {
+                    // Обновляем iceberg_filled_total перед проверкой refill
+                    if let Some(order_mut) = self.order_manager.get_order_mut(&order_link_id) {
+                        order_mut.iceberg_filled_total += order_mut.executed_qty;
+                    }
+                    
+                    // Получаем ордер для передачи в check_iceberg_refill
+                    if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
                         // Проверяем необходимость refill
                         match self.order_manager.check_iceberg_refill(
                             order,
@@ -3269,15 +3279,15 @@ impl ExecutionEngine {
     /// 
     /// Это гарантирует, что механизм не будет мешать торговле на разных монетах,
     /// включая те с большими спредами (альткойны, низколиквидные пары).
-    fn calculate_adaptive_threshold(&self, orderbook: &crate::data::orderbook::OrderBookSnapshot) -> Decimal {
+    fn calculate_adaptive_threshold(&self, orderbook: &crate::data::orderbook::OrderBook) -> Decimal {
         // Если адаптивные пороги выключены, используем статический порог
         if !self.bot_config.adaptive_thresholds_enabled {
             return self.bot_config.chase_threshold_bps;
         }
 
-        // Получаем текущую волатильность и спред из снапшота (Задача 191)
-        let volatility_bps = orderbook.volatility_bps;
-        let spread_bps = orderbook.spread_bps;
+        // Получаем текущую волатильность и спред из стакана (Задача 191)
+        let volatility_bps = orderbook.get_volatility_bps();
+        let spread_bps = orderbook.get_spread_bps();
         
         // Для volatility_level используем упрощенную логику на основе volatility_bps
         let volatility_level = if volatility_bps < 50.0 {
@@ -3345,7 +3355,7 @@ impl ExecutionEngine {
         exchange_config: &ExchangeConfig,
         best_bid: Decimal,
         best_ask: Decimal,
-        orderbook: &crate::data::orderbook::OrderBookSnapshot,  // Задача 210: Добавлен для адаптивных порогов
+        orderbook: &crate::data::orderbook::OrderBook,  // Задача 210: Добавлен для адаптивных порогов
     ) -> Result<()> {
         let now = timestamp_ms() as i64;
         let mid = (best_bid + best_ask) / Decimal::from(2);

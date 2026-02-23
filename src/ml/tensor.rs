@@ -183,7 +183,7 @@ impl TensorBuffer {
     /// Память выравнена по 32 байта для SIMD операций
     pub fn new(batch: usize, channels: usize, levels: usize, seq_len: usize) -> Self {
         let size = batch * channels * levels * seq_len;
-        let mut data = AVec::<f32, ConstAlign<32>>::with_capacity(size);
+        let mut data = AVec::<f32, ConstAlign<32>>::with_capacity(32, size);
         data.resize(size, 0.0);
         Self {
             data,
@@ -413,7 +413,7 @@ impl TensorBuilder {
             //                   channel_2_level_0, ..., channel_2_level_49]
             if let Ok(features) = Array2::from_shape_vec(
                 (self.channels, self.levels),
-                snap.clone()
+                snap.to_vec()
             ) {
                 // Вставляем в тензор со смещением offset
                 // tensor.slice_mut(s![0, .., .., i + offset]) выбирает временной шаг (i + offset)
@@ -509,7 +509,7 @@ impl TensorBuilder {
         // 3. Вычисляем 3 канала согласно плану 053
         // Используем выровненный вектор для SIMD операций (Задача 193)
         let mut features = {
-            let mut v = AVec::<f32, ConstAlign<32>>::with_capacity(150);
+            let mut v = AVec::<f32, ConstAlign<32>>::with_capacity(32, 150);
             v.resize(150, 0.0);
             v
         };
@@ -533,7 +533,7 @@ impl TensorBuilder {
         self.normalizer.normalize(&mut features);
 
         // 5. Валидация (NaN/Inf check) ПОСЛЕ нормализации
-        for val in &features {
+        for val in features.iter() {
             if !val.is_finite() {
                 anyhow::bail!("Invalid feature value detected (NaN or Inf) after normalization");
             }
@@ -551,7 +551,7 @@ impl TensorBuilder {
         // 7. Возвращаем тензор только если окно заполнено
         if self.buffer.len() == self.seq_len {
             // Плоский вектор: [snapshot_0 (150), snapshot_1 (150), ..., snapshot_N (150)]
-            let mut flattened: Vec<f32> = self.buffer.iter().flatten().cloned().collect();
+            let mut flattened: Vec<f32> = self.buffer.iter().flat_map(|s| s.iter().copied()).collect();
             
             // Задача 091: Добавляем каналы Past Returns
             if !self.past_returns_lags.is_empty() {
@@ -652,7 +652,9 @@ impl TensorBuilder {
         }
 
         // Добавляем в историю (копируем 150 f32 = 600 байт, это приемлемо)
-        let snapshot: Vec<f32> = buffer.to_vec();
+        let snapshot_vec: Vec<f32> = buffer.to_vec();
+        let mut snapshot = AVec::<f32, ConstAlign<32>>::with_capacity(32, snapshot_vec.len());
+        snapshot.extend_from_slice(&snapshot_vec);
         self.add_snapshot(snapshot);
         
         // Задача 091: Обновляем mid_price_history для расчета log-returns
@@ -663,7 +665,7 @@ impl TensorBuilder {
 
         // Возвращаем тензор только если окно заполнено
         if self.buffer.len() == self.seq_len {
-            let mut flattened: Vec<f32> = self.buffer.iter().flatten().cloned().collect();
+            let mut flattened: Vec<f32> = self.buffer.iter().flat_map(|s| s.iter().copied()).collect();
             
             // Задача 091: Добавляем каналы Past Returns
             if !self.past_returns_lags.is_empty() {

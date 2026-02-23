@@ -267,6 +267,9 @@ mod tests {
             false,
             false, // reduce_only
             dec!(100.0), // mid_price
+            None, // best_bid
+            None, // best_ask
+            None, // position_qty
         ).await;
         
         assert!(result.is_ok());
@@ -304,6 +307,9 @@ mod tests {
             false,
             false, // reduce_only
             dec!(100.0), // mid_price
+            None, // best_bid
+            None, // best_ask
+            None, // position_qty
         ).await;
         
         assert!(result.is_err());
