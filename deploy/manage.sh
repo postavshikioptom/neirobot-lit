@@ -125,15 +125,32 @@ validate_model() {
     
     if [[ ! -f "$model_path" ]]; then
         log_error "Model not found: $model_path"
-        log_info "Please deploy the model first using deploy-model command"
+        log_info "Please ensure the model file is copied to the bot directory"
         return 1
     fi
     
     # Проверка метаданных
     if [[ ! -f "$metadata_path" ]]; then
         log_error "Metadata not found: $metadata_path"
-        log_info "Please ensure metadata.json exists in model directory"
+        log_info "Please ensure metadata.json exists in model directory (required for bot startup)"
         return 1
+    fi
+    
+    # Задача 185: Проверка целостности модели (SHA256)
+    if command -v sha256sum &> /dev/null; then
+        log_info "Verifying model integrity..."
+        local actual_hash=$(sha256sum "$model_path" | awk '{print $1}')
+        local expected_hash=$(jq -r '.onnx_hash' "$metadata_path" 2>/dev/null || echo "")
+        
+        if [[ -n "$expected_hash" && "$expected_hash" != "null" && "$actual_hash" != "$expected_hash" ]]; then
+            log_error "Model integrity check FAILED!"
+            log_error "Expected: $expected_hash"
+            log_error "Actual:   $actual_hash"
+            return 1
+        fi
+        log_info "Model SHA256 hash verified successfully"
+    else
+        log_warn "sha256sum not found, skipping integrity check"
     fi
     
     log_info "Model found: $model_path ($(du -h "$model_path" | cut -f1))"
@@ -258,31 +275,30 @@ cmd_deploy_model() {
     log_info "Copying model file..."
     cp "$file_path" "${model_dir}/model.onnx"
     
-    # Обновляем metadata.json
+    # Обновляем metadata.json - копируем из архива
     log_info "Updating metadata.json..."
     
-    # Создаем резервную копию metadata
+    # Вычисляем путь к metadata.json из file_path
+    local metadata_file_path="${file_path/_model.onnx/_metadata.json}"
+    
+    # Проверяем существование metadata.json в архиве
+    if [[ ! -f "$metadata_file_path" ]]; then
+        log_error "Metadata file not found in archive: $metadata_file_path"
+        log_error "Each model version must have a corresponding metadata.json file"
+        exit 1
+    fi
+    
+    # Создаем резервную копию текущего metadata
     if [[ -f "$metadata_path" ]]; then
         local timestamp=$(date +%Y%m%d_%H%M%S)
         cp "$metadata_path" "${metadata_path}.${timestamp}.bak"
+        log_info "Current metadata backed up: ${metadata_path}.${timestamp}.bak"
     fi
     
-    # Загружаем нормализацию из старого metadata (если есть)
-    local normalization="{}"
-    if [[ -f "$metadata_path" ]]; then
-        normalization=$(jq -r '.normalization' "$metadata_path" 2>/dev/null || echo "{}")
-    fi
-    
-    # Создаем новый metadata.json
-    cat > "$metadata_path" << EOF
-{
-  "onnx_hash": "$onnx_hash",
-  "version": "$version_tag",
-  "mcc_score": $mcc_score,
-  "normalization": $normalization
-}
-EOF
-    
+    # Копируем metadata.json из архива и обновляем только onnx_hash и version через jq
+    jq --arg h "$onnx_hash" --arg v "$version_tag" \
+      '.onnx_hash = $h | .version = $v' "$metadata_file_path" > "${model_dir}/metadata.json"
+    log_info "Metadata copied from archive: $metadata_file_path"
     log_info "Metadata updated successfully"
     log_info "Model version $version_tag deployed successfully!"
     log_info "Restart the bot to apply changes: $0 restart $symbol"
@@ -369,23 +385,32 @@ cmd_deploy() {
     
     log_info "Deploying bot for $symbol in $MODE mode..."
     
-    # Validate model
-    if ! validate_model "$symbol"; then
-        exit 1
-    fi
-    
     # Create bot directory structure
     local bot_dir="${BOTS_DIR}/${symbol}"
     log_info "Creating directory structure: $bot_dir"
     mkdir -p "$bot_dir"/{model/archive,data/raw,logs,config_history}
     
-    # Copy model (если существует в python_lab)
-    if [[ -f "${PROJECT_ROOT}/python_lab/models/${symbol}.onnx" ]]; then
+    # Copy model and metadata from python_lab (if they exist)
+    local source_model="${PROJECT_ROOT}/python_lab/models/${symbol}.onnx"
+    local source_metadata="${PROJECT_ROOT}/python_lab/models/metadata.json"
+    
+    if [[ -f "$source_model" ]]; then
         log_info "Copying model from python_lab..."
-        cp "${PROJECT_ROOT}/python_lab/models/${symbol}.onnx" "${bot_dir}/model/model.onnx"
+        cp "$source_model" "${bot_dir}/model/model.onnx"
+        
+        if [[ -f "$source_metadata" ]]; then
+            log_info "Copying metadata from python_lab..."
+            cp "$source_metadata" "${bot_dir}/model/metadata.json"
+        fi
     else
-        log_warn "Model not found in python_lab/models, skipping model copy"
-        log_info "Use deploy-model command to deploy model from registry"
+        log_warn "Model not found in python_lab/models, source: $source_model"
+        log_info "You may need to deploy manualy or use 'deploy-model' command"
+    fi
+    
+    # Validate model AFTER copying (Crucial fix: validation must happen after files are in place)
+    if ! validate_model "$symbol"; then
+        log_error "Model validation failed after extraction. Check your python_lab/models/ directory."
+        exit 1
     fi
     
     # Generate config from template

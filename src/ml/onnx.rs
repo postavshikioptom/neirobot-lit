@@ -412,15 +412,15 @@ impl OnnxEngine {
         let computed_hash = compute_file_hash(model_path)?;
         
         // Сравниваем с хэшем из metadata
-        if Some(computed_hash.clone()) != metadata.onnx_hash {
+        if computed_hash != metadata.onnx_hash {
             error!(
                 "Model integrity check FAILED! Expected hash: {}, computed hash: {}",
-                metadata.onnx_hash.as_deref().unwrap_or("unknown"), computed_hash
+                metadata.onnx_hash, computed_hash
             );
             bail!(
                 "Model file integrity violation detected. The model file may be corrupted or tampered with. \
                 Expected hash: {}, computed hash: {}",
-                metadata.onnx_hash.as_deref().unwrap_or("unknown"), computed_hash
+                metadata.onnx_hash, computed_hash
             );
         }
         
@@ -430,7 +430,7 @@ impl OnnxEngine {
         if let Some(mcc) = metadata.mcc_score {
             info!("Model MCC score: {:.4}", mcc);
         }
-        info!("Model hash: {}", metadata.onnx_hash.as_deref().unwrap_or("unknown"));
+        info!("Model hash: {}", metadata.onnx_hash);
         
         // 1. Инициализация сессии с выбранным Execution Provider
         let session = init_session(onnx_config, model_path, symbol, seq_len, input_features)?;
@@ -482,54 +482,40 @@ impl OnnxEngine {
             }
         }
 
-        // 4. Загрузка температуры и regime параметров из metadata.json (если существует)
-        let metadata_path = model_path.parent()
-            .context("Failed to get model directory")?
-            .join("metadata.json");
-        
+        // 4. Загрузка температуры и regime параметров из уже загруженного metadata
         let mut temperature = None;
         let mut temperature_embedded = false;
         let mut use_regime_embedding = false;
         let mut num_regimes = 0;
         
-        if metadata_path.exists() {
-            match std::fs::read_to_string(&metadata_path) {
-                Ok(content) => {
-                    match serde_json::from_str::<serde_json::Value>(&content) {
-                        Ok(metadata) => {
-                            // Проверяем, встроена ли температура в ONNX граф
-                            if let Some(embedded) = metadata.get("temperature_embedded").and_then(|v| v.as_bool()) {
-                                temperature_embedded = embedded;
-                            }
-                            
-                            // Загружаем температуру только если она не встроена
-                            if !temperature_embedded {
-                                if let Some(temp) = metadata.get("temperature").and_then(|v| v.as_f64()) {
-                                    temperature = Some(temp as f32);
-                                    info!("Loaded temperature from metadata: T = {:.4}", temp);
-                                }
-                            } else {
-                                info!("Temperature scaling is embedded in ONNX graph");
-                            }
-                            
-                            // Загружаем параметры regime embedding
-                            if let Some(use_regime) = metadata.get("use_regime_embedding").and_then(|v| v.as_bool()) {
-                                use_regime_embedding = use_regime;
-                            }
-                            
-                            if let Some(n_regimes) = metadata.get("num_regimes").and_then(|v| v.as_u64()) {
-                                num_regimes = n_regimes as usize;
-                            }
-                            
-                            if use_regime_embedding {
-                                info!("Model uses regime embedding with {} regimes", num_regimes);
-                            }
-                        }
-                        Err(e) => warn!("Failed to parse metadata.json: {}", e),
-                    }
-                }
-                Err(e) => warn!("Failed to read metadata.json: {}", e),
+        // Проверяем, встроена ли температура в ONNX граф
+        if let Some(embedded) = metadata.temperature_embedded {
+            temperature_embedded = embedded;
+        }
+        
+        // Загружаем температуру только если она не встроена
+        if !temperature_embedded {
+            if let Some(temp) = metadata.temperature {
+                temperature = Some(temp);
+                info!("Loaded temperature from metadata: T = {:.4}", temp);
             }
+        } else {
+            info!("Temperature scaling is embedded in ONNX graph");
+        }
+        
+        // Загружаем параметры regime embedding из model_params
+        if let Some(use_regime) = metadata.model_params.label_map.get("use_regime_embedding") {
+            use_regime_embedding = use_regime == "true";
+        }
+        
+        if let Some(n_regimes_str) = metadata.model_params.label_map.get("num_regimes") {
+            if let Ok(n) = n_regimes_str.parse::<usize>() {
+                num_regimes = n;
+            }
+        }
+        
+        if use_regime_embedding {
+            info!("Model uses regime embedding with {} regimes", num_regimes);
         }
 
         let mut input_buffer = TensorBuffer::new(1, input_features / 50, 50, seq_len);

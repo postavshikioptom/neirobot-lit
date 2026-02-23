@@ -283,10 +283,9 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             let mut sighup = signal(SignalKind::hangup())
                 .expect("Failed to install SIGHUP handler");
             
-            // Сохраняем текущий хэш для сравнения при перезагрузке
-            let current_hash = Arc::new(Mutex::new(
-                neirobot_lit::config::loader::compute_config_hash_from_file(&config_path_clone)
-                    .unwrap_or_default()
+            // Сохраняем текущее содержимое файла для сравнения при перезагрузке
+            let current_content = Arc::new(Mutex::new(
+                std::fs::read_to_string(&config_path_clone).unwrap_or_default()
             ));
             
             loop {
@@ -296,23 +295,24 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
                 // Читаем новую конфигурацию
                 match neirobot_lit::config::loader::load_full_config(std::path::Path::new("."), &config_path_clone) {
                     Ok(new_full_config) => {
-                        // Вычисляем новый хэш
+                        // Читаем новое содержимое из файла
                         let new_content = std::fs::read_to_string(&config_path_clone).unwrap_or_default();
-                        let new_hash = neirobot_lit::config::loader::compute_config_hash(&new_content);
                         
-                        // Получаем старый хэш
-                        let old_hash = current_hash.lock().unwrap().clone();
+                        // Получаем старое содержимое из памяти
+                        let old_content = current_content.lock().unwrap().clone();
+                        
+                        // Вычисляем хэши для сравнения
+                        let old_hash = neirobot_lit::config::loader::compute_config_hash(&old_content);
+                        let new_hash = neirobot_lit::config::loader::compute_config_hash(&new_content);
                         
                         // Логируем изменения (сравниваем с предыдущим, не с начальным)
                         if old_hash != new_hash {
                             info!("[Audit] Config SHA-256 changed: {} -> {}", old_hash, new_hash);
                             
-                            // Читаем старое содержимое для diff
-                            if let Ok(old_content) = std::fs::read_to_string(&config_path_clone) {
-                                let diff = neirobot_lit::config::loader::generate_config_diff(&old_content, &new_content);
-                                if !diff.is_empty() {
-                                    info!("[Audit] Config diff:\n{}", diff);
-                                }
+                            // Генерируем diff используя СТАРОЕ содержимое из памяти
+                            let diff = neirobot_lit::config::loader::generate_config_diff(&old_content, &new_content);
+                            if !diff.is_empty() {
+                                info!("[Audit] Config diff:\n{}", diff);
                             }
                         } else {
                             info!("[Audit] Config hash unchanged: {}", new_hash);
@@ -323,8 +323,8 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
                             warn!("[Audit] Failed to send config update to run_bot_loop: {}", e);
                         }
                         
-                        // Обновляем текущий хэш
-                        *current_hash.lock().unwrap() = new_hash;
+                        // Обновляем текущее содержимое после успешной перезагрузки
+                        *current_content.lock().unwrap() = new_content;
                     }
                     Err(e) => {
                         warn!("[Audit] Failed to reload config on SIGHUP: {}", e);
@@ -1229,6 +1229,14 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         warn!("Initial position sync failed, continuing with local state");
     }
     
+    // Задача 184: Создаем Arc для хранения содержимого конфига
+    let config_content = Arc::new(std::sync::Mutex::new(
+        std::fs::read_to_string(&config_path).unwrap_or_default()
+    ));
+    
+    // Задача 184: Клонируем config_tx для передачи в run_bot_loop
+    let config_tx_for_loop = config_tx.clone();
+    
     let loop_result = run_bot_loop(
         rx_stream,
         private_rx,
@@ -1251,6 +1259,8 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         metrics_rx,
         command_rx,
         status_state.clone(),
+        config_content, // Задача 184: Передаем содержимое конфига
+        config_tx_for_loop, // Задача 184: Передаем sender для отправки обновлений
     ).await;
 
     if let Err(ref e) = loop_result {
@@ -1380,6 +1390,8 @@ pub async fn run_bot_loop<S>(
     mut metrics_rx: tokio::sync::broadcast::Receiver<SystemMetricsUpdate>,
     mut command_rx: mpsc::Receiver<Command>,
     status_state: Arc<parking_lot::RwLock<StatusResponse>>,
+    config_content: Arc<std::sync::Mutex<String>>, // Задача 184: Хранение содержимого конфига
+    config_tx_clone: mpsc::Sender<neirobot_lit::config::types::FullConfig>, // Задача 184: Отправка обновлений конфига
 ) -> Result<()> 
 where S: tokio_stream::Stream<Item = WsData> + Unpin
 {
@@ -1798,10 +1810,38 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                         let config_path = PathBuf::from("bots").join(symbol).join("config.toml");
                         match load_full_config(Path::new("."), &config_path) {
                             Ok(new_config) => {
-                                info!("[Command] Configuration reloaded successfully");
-                                // Применяем новую конфигурацию через config_rx
-                                // (обработка уже есть в другой ветке select)
-                                // Здесь просто логируем успех
+                                // Читаем новое содержимое из файла
+                                let new_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+                                
+                                // Получаем старое содержимое из памяти
+                                let old_content = config_content.lock().unwrap().clone();
+                                
+                                // Вычисляем хэши для сравнения
+                                let old_hash = neirobot_lit::config::loader::compute_config_hash(&old_content);
+                                let new_hash = neirobot_lit::config::loader::compute_config_hash(&new_content);
+                                
+                                // Логируем изменения
+                                if old_hash != new_hash {
+                                    info!("[Audit] Config SHA-256 changed: {} -> {}", old_hash, new_hash);
+                                    
+                                    // Генерируем diff используя СТАРОЕ содержимое из памяти
+                                    let diff = neirobot_lit::config::loader::generate_config_diff(&old_content, &new_content);
+                                    if !diff.is_empty() {
+                                        info!("[Audit] Config diff:\n{}", diff);
+                                    }
+                                } else {
+                                    info!("[Audit] Config hash unchanged: {}", new_hash);
+                                }
+                                
+                                // Отправляем новую конфигурацию через config_tx
+                                if let Err(e) = config_tx_clone.send(new_config).await {
+                                    error!("[Command] Failed to send config update: {}", e);
+                                } else {
+                                    info!("[Command] Configuration reloaded successfully");
+                                    
+                                    // Обновляем текущее содержимое после успешной отправки
+                                    *config_content.lock().unwrap() = new_content;
+                                }
                             }
                             Err(e) => {
                                 error!("[Command] Failed to reload configuration: {}", e);

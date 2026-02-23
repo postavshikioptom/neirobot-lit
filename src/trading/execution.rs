@@ -2500,7 +2500,7 @@ impl ExecutionEngine {
             
             // Задача 202: Логирование метрик качества исполнения
             if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
-                if let Some(log) = self.order_manager.create_execution_quality_log(order, &self.bot_config.bot_path) {
+                if let Some(log) = self.order_manager.create_execution_quality_log(order, &self.bot_config.model_path) {
                     // Отправляем лог в фоновый worker через канал
                     let _ = self.execution_quality_tx.send(log).await;
                 }
@@ -2515,7 +2515,7 @@ impl ExecutionEngine {
                     &order_link_id,
                     fill_event.exec_qty.to_f64().unwrap_or(0.0),
                     mid_price_f64,
-                    &self.bot_config.bot_path,
+                    &self.bot_config.model_path,
                 ) {
                     warn!("[{}] Failed to log market impact for order {}: {}", self.symbol, order_link_id, e);
                 }
@@ -2735,7 +2735,7 @@ impl ExecutionEngine {
                                         // Задача 149/168: Неблокирующая задержка вместо sleep
                                         if self.last_slice_time.elapsed() < tokio::time::Duration::from_millis(rate_limit_delay_ms) {
                                             debug!("[{}] Slicing rate limited: skipping this tick", self.symbol);
-                                            return Ok(None);
+                                            return Ok(());
                                         }
                                         self.last_slice_time = Instant::now();
                                         
@@ -3059,8 +3059,8 @@ impl ExecutionEngine {
         // Задача 208: Логика переключения Passive -> Aggressive
         // Проверяем ордера, которые готовы к переключению
         let now = timestamp_ms();
-        let base_switch_timeout = self.bot_config.sor_config.switch_base_timeout_ms;
-        let max_switches = self.bot_config.sor_config.max_switches_per_signal;
+        let base_switch_timeout = self.bot_config.sor.switch_base_timeout_ms;
+        let max_switches = self.bot_config.sor.max_switches_per_signal;
         
         let to_switch: Vec<(String, f32)> = self.order_manager.get_active_orders()
             .iter()
@@ -3074,7 +3074,7 @@ impl ExecutionEngine {
                 // Модулируем timeout по urgency каждого ордера
                 let (effective_switch_timeout, _) = self.calculate_modulated_switch_params(
                     base_switch_timeout,
-                    self.bot_config.sor_config.switch_base_distance_bps,
+                    self.bot_config.sor.switch_base_distance_bps,
                     o.urgency,
                 );
                 

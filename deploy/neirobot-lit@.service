@@ -14,9 +14,9 @@ ExecStart=/opt/neirobot/target/x86_64-unknown-linux-musl/release/neirobot-lit --
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart policy - on-failure with limits for high availability
-Restart=on-failure
+Restart=always
 RestartSec=5s
-StartLimitIntervalSec=3600
+StartLimitIntervalSec=0
 StartLimitBurst=10
 
 # HFT optimizations - Real-time scheduling for minimal latency

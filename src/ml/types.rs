@@ -69,8 +69,7 @@ pub struct ModelMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onnx_file: Option<String>,
     // Поля для обратной совместимости со старыми версиями
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub onnx_hash: Option<String>,
+    pub onnx_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
