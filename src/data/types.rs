@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use serde_with::{serde_as, DisplayFromStr};
+use std::sync::Arc;
 
 /// Один уровень в стакане (цена + объем)
 #[serde_as]
@@ -53,18 +54,24 @@ pub struct OrderBookUpdateOwned {
 }
 
 /// Публичная сделка от биржи (для расчета VWAP/TWAP) - borrowed версия для zero-copy парсинга
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublicTrade {
-    pub price: rust_decimal::Decimal,
-    pub size: rust_decimal::Decimal,
+pub struct PublicTrade<'a> {
+    #[serde(borrow)]
+    pub symbol: &'a str,
+    #[serde_as(as = "DisplayFromStr")]
+    pub price: f64,
+    #[serde_as(as = "DisplayFromStr")]
+    pub size: f64,
     pub side: Side,       // Buy/Sell
     pub timestamp: i64,   // Unix MS
 }
 
-impl PublicTrade {
+impl<'a> PublicTrade<'a> {
     /// Конвертирует borrowed версию в owned для хранения
     pub fn to_owned(&self) -> PublicTradeOwned {
         PublicTradeOwned {
+            symbol: self.symbol.to_string(),
             price: self.price,
             size: self.size,
             side: self.side,
@@ -76,8 +83,9 @@ impl PublicTrade {
 /// Owned версия PublicTrade для хранения
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicTradeOwned {
-    pub price: rust_decimal::Decimal,
-    pub size: rust_decimal::Decimal,
+    pub symbol: String,
+    pub price: f64,
+    pub size: f64,
     pub side: Side,
     pub timestamp: i64,
 }
@@ -90,13 +98,104 @@ pub enum Side {
 }
 
 
-/// Enum для передачи разных типов данных из WebSocket
+/// Enum для передачи разных типов данных из WebSocket - заимствованная версия для zero-copy парсинга
+#[derive(Debug)]
+pub enum WsDataRef<'a> {
+    OrderBook(OrderBookUpdate<'a>),
+    Trades(Vec<PublicTrade<'a>>),
+    Ticker(Ticker<'a>),
+    MarkPrice(&'a str, f64), // (symbol, mark_price) - Задача 233
+}
+
+/// Enum для передачи через каналы между потоками - использует Arc<str> для дешёвого clone
 #[derive(Debug, Clone)]
 pub enum WsData {
-    OrderBook(OrderBookUpdateOwned),
-    Trades(Vec<PublicTradeOwned>),
-    Ticker(TickerOwned),
-    MarkPrice(String, f64), // (symbol, mark_price) - Задача 233
+    OrderBook(OrderBookUpdateArc),
+    Trades(Vec<PublicTradeArc>),
+    Ticker(TickerArc),
+    MarkPrice(Arc<str>, f64), // (symbol, mark_price) - Задача 233
+}
+
+/// OrderBookUpdate с Arc<str> для дешёвого clone
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderBookUpdateArc {
+    pub symbol: Arc<str>,
+    pub timestamp_ms: u64,
+    pub last_update_id: u64,
+    pub is_snapshot: bool,
+    pub bids: SmallVec<[PriceLevel; 50]>,
+    pub asks: SmallVec<[PriceLevel; 50]>,
+    pub checksum: Option<u32>,
+}
+
+/// PublicTrade с Arc<str> для дешёвого clone
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicTradeArc {
+    pub symbol: Arc<str>,
+    pub price: f64,
+    pub size: f64,
+    pub side: Side,
+    pub timestamp: i64,
+}
+
+/// Ticker с Arc<str> для дешёвого clone
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TickerArc {
+    pub symbol: Arc<str>,
+    pub last_price: f64,
+    pub bid: f64,
+    pub ask: f64,
+    pub bid_size: f64,
+    pub ask_size: f64,
+    pub volume_24h: f64,
+    pub turnover_24h: f64,
+    pub funding_rate: f64,
+    pub next_funding_time: u64,
+    pub timestamp_ms: u64,
+}
+
+impl OrderBookUpdate<'_> {
+    pub fn to_arc(self) -> OrderBookUpdateArc {
+        OrderBookUpdateArc {
+            symbol: Arc::from(self.symbol),
+            timestamp_ms: self.timestamp_ms,
+            last_update_id: self.last_update_id,
+            is_snapshot: self.is_snapshot,
+            bids: self.bids,
+            asks: self.asks,
+            checksum: self.checksum,
+        }
+    }
+}
+
+impl PublicTrade<'_> {
+    pub fn to_arc(self) -> PublicTradeArc {
+        PublicTradeArc {
+            symbol: Arc::from(self.symbol),
+            price: self.price,
+            size: self.size,
+            side: self.side,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+impl Ticker<'_> {
+    pub fn to_arc(self) -> TickerArc {
+        TickerArc {
+            symbol: Arc::from(self.symbol),
+            last_price: self.last_price,
+            bid: self.bid,
+            ask: self.ask,
+            bid_size: self.bid_size,
+            ask_size: self.ask_size,
+            volume_24h: self.volume_24h,
+            turnover_24h: self.turnover_24h,
+            funding_rate: self.funding_rate,
+            next_funding_time: self.next_funding_time,
+            timestamp_ms: self.timestamp_ms,
+        }
+    }
 }
 
 

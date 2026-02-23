@@ -423,7 +423,7 @@ impl BybitWsClient {
     }
 
     /// Главный цикл с логикой переподключения (Exponential Backoff + Jitter)
-    pub async fn run(&self, tx: Sender<WsData>, mut reconnect_rx: Receiver<ReconnectSignal>, token: CancellationToken) -> Result<()> {
+    pub async fn run(&self, tx: Sender<crate::data::types::WsData>, mut reconnect_rx: Receiver<ReconnectSignal>, token: CancellationToken) -> Result<()> {
         let mut backoff = ExponentialBackoff::new(
             Duration::from_millis(self.config.ws_retry_initial_ms),
             Duration::from_millis(self.config.ws_retry_max_ms),
@@ -567,7 +567,7 @@ impl BybitWsClient {
 
         // Логика инициализации (буферизация до Snapshot)
         let mut is_synced = false;
-        let mut init_buffer: SmallVec<[crate::data::types::OrderBookUpdateOwned; 100]> = SmallVec::new();
+        let mut init_buffer: SmallVec<[crate::data::types::OrderBookUpdateArc; 100]> = SmallVec::new();
         let mut last_u: u64 = 0;
 
         loop {
@@ -624,7 +624,13 @@ impl BybitWsClient {
                                         }
                                     }
 
-                                    match parse_orderbook_msg(&text) {
+                                    // Замер времени парсинга JSON (Задача 199)
+                                    let start_parse = Instant::now();
+                                    let parse_res = parse_orderbook_msg(&text);
+                                    let parse_duration = start_parse.elapsed().as_micros() as u64;
+                                    crate::monitoring::latency::HOT_PATH_STATS.record_json_parsing(parse_duration);
+
+                                    match parse_res {
                                         Ok(Some(update)) => {
                                             // Инкремент счетчика тиков для Prometheus (задача 143)
                                             if let Some(counter) = crate::monitoring::prometheus::TICK_COUNTER.get() {
@@ -652,8 +658,8 @@ impl BybitWsClient {
                                                     is_synced = true;
                                                     last_u = update.last_update_id;
                                                     
-                                                    // Отправляем снапшот в канал (уже owned версия)
-                                                    if let Err(e) = tx.try_send(WsData::OrderBook(update)) {
+                                                    // Конвертируем borrowed в Arc версию (zero-copy для symbol)
+                                                    if let Err(e) = tx.try_send(crate::data::types::WsData::OrderBook(update.to_arc())) {
                                                         error!("[{}] Failed to send snapshot to channel: {}", self.symbol, e);
                                                         return Err(anyhow::anyhow!("Channel overflow or closed"));
                                                     }
@@ -670,29 +676,29 @@ impl BybitWsClient {
                                                         }
                                                         
                                                         last_u = delta.last_update_id;
-                                                        if let Err(e) = tx.try_send(WsData::OrderBook(delta)) {
+                                                        if let Err(e) = tx.try_send(crate::data::types::WsData::OrderBook(delta)) {
                                                             error!("[{}] Failed to send buffered delta to channel: {}", self.symbol, e);
                                                             return Err(anyhow::anyhow!("Channel overflow or closed"));
                                                         }
                                                     }
                                                     info!("[{}] WS Stream synchronized and live.", self.symbol);
                                                 } else {
-                                                    // Буферизуем дельту до снапшота (уже owned версия)
+                                                    // Буферизуем дельту до снапшота (Arc версия)
                                                     if init_buffer.len() >= 100 {
                                                         error!("[{}] Init buffer overflow. Snapshot not received in time.", self.symbol);
                                                         return Err(anyhow::anyhow!("Init buffer overflow"));
                                                     }
-                                                    init_buffer.push(update);
+                                                    init_buffer.push(update.to_arc());
                                                 }
                                             } else {
-                                                // Прямая трансляция с проверкой последовательности (уже owned версия)
+                                                // Прямая трансляция с проверкой последовательности
                                                 if update.last_update_id != last_u + 1 && !update.is_snapshot {
                                                     error!("[{}] Sequence gap: {} -> {}. Reconnecting...", self.symbol, last_u, update.last_update_id);
                                                     return Err(anyhow::anyhow!("Sequence gap"));
                                                 }
                                                 
                                                 last_u = update.last_update_id;
-                                                if let Err(e) = tx.try_send(WsData::OrderBook(update)) {
+                                                if let Err(e) = tx.try_send(crate::data::types::WsData::OrderBook(update.to_arc())) {
                                                     error!("[{}] Channel overflow or closed for {}: {}", self.symbol, self.symbol, e);
                                                     return Err(anyhow::anyhow!("Channel overflow or closed"));
                                                 }
@@ -705,7 +711,10 @@ impl BybitWsClient {
                                     // Обработка публичных сделок
                                     match parse_public_trade_msg(&text) {
                                         Ok(Some(trades)) => {
-                                            if let Err(e) = tx.try_send(WsData::Trades(trades)) {
+                                            let arc_trades: Vec<_> = trades.into_iter()
+                                                .map(|t| t.to_arc())
+                                                .collect();
+                                            if let Err(e) = tx.try_send(crate::data::types::WsData::Trades(arc_trades)) {
                                                 error!("[{}] Failed to send public trades to channel: {}", self.symbol, e);
                                                 return Err(anyhow::anyhow!("Channel overflow or closed"));
                                             }
@@ -717,8 +726,8 @@ impl BybitWsClient {
                                     // Обработка тикеров (задача 170: Funding Rate Filter)
                                     match parse_ticker_msg(&text) {
                                         Ok(Some(ticker)) => {
-                                            // Конвертируем borrowed в owned перед отправкой в канал
-                                            if let Err(e) = tx.try_send(WsData::Ticker(ticker.to_owned())) {
+                                            // Конвертируем borrowed в Arc версию (zero-copy для symbol)
+                                            if let Err(e) = tx.try_send(crate::data::types::WsData::Ticker(ticker.to_arc())) {
                                                 error!("[{}] Failed to send ticker to channel: {}", self.symbol, e);
                                                 return Err(anyhow::anyhow!("Channel overflow or closed"));
                                             }
@@ -730,7 +739,7 @@ impl BybitWsClient {
                                     // Обработка маркированной цены (задача 233: Price Band Violation)
                                     match parse_mark_price_msg(&text) {
                                         Ok(Some((symbol, mark_price))) => {
-                                            if let Err(e) = tx.try_send(WsData::MarkPrice(symbol, mark_price)) {
+                                            if let Err(e) = tx.try_send(crate::data::types::WsData::MarkPrice(Arc::from(symbol), mark_price)) {
                                                 error!("[{}] Failed to send mark price to channel: {}", self.symbol, e);
                                                 return Err(anyhow::anyhow!("Channel overflow or closed"));
                                             }

@@ -123,14 +123,14 @@ pub fn parse_private_msg(json_str: &str) -> Result<Vec<OrderUpdate>> {
 
 /// Парсит сырое JSON-сообщение от Bybit в OrderBookUpdate.
 /// Возвращает None, если сообщение не относится к стакану (например, ответ на ping).
-pub fn parse_orderbook_msg(json_str: &str) -> Result<Option<crate::data::types::OrderBookUpdateOwned>> {
+pub fn parse_orderbook_msg<'a>(json_str: &'a str) -> Result<Option<crate::data::types::OrderBookUpdate<'a>>> {
     // 1. Быстрая фильтрация: если это не сообщение стакана, пропускаем
     if !json_str.contains("orderbook") {
         return Ok(None);
     }
 
     // Используем from_slice для работы напрямую с байтами (zero-copy)
-    let msg: BybitOrderbookMsg = serde_json::from_slice(json_str.as_bytes())
+    let msg: BybitOrderbookMsg<'a> = serde_json::from_slice(json_str.as_bytes())
         .context("Failed to deserialize Bybit orderbook message")?;
 
     // 2. Конвертируем уровни стакана из заимствованных строк в f64
@@ -145,8 +145,8 @@ pub fn parse_orderbook_msg(json_str: &str) -> Result<Option<crate::data::types::
             .collect()
     };
 
-    Ok(Some(crate::data::types::OrderBookUpdateOwned {
-        symbol: msg.data.s.to_string(),
+    Ok(Some(crate::data::types::OrderBookUpdate {
+        symbol: msg.data.s,
         timestamp_ms: msg.ts,
         last_update_id: msg.data.u,
         is_snapshot: msg.msg_type == "snapshot",
@@ -186,14 +186,14 @@ pub struct BybitPublicTradeData<'a> {
 
 /// Парсит сырое JSON-сообщение от Bybit в список PublicTrade.
 /// Возвращает None, если сообщение не относится к публичным сделкам.
-pub fn parse_public_trade_msg(json_str: &str) -> Result<Option<Vec<PublicTradeOwned>>> {
+pub fn parse_public_trade_msg<'a>(json_str: &'a str) -> Result<Option<Vec<crate::data::types::PublicTrade<'a>>>> {
     // Быстрая фильтрация: если это не сообщение publicTrade, пропускаем
     if !json_str.contains("publicTrade") {
         return Ok(None);
     }
 
     // Используем from_slice для работы напрямую с байтами (zero-copy)
-    let msg: BybitPublicTradeMsg = serde_json::from_slice(json_str.as_bytes())
+    let msg: BybitPublicTradeMsg<'a> = serde_json::from_slice(json_str.as_bytes())
         .context("Failed to deserialize Bybit publicTrade message")?;
 
     let mut trades = Vec::new();
@@ -204,9 +204,10 @@ pub fn parse_public_trade_msg(json_str: &str) -> Result<Option<Vec<PublicTradeOw
             _ => continue, // Пропускаем неизвестные стороны
         };
 
-        trades.push(PublicTradeOwned {
-            price: Decimal::from_str(data.price).context("Failed to parse price")?,
-            size: Decimal::from_str(data.size).context("Failed to parse size")?,
+        trades.push(crate::data::types::PublicTrade {
+            symbol: data.symbol,
+            price: parse_f64_fast(data.price)?,
+            size: parse_f64_fast(data.size)?,
             side,
             timestamp: data.timestamp,
         });
@@ -275,18 +276,18 @@ pub struct BybitMarkPriceData<'a> {
 
 /// Парсит сырое JSON-сообщение от Bybit в Ticker.
 /// Возвращает None, если сообщение не относится к тикерам.
-pub fn parse_ticker_msg(json_str: &str) -> Result<Option<crate::data::types::TickerOwned>> {
+pub fn parse_ticker_msg<'a>(json_str: &'a str) -> Result<Option<crate::data::types::Ticker<'a>>> {
     // Быстрая фильтрация: если это не сообщение tickers, пропускаем
     if !json_str.contains("tickers") {
         return Ok(None);
     }
 
     // Используем from_slice для работы напрямую с байтами (zero-copy)
-    let msg: BybitTickerMsg = serde_json::from_slice(json_str.as_bytes())
+    let msg: BybitTickerMsg<'a> = serde_json::from_slice(json_str.as_bytes())
         .context("Failed to deserialize Bybit ticker message")?;
 
-    let ticker = crate::data::types::TickerOwned {
-        symbol: msg.data.symbol.to_string(),
+    let ticker = crate::data::types::Ticker {
+        symbol: msg.data.symbol,
         last_price: parse_f64_fast(msg.data.last_price)?,
         bid: parse_f64_fast(msg.data.bid_price)?,
         ask: parse_f64_fast(msg.data.ask_price)?,
@@ -304,16 +305,16 @@ pub fn parse_ticker_msg(json_str: &str) -> Result<Option<crate::data::types::Tic
 
 /// Парсит сырое JSON-сообщение от Bybit в маркированную цену (Задача 233).
 /// Возвращает None, если сообщение не относится к markPrice.
-pub fn parse_mark_price_msg(json_str: &str) -> Result<Option<(String, f64)>> {
+pub fn parse_mark_price_msg<'a>(json_str: &'a str) -> Result<Option<(&'a str, f64)>> {
     // Быстрая фильтрация: если это не сообщение markPrice, пропускаем
     if !json_str.contains("markPrice") {
         return Ok(None);
     }
 
     // Используем from_slice для работы напрямую с байтами (zero-copy)
-    let msg: BybitMarkPriceMsg = serde_json::from_slice(json_str.as_bytes())
+    let msg: BybitMarkPriceMsg<'a> = serde_json::from_slice(json_str.as_bytes())
         .context("Failed to deserialize Bybit markPrice message")?;
 
     let mark_price = parse_f64_fast(msg.data.mark_price)?;
-    Ok(Some((msg.data.symbol.to_string(), mark_price)))
+    Ok(Some((msg.data.symbol, mark_price)))
 }

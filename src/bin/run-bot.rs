@@ -501,7 +501,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         metadata_path.to_str().context("Invalid metadata path")?
     ).context("Failed to load TensorBuilder from metadata")?;
     
-    let engine = OnnxEngine::load(
+    let mut engine = OnnxEngine::load(
         &full_config.bot.model_path,
         full_config.bot.seq_len,
         full_config.bot.features_dim,
@@ -1461,6 +1461,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                 let proc_avg = PROC_LATENCY.get_avg();
                 let proc_max = PROC_LATENCY.get_max();
                 
+                let json_avg = HOT_PATH_STATS.get_avg_json_parsing();
                 let lob_avg = HOT_PATH_STATS.get_avg_lob();
                 let feature_avg = HOT_PATH_STATS.get_avg_feature();
                 let inference_avg = HOT_PATH_STATS.get_avg_inference();
@@ -1472,8 +1473,8 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     e2e_avg, e2e_max, proc_avg, proc_max
                 );
                 info!(
-                    "[HotPath Stats] LOB: {}us, Feat: {}us, Infer: {}us (max {}us), Samples: {}",
-                    lob_avg, feature_avg, inference_avg, inference_max, samples
+                    "[HotPath Stats] JSON: {}us, LOB: {}us, Feat: {}us, Infer: {}us (max {}us), Samples: {}",
+                    json_avg, lob_avg, feature_avg, inference_avg, inference_max, samples
                 );
 
                 E2E_LATENCY.reset();
@@ -1657,7 +1658,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     }
                     WsData::MarkPrice(symbol, mark_price) => {
                         // Задача 233: Обновление маркированной цены
-                        if symbol == ob.symbol {
+                        if symbol.as_ref() == ob.symbol {
                             ob.set_mark_price(mark_price);
                             debug!("[{}] Updated mark price: {}", symbol, mark_price);
                         }
@@ -1882,7 +1883,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
 
 /// Координирует поток данных: OrderBook -> Tensor -> Inference -> Execution
 async fn handle_market_update(
-    update: neirobot_lit::data::types::OrderBookUpdate,
+    update: neirobot_lit::data::types::OrderBookUpdateArc,
     ob: &mut OrderBook,
     tensor_builder: &mut TensorBuilder,
     engine: &mut OnnxEngine,
@@ -2144,37 +2145,90 @@ async fn run_replay_loop(
     config: &FullConfig,
 ) -> Result<()> {
     use neirobot_lit::data::parquet::FastParquetScanner;
-    use neirobot_lit::data::types::{OrderBookUpdate, PriceLevel};
+    use neirobot_lit::data::types::{OrderBookUpdateArc, PriceLevel};
     use smallvec::SmallVec;
+    use std::sync::Arc;
 
     info!("Starting Replay Mode from {:?}", path);
     // Используем батч 1000 для баланса скорости и памяти
     let scanner = FastParquetScanner::new(path.to_str().unwrap(), 1000);
     let batches = scanner.get_batches().context("Failed to initialize parquet scanner")?;
     
+    // Канал для реконнекта (не используется в replay, но нужен для handle_market_update)
+    let (ws_reconnect_tx, _) = mpsc::channel(1);
+    
     let mut processed_count = 0;
     
     for df in batches {
-        // Конвертация DataFrame из Parquet обратно в OrderBookUpdate и вызов handle_market_update
-        // Предполагаем, что DF содержит колонки: timestamp_ms, price, size (или bid_px_0, bid_sz_0...)
-        // Для упрощения (и так как точная схема Parquet не ясна), будем итерироваться по строкам
-        // Но Polars DataFrame columnar, итерация по строкам медленная. 
-        // Однако для replay это допустимо.
-        
-        // ВАЖНО: Реализация зависит от схемы Parquet файла.
-        // Задача 199 не специфицировала схему, но FastParquetScanner валидирует 'timestamp_ms'.
-        
-        // Здесь мы используем упрощенную логику: просто логируем прогресс, так как полная десериализация из произвольного Parquet требует знания схемы.
-        // Если бы это был реальный replay, мы бы мапили колонки.
-        
-        // FIXME: Это заглушка реализации. В реальном сценарии нужно мапить колонки.
-        // Но так как у меня нет примера Parquet, я напишу каркас.
-        
         let height = df.height();
-        processed_count += height;
         
-        // Имитация задержки (как будто данные приходят в реальном времени, или быстрее)
-        // tokio::time::sleep(Duration::from_micros(10)).await;
+        // Получаем колонки как Series (быстрый доступ через ChunkedArray)
+        let ts_col = df.column("timestamp_ms")?.i64()?;
+        let id_col = df.column("last_update_id")?.i64()?;
+        
+        // Подготавливаем колонки цен и объемов (50 уровней)
+        let mut ask_p_series = Vec::with_capacity(50);
+        let mut ask_v_series = Vec::with_capacity(50);
+        let mut bid_p_series = Vec::with_capacity(50);
+        let mut bid_v_series = Vec::with_capacity(50);
+        
+        for i in 0..50 {
+            ask_p_series.push(df.column(&format!("ask_p_{}", i))?.f64()?);
+            ask_v_series.push(df.column(&format!("ask_v_{}", i))?.f64()?);
+            bid_p_series.push(df.column(&format!("bid_p_{}", i))?.f64()?);
+            bid_v_series.push(df.column(&format!("bid_v_{}", i))?.f64()?);
+        }
+        
+        for row_idx in 0..height {
+            let timestamp_ms = ts_col.get(row_idx).unwrap_or(0) as u64;
+            let last_update_id = id_col.get(row_idx).unwrap_or(0) as u64;
+            
+            let mut asks = SmallVec::with_capacity(50);
+            let mut bids = SmallVec::with_capacity(50);
+            
+            for i in 0..50 {
+                let ap = ask_p_series[i].get(row_idx).unwrap_or(0.0);
+                let av = ask_v_series[i].get(row_idx).unwrap_or(0.0);
+                let bp = bid_p_series[i].get(row_idx).unwrap_or(0.0);
+                let bv = bid_v_series[i].get(row_idx).unwrap_or(0.0);
+                
+                // Добавляем уровень, только если цена > 0
+                if ap > 0.0 {
+                    asks.push(PriceLevel { price: ap, size: av });
+                }
+                if bp > 0.0 {
+                    bids.push(PriceLevel { price: bp, size: bv });
+                }
+            }
+            
+            let update = OrderBookUpdateArc {
+                symbol: Arc::from(symbol),
+                timestamp_ms,
+                last_update_id,
+                is_snapshot: true, 
+                bids,
+                asks,
+                checksum: None,
+            };
+            
+            // Вызываем основной обработчик рынка для каждого ряда
+            handle_market_update(
+                update,
+                &mut ob,
+                &mut tensor_builder,
+                engine,
+                execution,
+                rest_client,
+                &config.exchange,
+                ws_reconnect_tx.clone(),
+            ).await?;
+            
+            processed_count += 1;
+        }
+        
+        if processed_count % 10000 == 0 {
+            info!("Replay progress: {} rows processed...", processed_count);
+        }
     }
     
     info!("Replay finished successfully. Processed {} rows.", processed_count);

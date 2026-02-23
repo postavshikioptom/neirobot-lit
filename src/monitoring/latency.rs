@@ -153,6 +153,8 @@ impl LatencyStats {
 }
 
 pub struct HotPathStats {
+    pub json_parsing_sum_us: AtomicU64,
+    pub json_parsing_count: AtomicU64,
     pub lob_update_sum_us: AtomicU64,
     pub lob_update_count: AtomicU64,
     pub feature_calc_sum_us: AtomicU64,
@@ -165,6 +167,8 @@ pub struct HotPathStats {
 impl HotPathStats {
     pub fn new() -> Self {
         Self {
+            json_parsing_sum_us: AtomicU64::new(0),
+            json_parsing_count: AtomicU64::new(0),
             lob_update_sum_us: AtomicU64::new(0),
             lob_update_count: AtomicU64::new(0),
             feature_calc_sum_us: AtomicU64::new(0),
@@ -173,6 +177,11 @@ impl HotPathStats {
             inference_count: AtomicU64::new(0),
             max_inference_us: AtomicU64::new(0),
         }
+    }
+
+    pub fn record_json_parsing(&self, us: u64) {
+        self.json_parsing_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.json_parsing_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_lob(&self, us: u64) {
@@ -204,6 +213,8 @@ impl HotPathStats {
     }
 
     pub fn reset(&self) {
+        self.json_parsing_sum_us.store(0, Ordering::Relaxed);
+        self.json_parsing_count.store(0, Ordering::Relaxed);
         self.lob_update_sum_us.store(0, Ordering::Relaxed);
         self.lob_update_count.store(0, Ordering::Relaxed);
         self.feature_calc_sum_us.store(0, Ordering::Relaxed);
@@ -211,6 +222,12 @@ impl HotPathStats {
         self.inference_sum_us.store(0, Ordering::Relaxed);
         self.inference_count.store(0, Ordering::Relaxed);
         self.max_inference_us.store(0, Ordering::Relaxed);
+    }
+
+    pub fn get_avg_json_parsing(&self) -> u64 {
+        let count = self.json_parsing_count.load(Ordering::Relaxed);
+        if count == 0 { return 0; }
+        self.json_parsing_sum_us.load(Ordering::Relaxed) / count
     }
 
     pub fn get_avg_lob(&self) -> u64 {

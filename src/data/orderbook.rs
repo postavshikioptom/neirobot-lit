@@ -6,7 +6,7 @@ use std::time::Instant;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tracing::warn;
-use crate::data::types::OrderBookUpdateOwned;
+use crate::data::types::OrderBookUpdateArc;
 use crate::monitoring::latency::PROC_LATENCY;
 use serde::{Serialize, Deserialize};
 use circular_buffer::CircularBuffer;
@@ -363,7 +363,7 @@ impl OrderBook {
     }
 
     /// Сбрасывает состояние и записывает новые данные из снапшота
-    pub fn reset_with_snapshot(&mut self, update: &OrderBookUpdateOwned) {
+    pub fn reset_with_snapshot(&mut self, update: &OrderBookUpdateArc) {
         self.bids.clear();
         self.asks.clear();
         self.last_update_id = update.last_update_id;
@@ -400,7 +400,7 @@ impl OrderBook {
 
     /// Применяет обновление
     #[inline(always)]
-    pub fn apply_update(&mut self, update: &OrderBookUpdateOwned) {
+    pub fn apply_update(&mut self, update: &OrderBookUpdateArc) {
         let start = Instant::now();
 
         if update.is_snapshot {
@@ -951,8 +951,8 @@ mod tests {
         let mut ob = OrderBook::new("BTCUSDT");
         let mut bids = SmallVec::new();
         bids.push(PriceLevel { price: 50000.0, size: 1.0 });
-        let update = OrderBookUpdate {
-            symbol: "BTCUSDT".to_string(),
+        let update = OrderBookUpdateArc {
+            symbol: Arc::from("BTCUSDT"),
             timestamp_ms: 1000,
             last_update_id: 10,
             is_snapshot: true,
@@ -975,8 +975,8 @@ mod tests {
         let mut ob = OrderBook::new("BTCUSDT");
         let mut bids = SmallVec::new();
         bids.push(PriceLevel { price: 50000.0, size: 1.5 });
-        ob.apply_update(&OrderBookUpdate {
-            symbol: "BTCUSDT".into(),
+        ob.apply_update(&OrderBookUpdateArc {
+            symbol: Arc::from("BTCUSDT"),
             timestamp_ms: 1000,
             last_update_id: 1,
             is_snapshot: true,
@@ -1011,8 +1011,8 @@ mod tests {
             let mut ob_guard = ob.lock().unwrap();
             let mut bids = SmallVec::new();
             bids.push(PriceLevel { price: 50000.0, size: 1.0 });
-            ob_guard.apply_update(&OrderBookUpdate {
-                symbol: "BTCUSDT".into(),
+            ob_guard.apply_update(&OrderBookUpdateArc {
+                symbol: Arc::from("BTCUSDT"),
                 timestamp_ms: 1000,
                 last_update_id: 1,
                 is_snapshot: true,
@@ -1044,8 +1044,8 @@ mod tests {
                 let mut asks = SmallVec::new();
                 asks.push(PriceLevel { price: new_ask_price, size: 2.0 + (update_id as f64 % 5.0) });
                 
-                ob_guard.apply_update(&OrderBookUpdate {
-                    symbol: "BTCUSDT".into(),
+                ob_guard.apply_update(&OrderBookUpdateArc {
+                    symbol: Arc::from("BTCUSDT"),
                     timestamp_ms: 1000 + update_id,
                     last_update_id: update_id,
                     is_snapshot: false,

@@ -8,6 +8,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use ndarray::{Array2, Array4, s};
 use wide::f32x8;
+use aligned_vec::{AVec, ConstAlign};
 
 /// Константа для защиты от деления на 0 при нормализации
 const EPSILON: f32 = 1e-8;
@@ -171,16 +172,18 @@ struct ModelMetadataInternal {
 }
 
 /// Буфер для пре-аллокации памяти под входной тензор (Задача №197)
+/// Использует выровненную память для эффективности SIMD (Задача 193)
 pub struct TensorBuffer {
-    data: Vec<f32>,
+    data: AVec<f32, ConstAlign<32>>,
     shape: [usize; 4],
 }
 
 impl TensorBuffer {
     /// Создает новый буфер на основе размеров тензора [batch, channels, levels, seq_len]
+    /// Память выравнена по 32 байта для SIMD операций
     pub fn new(batch: usize, channels: usize, levels: usize, seq_len: usize) -> Self {
         let size = batch * channels * levels * seq_len;
-        let mut data = Vec::with_capacity(size);
+        let mut data = AVec::<f32, ConstAlign<32>>::with_capacity(size);
         data.resize(size, 0.0);
         Self {
             data,
@@ -238,7 +241,8 @@ pub fn apply_normalization(tensor: &mut Array4<f32>, means: &[f32], inv_stds: &[
 
 /// Тип для представления одного снимка данных стакана (Задача 097)
 /// Содержит 150 нормализованных признаков: 3 канала * 50 уровней
-pub type Snapshot = Vec<f32>;
+/// Выровнена по 32 байта для поддержки SIMD инструкций (Задача 193)
+pub type Snapshot = AVec<f32, ConstAlign<32>>;
 
 /// Структура для построения входного тензора фиксированной длины для ONNX-модели (Задача 097)
 /// 
@@ -503,7 +507,12 @@ impl TensorBuilder {
         }
 
         // 3. Вычисляем 3 канала согласно плану 053
-        let mut features = vec![0.0; 150]; // 3 канала * 50 уровней
+        // Используем выровненный вектор для SIMD операций (Задача 193)
+        let mut features = {
+            let mut v = AVec::<f32, ConstAlign<32>>::with_capacity(150);
+            v.resize(150, 0.0);
+            v
+        };
         
         for i in 0..50 {
             // Канал 0: Normalized Price (среднее отклонение)

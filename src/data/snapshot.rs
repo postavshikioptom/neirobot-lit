@@ -22,7 +22,7 @@ pub async fn run_snapshot_pipeline(config: FullConfig) -> Result<()> {
     let mut dumper = ParquetDumper::new(&symbol, &output_dir, 5000)?;
 
     // Создаем канал для получения обновлений стакана от WebSocket клиента
-    // Используем типизированный WsData, так как парсинг уже настроен в WS клиенте
+    // Используем типизированный WsData с Arc<str> для дешёвого clone
     let (tx, mut rx) = mpsc::channel::<WsData>(1000);
     let (_reconnect_tx, reconnect_rx) = mpsc::channel(1);
     let token = tokio_util::sync::CancellationToken::new();
@@ -50,7 +50,7 @@ pub async fn run_snapshot_pipeline(config: FullConfig) -> Result<()> {
                         ob.apply_update(&update);
                     }
                     WsData::MarkPrice(sym, mp) => {
-                        if sym == ob.symbol {
+                        if sym.as_ref() == ob.symbol {
                             ob.set_mark_price(mp);
                         }
                     }

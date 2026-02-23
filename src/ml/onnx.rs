@@ -14,6 +14,7 @@ use crate::ml::types::{Signal, InferenceOutput, ModelMetadata};
 use crate::monitoring::latency::HOT_PATH_STATS;
 use crate::config::types::{OnnxConfig, OnnxExecutionMode, BotConfig};
 use crate::ml::tensor::TensorBuffer;
+use crate::ml::normalization::Normalizer;
 use std::cell::RefCell;
 
 impl From<OnnxExecutionMode> for ExecutionMode {
@@ -112,15 +113,19 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
     let mut builder = builder
         .with_execution_mode(config.execution_mode.into())?;
     
-    // Расчёт intra_threads: физические ядра / количество_активных_ботов (минимум 1)
+    // Расчёт intra_threads: 1 для Windows (оптимизация) или динамический расчёт для Linux
     let intra = config.intra_threads.unwrap_or_else(|| {
-        let cp_total = num_cpus::get_physical();
-        // Получаем количество активных ботов из переменной окружения или используем консервативный дефолт (2)
-        let active_bots = std::env::var("NUM_ACTIVE_BOTS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(2); // Консервативный дефолт: 2 бота
-        (cp_total / active_bots).max(1)
+        if cfg!(windows) {
+            1 // Optimization for Windows: minimize context switching overhead
+        } else {
+            let cp_total = num_cpus::get_physical();
+            // Получаем количество активных ботов из переменной окружения или используем консервативный дефолт (2)
+            let active_bots = std::env::var("NUM_ACTIVE_BOTS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(2); // Консервативный дефолт: 2 бота
+            (cp_total / active_bots).max(1)
+        }
     });
     builder = builder.with_intra_op_num_threads(intra as i32)?;
     
@@ -384,6 +389,7 @@ pub struct OnnxEngine {
     pub use_regime_embedding: bool,
     pub num_regimes: usize,
     pub input_buffer: TensorBuffer, // Пре-аллоцированный буфер (Задача №197)
+    normalizer: Option<Normalizer>, // Нормализатор для SIMD-ускоренной нормализации (Задача 193)
     confidence_tracker: Option<RefCell<InferenceConfidenceTracker>>, // Трекер уверенности (задача 224)
     bot_config: Option<BotConfig>, // Конфигурация бота для доступа к порогам (задача 224)
 }
@@ -526,6 +532,57 @@ impl OnnxEngine {
              input_buffer = TensorBuffer::new(1, 1, 1, seq_len * input_features);
         }
 
+        // 5. Инициализация нормализатора для SIMD-ускоренной нормализации (Задача 193)
+        let normalizer = if let Some(norm_params) = &metadata.normalization {
+            match norm_params.scaler_type.as_str() {
+                "winsor_robust" => {
+                    let winsor_limits = norm_params.winsor_limits
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Winsor limits missing for winsor_robust scaler"))?;
+                    let medians = norm_params.median
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Median parameters missing for winsor_robust scaler"))?;
+                    let iqrs = norm_params.iqr
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("IQR parameters missing for winsor_robust scaler"))?;
+                    
+                    let mut winsor_low = Vec::new();
+                    let mut winsor_high = Vec::new();
+                    for i in (0..winsor_limits.len()).step_by(2) {
+                        if i + 1 < winsor_limits.len() {
+                            winsor_low.push(winsor_limits[i]);
+                            winsor_high.push(winsor_limits[i + 1]);
+                        }
+                    }
+                    
+                    Some(Normalizer::new_winsor_robust(winsor_low, winsor_high, medians.clone(), iqrs.clone()))
+                }
+                "robust" => {
+                    let medians = norm_params.median
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Median parameters missing for robust scaler"))?;
+                    let iqrs = norm_params.iqr
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("IQR parameters missing for robust scaler"))?;
+                    Some(Normalizer::new_robust(medians.clone(), iqrs.clone()))
+                }
+                "zscore" | _ => {
+                    let means = norm_params.mean
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Mean parameters missing for zscore scaler"))?;
+                    let stds = norm_params.std
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Std parameters missing for zscore scaler"))?;
+                    Some(Normalizer::new(means.clone(), stds.clone()))
+                }
+            }
+        } else {
+            warn!("Normalization parameters not found in metadata. Proceeding without normalization.");
+            None
+        };
+        
+        info!("Normalizer initialized for SIMD-accelerated feature normalization");
+
         // 6. Инициализация трекера уверенности (задача 224)
         let confidence_tracker = if let Some(config) = bot_config {
             if config.enable_realtime_drift_check {
@@ -556,6 +613,7 @@ impl OnnxEngine {
             use_regime_embedding,
             num_regimes,
             input_buffer,
+            normalizer,
             confidence_tracker,
             bot_config: bot_config.cloned(),
         };
@@ -575,9 +633,16 @@ impl OnnxEngine {
 
     /// Выполняет инференс модели с использованием пре-аллоцированного буфера (Задача №197)
     /// Обеспечивает передачу данных в рантайм ONNX без лишнего копирования (Zero-copy)
+    /// Применяет SIMD-ускоренную нормализацию перед инфернсом (Задача 193)
     #[inline(always)]
-    pub fn predict_with_buffer(&self, regime_id: Option<usize>) -> Result<InferenceResult> {
+    pub fn predict_with_buffer(&mut self, regime_id: Option<usize>) -> Result<InferenceResult> {
         let start_build = Instant::now();
+
+        // 0. SIMD-ускоренная нормализация данных перед инфернсом (Задача 193)
+        // Нормализация применяется непосредственно перед формированием тензора
+        if let Some(ref normalizer) = self.normalizer {
+            normalizer.normalize(self.input_buffer.get_mut());
+        }
 
         // 1. Создаем ndarray View (Batch=1, Channels, Levels, Seq) напрямую из пре-аллоцированного буфера
         let array = ArrayView4::from_shape(
