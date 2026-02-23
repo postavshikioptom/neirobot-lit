@@ -399,6 +399,13 @@ cmd_deploy() {
     export DEVICE_ID="${DEVICE_ID:-0}"
     export INTRA_THREADS="${INTRA_THREADS:-4}"
     
+    # Установка пути к модели в зависимости от режима
+    if [[ "$MODE" == "docker" ]]; then
+        export MODEL_BASE="/app"
+    else
+        export MODEL_BASE="/opt/neirobot"
+    fi
+    
     if ! command -v envsubst &> /dev/null; then
         log_error "envsubst not found. Please install gettext package"
         exit 1
@@ -406,6 +413,12 @@ cmd_deploy() {
     
     envsubst < "${DEPLOY_DIR}/bot.template.toml" > "${bot_dir}/config.toml"
     log_info "Configuration generated: ${bot_dir}/config.toml"
+    
+    # Замена пути к модели в конфиге для Docker режима
+    if [[ "$MODE" == "docker" ]]; then
+        sed -i "s|/opt/neirobot/bots/|/app/bots/|g" "${bot_dir}/config.toml"
+        log_info "Config paths adjusted for Docker mode"
+    fi
     
     # Deploy based on mode
     case "$MODE" in
@@ -443,10 +456,10 @@ deploy_native() {
     local install_path="/opt/neirobot"
     
     # Check if binary exists
-    local binary_path="${PROJECT_ROOT}/target/x86_64-unknown-linux-musl/release/run-bot"
+    local binary_path="${PROJECT_ROOT}/target/x86_64-unknown-linux-musl/release/neirobot-lit"
     if [[ ! -f "$binary_path" ]]; then
-        # Try alternative binary name
-        binary_path="${PROJECT_ROOT}/target/x86_64-unknown-linux-musl/release/neirobot-lit"
+        # Try alternative binary name (legacy)
+        binary_path="${PROJECT_ROOT}/target/x86_64-unknown-linux-musl/release/run-bot"
         if [[ ! -f "$binary_path" ]]; then
             log_error "Binary not found. Please run 'build' command first"
             exit 1
@@ -465,7 +478,8 @@ deploy_native() {
         mkdir -p "$install_path"
         
         # Copy necessary files
-        cp -r "${PROJECT_ROOT}/target" "$install_path/" 2>/dev/null || true
+        mkdir -p "${install_path}/target/x86_64-unknown-linux-musl/release"
+        cp -r "${PROJECT_ROOT}/target/x86_64-unknown-linux-musl" "${install_path}/target/" 2>/dev/null || true
         cp "${PROJECT_ROOT}/global.toml" "$install_path/" 2>/dev/null || true
         cp "${PROJECT_ROOT}/exchange.toml" "$install_path/" 2>/dev/null || true
         

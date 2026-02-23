@@ -1,7 +1,7 @@
 # Bot configuration template for automated deployment
 # Variables will be substituted by envsubst during deployment
 symbol = "${SYMBOL}"
-model_path = "/opt/neirobot-lit/bots/${SYMBOL}/model/model.onnx"
+model_path = "/opt/neirobot/bots/${SYMBOL}/model/model.onnx"
 
 [strategy]
 threshold_up = ${THRESHOLD_UP:-0.7}

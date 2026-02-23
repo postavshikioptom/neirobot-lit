@@ -108,3 +108,7 @@ harness = false
 [[bin]]
 name = "crypto_tool"
 path = "src/bin/crypto_tool.rs"
+
+[[bin]]
+name = "neirobot-lit"
+path = "src/bin/run-bot.rs"

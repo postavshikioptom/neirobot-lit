@@ -1872,9 +1872,19 @@ async fn handle_market_update(
     use neirobot_lit::monitoring::latency::HOT_PATH_STATS;
     HOT_PATH_STATS.record_lob(start_lob.elapsed().as_micros() as u64);
 
+    // 2.5. Сброс состояния при получении полного снапшота через WebSocket (Задача 180)
+    if update.is_snapshot {
+        tracing::info!(
+            "[{}] Full snapshot received via WebSocket (u={}). Resetting corruption state.",
+            execution.symbol,
+            update.last_update_id
+        );
+        execution.risk_manager.health_monitor.reset_corruption();
+    }
+
     // 3. Валидация Checksum ПОСЛЕ применения обновления (Задача 180)
     // Bybit требует проверять контрольную сумму после применения обновления к стакану
-    if exchange_config.websocket.verify_checksum {
+    if execution.risk_manager.config.checksum_validation_enabled {
         if let Some(expected_cs) = update.checksum {
             if !ob.verify_checksum(expected_cs) {
                 // Вызываем health_monitor для накопления ошибок

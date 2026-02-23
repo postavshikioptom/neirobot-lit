@@ -320,8 +320,9 @@ fn default_cleanup_interval_min() -> u64 { 60 }
 fn default_max_stale_age_min() -> u64 { 120 }
 fn default_auto_cancel_stale() -> bool { false } // 250 мс базовая задержка
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TSLMode {
+    #[default]
     Bot,      // Логика на стороне бота
     Exchange, // Нативный функционал биржи
 }

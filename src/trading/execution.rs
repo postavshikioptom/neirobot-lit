@@ -3486,13 +3486,14 @@ impl ExecutionEngine {
     ) -> Result<()> {
         let (side, qty, chase_count) = {
             if let Some(o) = self.order_manager.get_by_client_id(&old_id) {
-                (o.side, o.qty - o.cum_exec_qty, o.chase_count)
+                (o.side, o.qty - o.executed_qty, o.chase_count)
             } else {
                 return Ok(());
             }
         };
 
-        if qty < self.market_info.min_order_qty {
+        let qty_decimal = Decimal::from_f64(qty).unwrap_or(Decimal::ZERO);
+        if qty_decimal < self.market_info.min_order_qty {
             return Ok(());
         }
 
@@ -3508,7 +3509,7 @@ impl ExecutionEngine {
             None,
             side,
             new_price,
-            qty,
+            qty_decimal,
             self.bot_config.post_only,
             false, // reduce_only = false для открытия позиции
             mid_price, // Задача 201: Signal price для анализа slippage

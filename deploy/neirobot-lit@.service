@@ -10,7 +10,7 @@ Group=neirobot
 WorkingDirectory=/opt/neirobot
 
 # Main process commands
-ExecStart=/opt/neirobot/target/release/run-bot --config /opt/neirobot/bots/%i/config.toml
+ExecStart=/opt/neirobot/target/x86_64-unknown-linux-musl/release/neirobot-lit --config /opt/neirobot/bots/%i/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart policy - on-failure with limits for high availability
@@ -37,7 +37,7 @@ ProtectControlGroups=true
 
 # File system access control
 # Binary is read-only to prevent tampering
-ReadOnlyPaths=/opt/neirobot/target/release
+ReadOnlyPaths=/opt/neirobot/target/x86_64-unknown-linux-musl/release
 # Only bot-specific directory is writable for logs and data
 ReadWritePaths=/opt/neirobot/bots/%i
 

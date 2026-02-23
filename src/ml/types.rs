@@ -211,6 +211,7 @@ pub struct InferenceOutput {
 // Для обратной совместимости - преобразование usize в Signal
 impl From<usize> for Signal {
     fn from(v: usize) -> Self {
-        Signal::new(SignalSide::from(v), 0)
+        let id = format!("SIG_AUTO_{}", chrono::Utc::now().timestamp_millis());
+        Signal::new(SignalSide::from(v), 0, id)
     }
 }
