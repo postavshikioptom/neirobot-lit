@@ -79,7 +79,7 @@ class BotProcess:
     symbol: str
     pid: int
     monitoring_port: int
-    cpu_core: Optional[int]
+    cpu_cores: List[int]
     start_time: float
     process: psutil.Process
 
@@ -225,6 +225,26 @@ class FarmManager:
                             self.config.memory_limit_mb * 1024 * 1024,
                             self.config.memory_limit_mb * 1024 * 1024
                         ))
+                    elif sys.platform == "win32":
+                        # Использование Windows Job Objects для лимитов памяти
+                        import win32job
+                        import win32api
+                        import win32con
+                        
+                        job = win32job.CreateJobObject(None, f"bot_job_{process.pid}")
+                        info = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+                        
+                        # Установка лимита памяти (в байтах)
+                        mem_limit = self.config.memory_limit_mb * 1024 * 1024
+                        info['ProcessMemoryLimit'] = mem_limit
+                        info['BasicLimitInformation']['LimitFlags'] |= win32job.JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                        
+                        win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, info)
+                        
+                        # Привязка процесса к Job Object
+                        handle = win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, process.pid)
+                        win32job.AssignProcessToJobObject(job, handle)
+                        logger.info(f"Set memory limit for {symbol} to {self.config.memory_limit_mb} MB (Windows Job Object)")
                 except Exception as e:
                     logger.warning(f"Failed to set memory limit for {symbol}: {e}")
             
@@ -233,7 +253,7 @@ class FarmManager:
                 symbol=symbol,
                 pid=process.pid,
                 monitoring_port=monitoring_port,
-                cpu_core=cpu_cores[0] if cpu_cores else None,
+                cpu_cores=cpu_cores,
                 start_time=time.time(),
                 process=psutil.Process(process.pid),
             )
@@ -296,10 +316,8 @@ class FarmManager:
                 bot.process.wait(5)
             
             # Освобождение ресурсов
-            if bot.cpu_core is not None:
-                # Восстанавливаем список ядер из одного ядра (первого)
-                # В реальности нужно хранить весь список, но для совместимости используем одно
-                self._release_cpu_cores([bot.cpu_core])
+            if bot.cpu_cores:
+                self._release_cpu_cores(bot.cpu_cores)
             self._remove_pid(symbol)
             del self.bots[symbol]
             
@@ -392,7 +410,7 @@ class FarmManager:
                     status[symbol] = {
                         "status": "Running",
                         "pid": bot.pid,
-                        "cpu_core": bot.cpu_core,
+                        "cpu_cores": bot.cpu_cores,
                         "monitoring_port": bot.monitoring_port,
                         "memory_mb": memory_info.rss / (1024 * 1024),
                         "cpu_percent": cpu_percent,
@@ -402,14 +420,14 @@ class FarmManager:
                     status[symbol] = {
                         "status": "Dead",
                         "pid": bot.pid,
-                        "cpu_core": bot.cpu_core,
+                        "cpu_cores": bot.cpu_cores,
                         "monitoring_port": bot.monitoring_port,
                     }
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 status[symbol] = {
                     "status": "Dead",
                     "pid": bot.pid,
-                    "cpu_core": bot.cpu_core,
+                    "cpu_cores": bot.cpu_cores,
                     "monitoring_port": bot.monitoring_port,
                 }
         
@@ -434,10 +452,41 @@ class FarmManager:
         Отправить критический алерт
         Интеграция с alert_manager (задача 222)
         """
-        # TODO: Интеграция с Rust alert_manager через subprocess
         logger.critical(f"CRITICAL ALERT: {message}")
         
-        # Попытка вызвать run-bot с --test-alert используя первый доступный символ
+        # 1. Прямая отправка в Telegram через Python (как в alert_manager.rs)
+        token = os.environ.get("TELEGRAM_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        
+        if token and chat_id:
+            try:
+                import urllib.request
+                import json
+                
+                # Экранирование для MarkdownV2 (минимальное)
+                escaped_msg = message.replace(".", "\\.").replace("-", "\\-").replace("!", "\\!")
+                
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": f"🚨 *CRITICAL FARM ALERT*\n\n{escaped_msg}",
+                    "parse_mode": "MarkdownV2"
+                }
+                
+                req = urllib.request.Request(
+                    url, 
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST'
+                )
+                
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    if response.getcode() == 200:
+                        logger.info("Critical alert sent to Telegram successfully")
+            except Exception as e:
+                logger.error(f"Failed to send Telegram alert directly: {e}")
+
+        # 2. Попытка вызвать run-bot с --test-alert (для интеграции с Rust AlertManager)
         if self.config.symbols:
             first_symbol = self.config.symbols[0]
             try:
@@ -447,7 +496,7 @@ class FarmManager:
                     capture_output=True,
                 )
             except Exception as e:
-                logger.error(f"Failed to send alert: {e}")
+                logger.debug(f"Integration alert skipped: {e}")
     
     def monitor_health(self):
         """Мониторинг здоровья фермы и отправка алертов"""

@@ -1351,6 +1351,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
     let mut position_sync_interval = tokio::time::interval(Duration::from_secs(config.bot.position_sync_interval_secs)); // Задача 066: Синхронизация позиции
     let mut last_chase_time = 0u64;
     let chase_interval_ms = config.bot.chase_interval_ms.max(200);
+    let start_time = neirobot_lit::utils::helpers::unix_ms();
     
     loop {
         // Обновляем Heartbeat для Watchdog (задача 146)
@@ -1803,6 +1804,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     Command::GetStatus => {
                         // Эта команда используется только внутри для обновления статуса
                         // Обновление статуса происходит автоматически в цикле
+                        debug!("[Command] Status update requested");
                     }
                 }
             }
@@ -1814,10 +1816,17 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
             let mid_price = ob.current_snapshot.load().get_mid_price();
             let mid_dec = Decimal::from_f64(mid_price).unwrap_or_default();
             let pnl = execution.position_manager.get_total_pnl(mid_dec);
+            let now = neirobot_lit::utils::helpers::unix_ms();
             
             let mut status = status_state.write();
+            status.uptime_secs = (now - start_time) / 1000;
             status.pnl = Some(pnl.to_f64().unwrap_or(0.0));
             status.position = Some(position.qty.to_f64().unwrap_or(0.0));
+            
+            // Получаем latency из мониторинга
+            use neirobot_lit::monitoring::latency::LATENCY_MONITOR;
+            status.latency_ms = Some(LATENCY_MONITOR.get_last_e2e_ms());
+
             status.status = if execution.emergency_mode {
                 "emergency".to_string()
             } else if execution.risk_manager.is_blocked {

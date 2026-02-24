@@ -43,14 +43,19 @@ class FarmController:
         self.client = httpx.AsyncClient(timeout=5.0)
     
     async def get_status(self, bot: BotConfig) -> Optional[Dict]:
-        """Получить статус бота"""
+        """Получить статус бота с улучшенной обработкой ошибок"""
         try:
-            response = await self.client.get(f"{bot.base_url}/status")
+            response = await self.client.get(f"{bot.base_url}/status", timeout=2.0)
             if response.status_code == 200:
                 return response.json()
+            else:
+                return {"error": f"HTTP {response.status_code}", "status": "offline"}
+        except httpx.ConnectError:
+            return {"error": "connection failed", "status": "offline"}
+        except httpx.TimeoutException:
+            return {"error": "timeout", "status": "offline"}
         except Exception as e:
-            return {"error": str(e)}
-        return None
+            return {"error": str(e), "status": "error"}
     
     async def send_panic(self, bot: BotConfig) -> bool:
         """Отправить команду PANIC"""
