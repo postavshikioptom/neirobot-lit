@@ -44,6 +44,9 @@ class OrderData:
     order_type: str  # 'limit', 'market'
     post_only: bool = False
     created_at_ms: int = 0  # Время создания ордера (для проверки таймаутов)
+    chase_count: int = 0  # Задача 211: Счетчик попыток перестановки (Re-pegging)
+    is_iceberg: bool = False  # Задача 211: Флаг айсберг-ордера
+    iceberg_parent_id: str = ""  # ID родительского ордера для айсберга
 
 @dataclass
 class FillData:
@@ -53,6 +56,8 @@ class FillData:
     amount: float
     fee_usd: float
     fill_type: str  # 'maker', 'taker'
+    is_iceberg: bool = False  # Задача 211
+    iceberg_parent_id: str = ""  # Задача 211
 
 @dataclass
 class TradeData:
@@ -92,6 +97,7 @@ class SorConfig:
     max_size_ratio: float = 0.3
     default_urgency: float = 0.5
     slice_interval_ms: int = 100
+    iceberg_enabled: bool = False  # Задача 211: Включение режима айсберг-ордеров
     iceberg_randomize: float = 0.2
     iceberg_price_dev_bps: int = 10
     switch_base_timeout_ms: int = 500
@@ -182,6 +188,10 @@ class SymbolState:
     last_market_data: Optional[MarketData] = None
     total_orders_placed: int = 0
     total_orders_cancelled: int = 0
+    
+    # Задача 211: Состояние для айсберг-ордеров
+    iceberg_remaining: Dict[str, float] = field(default_factory=dict)  # parent_id -> remaining_amount
+    iceberg_sides: Dict[str, str] = field(default_factory=dict) # parent_id -> side
     
     # Задача 213: Параметры риск-менеджмента
     peak_balance: float = 0.0  # Пиковый баланс для расчета просадки
@@ -346,27 +356,62 @@ class EventEngine:
                     # Исполняем по цене лимита (мы выставили лимит, рынок прошел сквозь него)
                     to_fill.append((oid, order.price))
             
-            # Проверяем агрессивное пересечение (когда цена уже ушла сквозь наш лимит)
+            # Задача 212: В режиме realistic исполнение лимитных ордеров происходит
+            # ТОЛЬКО через _on_trade -> queue_manager.update_on_trade.
+            # Здесь обрабатываем только Chasing логику для ордеров, которые
+            # не попали в crossed_orders (не были "перепрыгнуты" рынком).
             for oid, order in list(state.orders.items()):
                 if order.order_type == "limit" and oid not in crossed_orders:
-                    crossed, price = match_limit_order(
-                        order.side, order.price, order.amount, data.bids, data.asks
-                    )
-                    
-                    if crossed:
-                        to_fill.append((oid, price))
-                    else:
-                        # Логика Chasing (Re-pegging)
-                        if state.config.chase_mode != "None":
-                            # Если цена ушла далеко от нашего лимита
-                            best_price = data.bids[0, 0] if order.side == "buy" else data.asks[0, 0]
-                            dist_bps = 0.0
-                            if order.price > 0:
-                                dist_bps = abs(best_price - order.price) / order.price * 10000
-                            
-                            if dist_bps > state.config.chase_threshold_bps:
-                                # Нужен REPEG (Cancel + New Order)
-                                # Генерируем Cancel событие
+                    # Логика Chasing (Re-pegging) - НЕ исполняем ордер здесь через match_limit_order
+                    if state.config.chase_mode != "None":
+                        # Если цена ушла далеко от нашего лимита
+                        best_price = data.bids[0, 0] if order.side == "buy" else data.asks[0, 0]
+                        dist_bps = 0.0
+                        if order.price > 0:
+                            dist_bps = abs(best_price - order.price) / order.price * 10000
+                        
+                        if dist_bps > state.config.chase_threshold_bps:
+                            # Задача 211: Полноценный Re-pegging
+                            # Проверяем количество попыток (chase_max_attempts)
+                            if order.chase_count < state.config.chase_max_attempts:
+                                # 1. Генерируем Cancel событие
+                                cancel_event = Event(
+                                    timestamp=self.current_time + self.internal_latency,
+                                    type=EventType.CANCEL,
+                                    data=order.order_id,
+                                    symbol=symbol
+                                )
+                                self.push_event(cancel_event)
+                                
+                                # 2. Генерируем новый Order событие с актуальной ценой и учетом chase_distance_bps
+                                offset_price = best_price * (state.config.chase_distance_bps / 10000)
+                                if order.side == "buy":
+                                    new_price = best_price + offset_price
+                                else:
+                                    new_price = best_price - offset_price
+                                    
+                                repeg_order = OrderData(
+                                    order_id=f"{order.order_id}_ch{order.chase_count+1}",
+                                    side=order.side,
+                                    price=new_price,
+                                    amount=order.amount,
+                                    order_type="limit",
+                                    created_at_ms=self.current_time + self.internal_latency + self.network_latency,
+                                    chase_count=order.chase_count + 1,
+                                    is_iceberg=order.is_iceberg,
+                                    iceberg_parent_id=order.iceberg_parent_id
+                                )
+                                
+                                repeg_event = Event(
+                                    timestamp=self.current_time + self.internal_latency + self.network_latency,
+                                    type=EventType.ORDER,
+                                    data=repeg_order,
+                                    symbol=symbol
+                                )
+                                state.total_orders_placed += 1
+                                self.push_event(repeg_event)
+                            else:
+                                # Превышено макс. кол-во попыток - просто отменяем без перевыставления
                                 cancel_event = Event(
                                     timestamp=self.current_time + self.internal_latency,
                                     type=EventType.CANCEL,
@@ -404,7 +449,9 @@ class EventEngine:
                 price=price,
                 amount=order.amount,
                 fee_usd=0.0,
-                fill_type=fill_type
+                fill_type=fill_type,
+                is_iceberg=order.is_iceberg,
+                iceberg_parent_id=order.iceberg_parent_id
             ),
             symbol=symbol
         )
@@ -504,6 +551,17 @@ class EventEngine:
                         price = state.last_market_data.bids[0, 0]
                     else:
                         price = state.last_market_data.asks[0, 0]
+                    
+                    # Задача 211: Учет Urgency (Срочность)
+                    # Если urgency > 0, смещаем лимитную цену ближе к противоположной стороне
+                    if state.config.sor.default_urgency > 0:
+                        spread = state.last_market_data.asks[0, 0] - state.last_market_data.bids[0, 0]
+                        # Смещение: 0.0 -> на лучшей цене, 1.0 -> на цене агрессора (мгновенный fill)
+                        urgency_offset = spread * state.config.sor.default_urgency
+                        if data.side == "buy":
+                            price += urgency_offset
+                        else:
+                            price -= urgency_offset
             
             # Задача 213: Проверка лимита позиции перед созданием ордера
             side_mult = 1 if data.side == "buy" else -1
@@ -513,7 +571,17 @@ class EventEngine:
             
             total_amount = amount
             
-            # Simple SOR: Slicing
+            # Задача 211: Поддержка Iceberg (Айсберг-ордера)
+            if state.config.sor.iceberg_enabled and order_type == "limit":
+                parent_id = f"ice_{execution_ts}_{symbol}"
+                state.iceberg_remaining[parent_id] = total_amount
+                state.iceberg_sides[parent_id] = data.side
+                
+                # Выставляем первый слайс айсберга
+                self._trigger_next_iceberg_slice(parent_id, execution_ts, symbol)
+                return
+            
+            # Simple SOR: Slicing (Параллельное выставление ордеров)
             # Вычисляем максимальный размер слайса (напр. 30% от общей суммы или фиксированный лимит)
             max_slice = total_amount * state.config.sor.max_size_ratio
             if max_slice <= 0: max_slice = total_amount
@@ -662,10 +730,74 @@ class EventEngine:
         data.fee_usd = data.amount * data.price * fee_rate
         state.balance -= data.fee_usd
 
-        # Задача 213: Обновление пикового баланса для расчета просадки
-        state.update_peak_balance()
+        # Задача 211: Если это айсберг-ордер, выставляем следующий слайс
+        if data.is_iceberg and data.iceberg_parent_id:
+            # Небольшая задержка перед следующим слайсом
+            next_slice_ts = self.current_time + self.internal_latency + self.network_latency
+            self._trigger_next_iceberg_slice(data.iceberg_parent_id, next_slice_ts, symbol)
 
         state.trades.append(data)
+
+    def _trigger_next_iceberg_slice(self, parent_id: str, timestamp: int, symbol: str = ""):
+        """
+        Задача 211: Выставление следующего видимого слайса айсберг-ордера.
+        Использует параметры iceberg_randomize и iceberg_price_dev_bps.
+        """
+        state = self.get_state(symbol)
+        if parent_id not in state.iceberg_remaining or state.iceberg_remaining[parent_id] <= 0:
+            # Айсберг полностью исполнен
+            if parent_id in state.iceberg_remaining:
+                del state.iceberg_remaining[parent_id]
+                del state.iceberg_sides[parent_id]
+            return
+
+        remaining = state.iceberg_remaining[parent_id]
+        side = state.iceberg_sides[parent_id]
+        
+        # 1. Расчет размера слайса с рандомизацией (iceberg_randomize)
+        # Базовый размер слайса от общей суммы сигнала
+        base_slice_usd = state.config.order_size_usd * state.config.sor.max_size_ratio
+        # Рандомизация: +/- iceberg_randomize %
+        rand_factor = 1.0 + (np.random.random() * 2 - 1) * state.config.sor.iceberg_randomize
+        slice_amount_usd = min(remaining * state.last_market_data.mid_price, base_slice_usd * rand_factor)
+        current_slice_amount = slice_amount_usd / state.last_market_data.mid_price
+
+        # 2. Расчет цены с рандомизацией (iceberg_price_dev_bps)
+        # Базовая цена (Best Bid/Ask)
+        best_price = state.last_market_data.bids[0, 0] if side == "buy" else state.last_market_data.asks[0, 0]
+        # Рандомное отклонение в bps
+        price_dev_bps = (np.random.random() * 2 - 1) * state.config.sor.iceberg_price_dev_bps
+        price_offset = best_price * (price_dev_bps / 10000)
+        ice_price = best_price + price_offset
+
+        # 3. Выставление ордера
+        order_id = f"ice_sl_{parent_id}_{int(timestamp)}"
+        
+        # Сохраняем мид для расчета проскальзывания
+        state.signal_mids[order_id] = state.last_market_data.mid_price
+        
+        order_data = OrderData(
+            order_id=order_id,
+            side=side,
+            price=ice_price,
+            amount=current_slice_amount,
+            order_type="limit",
+            created_at_ms=timestamp,
+            is_iceberg=True,
+            iceberg_parent_id=parent_id
+        )
+        
+        order_event = Event(
+            timestamp=timestamp,
+            type=EventType.ORDER,
+            data=order_data,
+            symbol=symbol
+        )
+        
+        # Обновляем остаток в айсберге
+        state.iceberg_remaining[parent_id] -= current_slice_amount
+        state.total_orders_placed += 1
+        self.push_event(order_event)
 
     def get_metrics(self, symbol: str = "") -> Dict[str, Any]:
         """Получение метрик для символа с поддержкой мульти-инструментальности"""

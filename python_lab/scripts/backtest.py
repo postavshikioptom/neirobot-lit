@@ -8,10 +8,10 @@ from tqdm import tqdm
 import datetime
 import sys
 
-# Добавляем путь к src для импорта fast_parquet_reader
-sys.path.append(str(Path(__file__).parent.parent))
-from src.dataset import fast_parquet_reader
-from src.backtest.engine import EventEngine, Event, EventType, MarketData, SignalData, BotConfig, SorConfig, TradeData
+# Добавляем путь к корню проекта для импорта через python_lab.src
+sys.path.append(str(Path(__file__).parent.parent.parent))
+from python_lab.src.dataset import fast_parquet_reader
+from python_lab.src.backtest.engine import EventEngine, Event, EventType, MarketData, SignalData, BotConfig, SorConfig, TradeData
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LiT Model Backtest Engine")
@@ -47,7 +47,7 @@ def run_backtest():
     print(f"[Multi-Symbol] Backtesting symbols: {', '.join(symbols)}")
     
     # Задача 213: Загружаем конфигурации для каждого символа из config.toml
-    from src.dataset import load_symbol_config
+    from python_lab.src.dataset import load_symbol_config
     
     configs = {}
     for symbol in symbols:
@@ -88,7 +88,7 @@ def run_backtest():
         engine.add_symbol(symbol, configs[symbol])
     
     # Задача 213: Загружаем объединенные данные для всех символов
-    from src.dataset import load_multi_symbol_data
+    from python_lab.src.dataset import load_multi_symbol_data
     
     print(f"[Multi-Symbol] Loading merged data for {len(symbols)} symbols...")
     # Задача 213: Используем ленивую загрузку для экономии памяти

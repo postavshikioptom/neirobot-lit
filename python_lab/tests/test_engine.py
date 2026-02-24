@@ -3,10 +3,10 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent))
+# Add project root to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from src.backtest.engine import EventEngine, BotConfig, MarketData, SignalData, Event, EventType, FillData
+from python_lab.src.backtest.engine import EventEngine, BotConfig, MarketData, SignalData, Event, EventType, FillData
 
 class TestEventEngine(unittest.TestCase):
     def setUp(self):
@@ -27,8 +27,9 @@ class TestEventEngine(unittest.TestCase):
         self.market_data = MarketData(mid_price=100.5, bids=self.bids, asks=self.asks)
 
     def test_initial_balance(self):
-        self.assertEqual(self.engine.balance, 1000.0)
-        self.assertEqual(self.engine.position, 0.0)
+        state = self.engine.get_state()
+        self.assertEqual(state.balance, 1000.0)
+        self.assertEqual(state.position, 0.0)
 
     def test_market_buy_execution(self):
         # 1. Send Signal BUY
@@ -41,8 +42,9 @@ class TestEventEngine(unittest.TestCase):
         self.engine.run()
         
         # Should populate orders
-        self.assertEqual(len(self.engine.orders), 1)
-        order = list(self.engine.orders.values())[0]
+        state = self.engine.get_state()
+        self.assertEqual(len(state.orders), 1)
+        order = list(state.orders.values())[0]
         self.assertEqual(order.side, "buy")
         self.assertEqual(order.price, 100.0) # Placed at Best Bid
         self.assertEqual(order.order_type, "limit")
@@ -70,7 +72,7 @@ class TestEventEngine(unittest.TestCase):
         # Check trades/metrics?
         metrics = self.engine.get_metrics()
         self.assertEqual(metrics["total_trades"], 1)
-        self.assertGreater(self.engine.position, 0)
+        self.assertGreater(self.engine.get_state().position, 0)
 
     def test_ideal_mode_fill(self):
         self.engine.set_mode("ideal")
@@ -138,8 +140,9 @@ class TestEventEngine(unittest.TestCase):
         self.engine.push_event(Event(10, EventType.MARKET, self.market_data))
         self.engine.run()
         
-        oid = list(self.engine.orders.keys())[0]
-        self.assertEqual(self.engine.volume_ahead[oid], 1.0)
+        state = self.engine.get_state()
+        oid = list(state.orders.keys())[0]
+        self.assertEqual(state.queue_manager.active_orders[oid].v_ahead, 1.0)
         
         # 2. Volume at 100.0 decreases to 0.0 (or price moves through)
         new_bids = np.array([[99.0, 1.0], [98.0, 1.0]], dtype=float)
@@ -166,7 +169,7 @@ class TestEventEngine(unittest.TestCase):
         metrics = self.engine.get_metrics()
         # Note: Signal event generated 2 ORDER events in the queue
         # total_orders_placed is incremented in _on_signal
-        self.assertEqual(self.engine.total_orders_placed, 2)
+        self.assertEqual(self.engine.get_state().total_orders_placed, 2)
 
 
 if __name__ == "__main__":

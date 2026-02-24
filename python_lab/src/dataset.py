@@ -1712,6 +1712,7 @@ def load_multi_symbol_data(
     - Детерминированное слияние потоков данных
     - Глобальную сортировку по timestamp для предотвращения look-ahead bias
     - Ленивую загрузку для экономии памяти
+    - Задача 212: Объединение снимков стакана с данными о сделках (trades)
     
     Args:
         symbols: Список символов (например, ['BTCUSDT', 'ETHUSDT'])
@@ -1741,11 +1742,50 @@ def load_multi_symbol_data(
                 f"Не найдены Parquet файлы для {symbol} в {data_path}/{symbol}/data/raw/"
             )
         
-        # Используем scan_parquet для ленивой загрузки
+        # Используем scan_parquet для ленивой загрузки снимков стакана
         lf = pl.scan_parquet(data_path / symbol / "data" / "raw" / pattern)
         
         # Добавляем колонку symbol для идентификации источника данных
         lf = lf.with_columns(pl.lit(symbol).alias("symbol"))
+
+        # Задача 212: Загружаем файлы сделок (trades_*.parquet) и объединяем со снимками
+        trades_pattern = "trades_*.parquet"
+        trades_files = list(data_path.glob(f"{symbol}/data/raw/{trades_pattern}"))
+
+        if trades_files:
+            # Загружаем все файлы сделок для символа
+            trades_lf = pl.scan_parquet(data_path / symbol / "data" / "raw" / trades_pattern)
+
+            # Нормализуем timestamp: в Rust trades пишутся с колонкой "timestamp" (не timestamp_ms)
+            schema = trades_lf.collect_schema()
+            if "timestamp" in schema.names() and "timestamp_ms" not in schema.names():
+                trades_lf = trades_lf.rename({"timestamp": "timestamp_ms"})
+
+            # Берём только нужные колонки сделок
+            trades_lf = trades_lf.select([
+                pl.col("timestamp_ms"),
+                pl.col("price").alias("trade_price"),
+                pl.col("size").alias("trade_volume"),
+            ])
+
+            # join_asof: для каждого снимка стакана берём последнюю сделку <= timestamp_ms
+            # Сортировка required для join_asof
+            lf = lf.sort("timestamp_ms")
+            trades_lf = trades_lf.sort("timestamp_ms")
+
+            lf = lf.join_asof(
+                trades_lf,
+                on="timestamp_ms",
+                strategy="backward"
+            )
+        else:
+            # Если файлов сделок нет — заполняем нулями, чтобы схема была консистентна
+            print(f"[{symbol}] Предупреждение: файлы trades_*.parquet не найдены. "
+                  f"trade_price и trade_volume будут null.")
+            lf = lf.with_columns([
+                pl.lit(None).cast(pl.Float64).alias("trade_price"),
+                pl.lit(None).cast(pl.Float64).alias("trade_volume"),
+            ])
         
         scans.append(lf)
     
@@ -1768,6 +1808,7 @@ def load_multi_symbol_data(
     print(f"[Multi-Symbol] Символы: {', '.join(symbols)}")
     
     return df
+
 
 
 def load_symbol_config(symbol: str, config_path: str = "bots") -> Dict[str, Any]:
