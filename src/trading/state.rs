@@ -239,8 +239,13 @@ impl StatePersistenceManager {
         }
 
         // Все копии повреждены или отсутствуют
-        error!("All state files are corrupted or missing. Initializing empty state.");
-        Ok(PersistentState::new(BotStateData::default())?)
+        if self.state_file.exists() {
+            error!("All state files (main and backups) are corrupted. Manual synchronization required.");
+            return Err(anyhow!("All state files corrupted"));
+        } else {
+            info!("No state files found. Initializing empty state.");
+            Ok(PersistentState::new(BotStateData::default())?)
+        }
     }
 
     /// Загрузить и проверить целостность файла состояния

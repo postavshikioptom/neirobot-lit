@@ -715,104 +715,11 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         }
     }
 
-    // Задача 190: Recovery - восстановление состояния при перезапуске
-    let state_file_path = PathBuf::from("bots").join(&args.symbol).join("state.json");
-    if state_file_path.exists() {
-        info!("[Persistence] Found state file, attempting recovery...");
-        match neirobot_lit::utils::persistence::load_state(&state_file_path) {
-            Ok(bot_state) => {
-                let now = neirobot_lit::utils::time::timestamp_ms();
-                let age_ms = now - bot_state.timestamp_ms;
-                
-                // Проверка актуальности состояния
-                if age_ms < full_config.bot.max_state_age_ms {
-                    info!("[Persistence] State is fresh (age: {} ms), restoring...", age_ms);
-                    
-                    // Восстановление позиции
-                    if let Some(pos_snapshot) = bot_state.position {
-                        info!("[Persistence] Restoring position: {} {} @ {}", 
-                            pos_snapshot.qty, pos_snapshot.symbol, pos_snapshot.avg_price);
-                        
-                        // Восстановление в PositionManager
-                        let pos_mgr = execution.position_manager.get_position_mut();
-                        pos_mgr.symbol = pos_snapshot.symbol;
-                        pos_mgr.qty = pos_snapshot.qty;
-                        pos_mgr.avg_price = pos_snapshot.avg_price;
-                        pos_mgr.realized_pnl = pos_snapshot.realized_pnl;
-                        pos_mgr.unrealized_pnl = pos_snapshot.unrealized_pnl;
-                        pos_mgr.unrealized_pnl_pct = pos_snapshot.unrealized_pnl_pct;
-                        pos_mgr.mark_pnl = pos_snapshot.mark_pnl;
-                        pos_mgr.leverage = pos_snapshot.leverage;
-                        pos_mgr.updated_at = pos_snapshot.updated_at;
-                        pos_mgr.opened_at = pos_snapshot.opened_at;
-                        pos_mgr.completed_tp_stages = pos_snapshot.completed_tp_stages;
-                        pos_mgr.initial_size = pos_snapshot.initial_size;
-                        pos_mgr.side = pos_snapshot.side;
-                        pos_mgr.extreme_water_mark = pos_snapshot.extreme_water_mark;
-                        pos_mgr.current_stop_loss = pos_snapshot.current_stop_loss;
-                        pos_mgr.tsl_active = pos_snapshot.tsl_active;
-                        pos_mgr.accumulated_funding = pos_snapshot.accumulated_funding;
-                    }
-                    
-                    // Восстановление активных ордеров
-                    for (link_id, intent) in bot_state.active_orders {
-                        info!("[Persistence] Restoring order intent: {} ({:?} {} @ {})", 
-                            link_id, intent.side, intent.qty, intent.price);
-                        execution.risk_manager.register_order_intent(
-                            link_id,
-                            intent.side,
-                            intent.price,
-                            intent.qty
-                        );
-                    }
-                    
-                    // Задача 190: Валидация восстановленных ордеров с биржей
-                    info!("[Persistence] Validating restored orders with exchange...");
-                    match execution.order_manager.validate_restored_orders(
-                        &rest_client, 
-                        &full_config.exchange.bybit.category,
-                        &args.symbol
-                    ).await {
-                        Ok(invalid_orders) => {
-                            if !invalid_orders.is_empty() {
-                                warn!("[Persistence] Found {} invalid orders, removing from state", invalid_orders.len());
-                                for link_id in invalid_orders {
-                                    execution.risk_manager.remove_order_intent(&link_id);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("[Persistence] Order validation failed: {}. Clearing all restored orders.", e);
-                            // Очищаем все восстановленные ордера при ошибке валидации
-                            execution.risk_manager.active_intents.clear();
-                        }
-                    }
-                    
-                    info!("[Persistence] State restored successfully");
-                    
-                    // Удаляем файл состояния после успешного восстановления
-                    if let Err(e) = neirobot_lit::utils::persistence::delete_state(&state_file_path) {
-                        warn!("[Persistence] Failed to delete state file: {}", e);
-                    }
-                } else {
-                    warn!("[Persistence] State is too old (age: {} ms > {} ms), ignoring", 
-                        age_ms, full_config.bot.max_state_age_ms);
-                    // Удаляем устаревший файл
-                    if let Err(e) = neirobot_lit::utils::persistence::delete_state(&state_file_path) {
-                        warn!("[Persistence] Failed to delete stale state file: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("[Persistence] Failed to load state: {}. Starting fresh.", e);
-                // Удаляем поврежденный файл
-                if let Err(e) = neirobot_lit::utils::persistence::delete_state(&state_file_path) {
-                    warn!("[Persistence] Failed to delete corrupted state file: {}", e);
-                }
-            }
-        }
-    } else {
-        info!("[Persistence] No state file found, starting fresh");
+    // Задача 218: Восстановление состояния при перезапуске (Reliability & Safety)
+    info!("[Persistence] Initializing state recovery sequence...");
+    if let Err(e) = execution.load_state_on_startup(&rest_client, &full_config.exchange).await {
+        error!("[Persistence] Fatal error during state recovery: {}. Starting in safe mode.", e);
+        execution.emergency_mode = true;
     }
 
     // Синхронизация состояния с биржей (проверка расхождений)
@@ -1245,6 +1152,33 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     // Задача 184: Клонируем config_tx для передачи в run_bot_loop
     let config_tx_for_loop = config_tx.clone();
     
+    // Задача 218: Периодическое сохранение состояния
+    let persistence_interval = full_config.bot.persistence_interval_sec;
+    let persistence_shutdown = shutdown_token.clone();
+    let persistence_symbol = args.symbol.clone();
+    let (persistence_tx, persistence_rx) = mpsc::channel(1);
+
+    bg_handle.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(persistence_interval));
+        // Пропускаем первый тик, чтобы не сохранять сразу при запуске
+        interval.tick().await; 
+        
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = persistence_tx.send(()).await {
+                        tracing::warn!("[Persistence] Failed to send persistence trigger for {}: {}", persistence_symbol, e);
+                        break;
+                    }
+                }
+                _ = persistence_shutdown.cancelled() => {
+                    tracing::info!("[Persistence] Periodic state saver shutting down for {}", persistence_symbol);
+                    break;
+                }
+            }
+        }
+    });
+
     let loop_result = run_bot_loop(
         rx_stream,
         private_rx,
@@ -1269,6 +1203,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         status_state.clone(),
         config_content, // Задача 184: Передаем содержимое конфига
         config_tx_for_loop, // Задача 184: Передаем sender для отправки обновлений
+        persistence_rx, // Задача 218: Канал для периодического сохранения состояния
     ).await;
 
     if let Err(ref e) = loop_result {
@@ -1400,6 +1335,7 @@ pub async fn run_bot_loop<S>(
     status_state: Arc<parking_lot::RwLock<StatusResponse>>,
     config_content: Arc<std::sync::Mutex<String>>, // Задача 184: Хранение содержимого конфига
     config_tx_clone: mpsc::Sender<neirobot_lit::config::types::FullConfig>, // Задача 184: Отправка обновлений конфига
+    mut persistence_rx: mpsc::Receiver<()>, // Задача 218: Канал для периодического сохранения состояния
 ) -> Result<()> 
 where S: tokio_stream::Stream<Item = WsData> + Unpin
 {
@@ -1771,6 +1707,13 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     error!("[Cleanup] Cleanup routine failed: {:?}", e);
                 } else {
                     info!("[Cleanup] Cleanup routine completed successfully");
+                }
+            }
+            Some(_) = persistence_rx.recv() => {
+                // Задача 218: Периодическое сохранение состояния
+                tracing::debug!("[Persistence] Periodic state save for {}", symbol);
+                if let Err(e) = execution.save_current_state().await {
+                    tracing::error!("[Persistence] Failed to save state: {}", e);
                 }
             }
             Some(metrics) = metrics_rx.recv() => {

@@ -730,7 +730,11 @@ impl ExecutionEngine {
 
     /// Сохранение текущего состояния на диск
     /// Задача 218: Загрузить состояние при запуске
-    pub fn load_state_on_startup(&mut self) -> Result<()> {
+    pub async fn load_state_on_startup(
+        &mut self,
+        rest_client: &impl BybitRestClientTrait,
+        exchange_config: &ExchangeConfig,
+    ) -> Result<()> {
         match self.state_persistence.load_state() {
             Ok(bot_state) => {
                 tracing::info!(
@@ -749,11 +753,23 @@ impl ExecutionEngine {
                 Ok(())
             }
             Err(e) => {
-                tracing::warn!(
-                    "[{}] Failed to load state on startup: {}. Starting with empty state.",
-                    self.symbol,
-                    e
-                );
+                if e.to_string().contains("All state files corrupted") {
+                    tracing::error!(
+                        "[{}] CRITICAL: All state files are corrupted! Force syncing with exchange (Task 066)...",
+                        self.symbol
+                    );
+                    
+                    // Задача 066/120: Принудительная синхронизация с биржей при потере состояния
+                    self.perform_reconciliation(rest_client, exchange_config).await?;
+                    
+                    tracing::info!("[{}] State successfully recovered from exchange via REST.", self.symbol);
+                } else {
+                    tracing::warn!(
+                        "[{}] Failed to load state on startup: {}. Starting with empty state.",
+                        self.symbol,
+                        e
+                    );
+                }
                 Ok(())
             }
         }
