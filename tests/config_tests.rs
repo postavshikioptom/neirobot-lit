@@ -1023,7 +1023,7 @@ fn test_environment_overrides_secrets() {
     std::env::set_var("BYBIT_API_KEY", "test_key_from_env");
     std::env::set_var("BYBIT_API_SECRET", "test_secret_from_env");
 
-    let result = load_secrets();
+    let result = load_secrets(None);
     assert!(result.is_ok(), "Should successfully load secrets from environment");
 
     let (key, secret) = result.unwrap();
@@ -1043,7 +1043,7 @@ fn test_secrets_missing_env_vars() {
     std::env::remove_var("BYBIT_API_KEY");
     std::env::remove_var("BYBIT_API_SECRET");
 
-    let result = load_secrets();
+    let result = load_secrets(None);
     assert!(result.is_err(), "Should fail when environment variables are missing");
     
     let err_msg = result.unwrap_err().to_string();

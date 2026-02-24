@@ -22,7 +22,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from src.backtest.engine import EventEngine, BotConfig, Event, EventType, MarketData, SignalData, OrderData
 from src.backtest.perturbation import LatencyGenerator
-from src.dataset import load_multi_symbol_data, load_symbol_config
+from src.dataset import load_multi_symbol_data
 
 
 def run_single_iteration(args: tuple) -> Dict[str, Any]:
@@ -112,15 +112,7 @@ def run_single_iteration(args: tuple) -> Dict[str, Any]:
     state = engine.get_state(bot_config.symbol)
     
     # Drawdown
-    peak = state.config.initial_balance
-    max_drawdown = 0.0
-    for trade in state.trades:
-        current_balance = state.balance
-        if current_balance > peak:
-            peak = current_balance
-        drawdown = (peak - current_balance) / peak * 100.0
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
+    max_drawdown = metrics.get('max_drawdown_pct', 0.0)
     
     # 95-й перцентиль задержки
     p95_latency = float(np.percentile(latencies, 95)) if len(latencies) > 0 else 0.0

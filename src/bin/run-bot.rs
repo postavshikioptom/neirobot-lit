@@ -174,6 +174,12 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     // Загружаем полную конфигурацию (используем "." как корень проекта)
     let mut full_config = load_full_config(Path::new("."), &config_path)
         .context("Failed to load full configuration")?;
+
+    // Инициализация AuditLogger (Задача 217) - в начале для аудита всех действий
+    let master_key = std::env::var("NEIRO_MASTER_KEY")
+        .unwrap_or_else(|_| "default_master_key".to_string());
+    let audit_logger = neirobot_lit::utils::audit::AuditLogger::init(&args.symbol, &master_key)
+        .context("Failed to initialize audit logger")?;
     
     // Задача 003: Загрузка API-ключей из api_key_path для изоляции по ботам
     let api_key_path = &full_config.exchange.bybit.api_key_path;
@@ -206,6 +212,10 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
             .context("TELEGRAM_CHAT_ID must be set in config or .env for test-alert mode")?;
         
+        // Расшифровываем если нужно (Задача 217)
+        let telegram_token = neirobot_lit::config::loader::decrypt_if_needed(&telegram_token, Some(&audit_logger))?;
+        let chat_id = neirobot_lit::config::loader::decrypt_if_needed(&chat_id, Some(&audit_logger))?;
+        
         let master_password = std::env::var("MASTER_PASSWORD").ok();
         
         // Создаем AlertManager
@@ -214,7 +224,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             chat_id,
             full_config.bot.alert_dedup_ttl_secs,
             master_password.as_deref(),
-            None,
+            Some(audit_logger.clone()),
         ).context("Failed to create AlertManager")?;
         
         // Отправляем тестовый алерт
@@ -238,11 +248,9 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         .context("Failed to compute initial config hash")?;
     info!("[Audit] Config SHA-256: {}", initial_config_hash);
     
-    // Извлечение секретов для торговли
-    let api_key = std::env::var("BYBIT_API_KEY")
-        .context("BYBIT_API_KEY must be set in .env")?;
-    let api_secret = std::env::var("BYBIT_API_SECRET")
-        .context("BYBIT_API_SECRET must be set in .env")?;
+    // Извлечение секретов для торговли через loader (с аудитом расшифровки)
+    let (api_key, api_secret) = neirobot_lit::config::loader::load_secrets(Some(&audit_logger))
+        .context("Failed to load API secrets")?;
     
     // Формируем путь к папке бота
     let bot_path = PathBuf::from("bots").join(&args.symbol);
@@ -590,12 +598,6 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         full_config.bot.initial_balance
     );
     
-    // Инициализация AuditLogger (Задача 217)
-    let master_key = std::env::var("NEIRO_MASTER_KEY")
-        .unwrap_or_else(|_| "default_master_key".to_string());
-    let audit_logger = neirobot_lit::utils::AuditLogger::init(&args.symbol, &master_key)
-        .context("Failed to initialize audit logger")?;
-    
     // Устанавливаем AuditLogger в RiskManager
     let mut risk_manager = risk_manager;
     risk_manager.set_audit_logger(audit_logger.clone());
@@ -611,10 +613,14 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
             .context("TELEGRAM_CHAT_ID must be set in config or .env")?;
         
+        // Расшифровываем если нужно (Задача 217)
+        let telegram_token = neirobot_lit::config::loader::decrypt_if_needed(&telegram_token, Some(&audit_logger))?;
+        let chat_id = neirobot_lit::config::loader::decrypt_if_needed(&chat_id, Some(&audit_logger))?;
+        
         let master_password = std::env::var("MASTER_PASSWORD").ok();
         
         match neirobot_lit::monitoring::alert_manager::AlertManager::new(
-            telegram_token.clone(),
+            telegram_token,
             chat_id,
             full_config.bot.alert_dedup_ttl_secs,
             master_password.as_deref(),
@@ -836,6 +842,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     let equity_tx_for_ws = equity_broadcast_tx.clone();
     let monitoring_symbol = args.symbol.clone();
     let monitoring_shutdown = shutdown_token.clone();
+    let audit_logger_for_ws = audit_logger.clone();
     
     tokio::spawn(async move {
         use axum::{
@@ -848,29 +855,30 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         
         async fn ws_handler(
             ws: WebSocketUpgrade,
-            axum::extract::State(state): axum::extract::State<(tokio::sync::broadcast::Sender<neirobot_lit::monitoring::types::EquityUpdate>, String)>,
+            axum::extract::State(state): axum::extract::State<(tokio::sync::broadcast::Sender<neirobot_lit::monitoring::types::EquityUpdate>, String, neirobot_lit::utils::audit::AuditLogger)>,
         ) -> impl IntoResponse {
-            ws.on_upgrade(move |socket| handle_socket(socket, state.0, state.1))
+            ws.on_upgrade(move |socket| handle_socket(socket, state.0, state.1, state.2))
         }
         
         async fn handle_socket(
             socket: WebSocket,
             equity_tx: tokio::sync::broadcast::Sender<neirobot_lit::monitoring::types::EquityUpdate>,
             symbol: String,
+            audit_logger: neirobot_lit::utils::audit::AuditLogger,
         ) {
             let (mut sender, mut receiver) = socket.split();
             let mut equity_rx = equity_tx.subscribe();
             
             tracing::info!("[Equity Streamer] Client connected for {}", symbol);
             
-            // Логируем подключение в security_audit.csv
-            if let Ok(audit_logger) = neirobot_lit::utils::AuditLogger::init(&symbol, &std::env::var("NEIRO_MASTER_KEY").unwrap_or_else(|_| "default_master_key".to_string())) {
-                let _ = audit_logger.log_event(
-                    "MONITORING_CONNECT",
-                    &format!("WebSocket client connected to equity streamer"),
-                    None,
-                );
-            }
+            // Логируем подключение в security_audit.csv (Задача 217)
+            let _ = audit_logger.log_event(
+                "MONITORING_CONNECT",
+                &format!("WebSocket client connected to equity streamer"),
+                "SUCCESS",
+                "",
+                "",
+            );
             
             let mut send_task = tokio::spawn(async move {
                 while let Ok(update) = equity_rx.recv().await {
@@ -904,7 +912,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         
         let app = Router::new()
             .route("/ws", get(ws_handler))
-            .with_state((equity_tx_for_ws, monitoring_symbol));
+            .with_state((equity_tx_for_ws, monitoring_symbol, audit_logger_for_ws));
         
         let addr = format!("127.0.0.1:{}", monitoring_port);
         let listener = match tokio::net::TcpListener::bind(&addr).await {

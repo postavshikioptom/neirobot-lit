@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::types::*;
 use crate::utils::crypto;
+use crate::utils::audit::AuditLogger;
 
 /// Структура для маппинга переменных окружения через serde
 /// Задача 188: Использование serde для маппинга переменных окружения
@@ -285,21 +286,21 @@ pub fn validate_full_config(cfg: &FullConfig) -> Result<()> {
 
 /// Загрузка секретов (API ключи) из переменных окружения
 /// Приоритет: переменные окружения > .env файл
-pub fn load_secrets() -> Result<(String, String)> {
+pub fn load_secrets(audit_logger: Option<&AuditLogger>) -> Result<(String, String)> {
     let key = std::env::var("BYBIT_API_KEY")
         .context("BYBIT_API_KEY not found in environment variables")?;
     let secret = std::env::var("BYBIT_API_SECRET")
         .context("BYBIT_API_SECRET not found in environment variables")?;
     
     // Обработка зашифрованных значений
-    let key = decrypt_if_needed(&key)?;
-    let secret = decrypt_if_needed(&secret)?;
+    let key = decrypt_if_needed(&key, audit_logger)?;
+    let secret = decrypt_if_needed(&secret, audit_logger)?;
     
     Ok((key, secret))
 }
 
 /// Вспомогательная функция для расшифровки значения, если оно зашифровано
-fn decrypt_if_needed(value: &str) -> Result<String> {
+pub fn decrypt_if_needed(value: &str, audit_logger: Option<&AuditLogger>) -> Result<String> {
     if crypto::is_encrypted(value) {
         // Если значение зашифровано, мастер-ключ ОБЯЗАТЕЛЕН
         let master_key = std::env::var("NEIRO_MASTER_KEY")
@@ -313,10 +314,18 @@ fn decrypt_if_needed(value: &str) -> Result<String> {
         match crypto::decrypt(value, &master_key) {
             Ok(decrypted) => {
                 info!("Config decryption: SUCCESS");
+                // Логируем успех в аудит
+                if let Some(logger) = audit_logger {
+                    let _ = logger.log_config_decryption(true, None);
+                }
                 Ok(decrypted)
             }
             Err(e) => {
                 warn!("Config decryption: FAILURE - {}", e);
+                // Логируем провал в аудит
+                if let Some(logger) = audit_logger {
+                    let _ = logger.log_config_decryption(false, Some(&e.to_string()));
+                }
                 Err(e).context("Failed to decrypt value")
             }
         }
@@ -330,7 +339,7 @@ fn decrypt_if_needed(value: &str) -> Result<String> {
 /// 
 /// Возвращает Ok(Some((token, chat_id))) если оба параметра найдены,
 /// Ok(None) если хотя бы один отсутствует
-pub fn load_telegram_credentials() -> Result<Option<(String, String)>> {
+pub fn load_telegram_credentials(audit_logger: Option<&AuditLogger>) -> Result<Option<(String, String)>> {
     match (
         std::env::var("TELEGRAM_TOKEN").ok(),
         std::env::var("TELEGRAM_CHAT_ID").ok(),
@@ -340,8 +349,8 @@ pub fn load_telegram_credentials() -> Result<Option<(String, String)>> {
                 Ok(None)
             } else {
                 // Расшифровываем, если нужно
-                let token = decrypt_if_needed(&token)?;
-                let chat_id = decrypt_if_needed(&chat_id)?;
+                let token = decrypt_if_needed(&token, audit_logger)?;
+                let chat_id = decrypt_if_needed(&chat_id, audit_logger)?;
                 Ok(Some((token, chat_id)))
             }
         }

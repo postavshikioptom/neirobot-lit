@@ -196,6 +196,7 @@ class SymbolState:
     
     # Задача 213: Параметры риск-менеджмента
     peak_balance: float = 0.0  # Пиковый баланс для расчета просадки
+    max_drawdown_pct: float = 0.0  # Максимальная зафиксированная просадка в процентах
     
     # Задача 215: Метрики ошибок
     lost_trades_count: int = 0  # Количество пропущенных сигналов из-за ошибок
@@ -218,9 +219,14 @@ class SymbolState:
         return max(0.0, drawdown)
     
     def update_peak_balance(self):
-        """Обновление пикового баланса"""
+        """Обновление пикового баланса и максимальной просадки"""
         if self.balance > self.peak_balance:
             self.peak_balance = self.balance
+        
+        # Обновляем максимальную просадку
+        current_dd = self.get_current_drawdown_pct()
+        if current_dd > self.max_drawdown_pct:
+            self.max_drawdown_pct = current_dd
     
     def is_position_limit_exceeded(self, additional_size: float) -> bool:
         """Проверка превышения лимита позиции"""
@@ -835,6 +841,7 @@ class EventEngine:
                 "taker_fees_usd": taker_fees,
                 "final_balance": state.balance,
                 "net_pnl": state.balance - state.config.initial_balance,
+                "max_drawdown_pct": state.max_drawdown_pct,
                 # Задача 059: Gross PnL (разница цен без учета комиссий)
                 "gross_pnl": state.gross_pnl,
                 "avg_slippage_bps": avg_slippage,
