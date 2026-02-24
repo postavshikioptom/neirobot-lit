@@ -1733,7 +1733,8 @@ def load_multi_symbol_data(
     scans = []
     
     # Загружаем Parquet файлы для каждого символа и добавляем колонку symbol
-    for symbol in symbols:
+    # Задача 213: Используем sorted() для детерминированного порядка обработки
+    for symbol in sorted(symbols):
         pattern = f"{symbol}_*.parquet"
         files = list(data_path.glob(f"{symbol}/data/raw/{pattern}"))
         

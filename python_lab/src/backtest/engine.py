@@ -56,6 +56,7 @@ class FillData:
     amount: float
     fee_usd: float
     fill_type: str  # 'maker', 'taker'
+    timestamp_ms: int = 0  # Задача 213: Временная метка для анализа хронологии
     is_iceberg: bool = False  # Задача 211
     iceberg_parent_id: str = ""  # Задача 211
 
@@ -227,7 +228,8 @@ class SymbolState:
     
     def is_drawdown_limit_exceeded(self) -> bool:
         """Проверка превышения лимита просадки"""
-        return self.get_current_drawdown_pct() > self.config.max_drawdown_pct
+        # Задача 213: Используем >= для строгого соответствия лимиту
+        return self.get_current_drawdown_pct() >= self.config.max_drawdown_pct
 
 
 class EventEngine:
@@ -450,6 +452,7 @@ class EventEngine:
                 amount=order.amount,
                 fee_usd=0.0,
                 fill_type=fill_type,
+                timestamp_ms=self.current_time,  # Задача 213: Добавляем временную метку
                 is_iceberg=order.is_iceberg,
                 iceberg_parent_id=order.iceberg_parent_id
             ),
@@ -675,8 +678,10 @@ class EventEngine:
                         price=fill_price,
                         amount=data.amount,
                         fee_usd=0.0,
-                        fill_type="taker"
-                    )
+                        fill_type="taker",
+                        timestamp_ms=self.current_time  # Задача 213: Добавляем временную метку
+                    ),
+                    symbol=symbol
                 )
                 self.push_event(fill_event)
         else:
@@ -729,6 +734,9 @@ class EventEngine:
         fee_rate = (state.config.maker_fee_bps if data.fill_type == "maker" else state.config.taker_fee_bps) / 10000
         data.fee_usd = data.amount * data.price * fee_rate
         state.balance -= data.fee_usd
+        
+        # Задача 213: Обновляем пиковый баланс для корректного расчета просадки
+        state.update_peak_balance()
 
         # Задача 211: Если это айсберг-ордер, выставляем следующий слайс
         if data.is_iceberg and data.iceberg_parent_id:
@@ -954,6 +962,7 @@ class EventEngine:
         for trade in state.trades:
             trade_dict = {
                 "symbol": symbol if symbol else self._primary_symbol,
+                "timestamp_ms": trade.timestamp_ms,  # Задача 213: Добавляем временную метку
                 "order_id": trade.order_id,
                 "side": trade.side,
                 "price": trade.price,
@@ -971,11 +980,12 @@ class EventEngine:
         Задача 213: Поддержка мульти-инструментальности
         
         Returns:
-            Список словарей с данными о сделках от всех символов
+            Список словарей с данными о сделках от всех символов, отсортированный по времени
         """
         all_trades = []
         for symbol in self.states.keys():
             all_trades.extend(self.get_all_trades(symbol))
         
-        # Сортируем по времени (если есть timestamp в TradeData)
+        # Задача 213: Сортируем по времени для единого хронологического потока
+        all_trades.sort(key=lambda x: x.get("timestamp_ms", 0))
         return all_trades

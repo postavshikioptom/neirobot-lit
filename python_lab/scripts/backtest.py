@@ -63,7 +63,9 @@ def run_backtest():
                 maker_fee_bps=float(bot_config.get("maker_fee_bps", args.maker_fee_bps)),
                 limit_timeout_ms=int(bot_config.get("limit_timeout_ms", args.limit_timeout_ms)),
                 order_size_usd=float(bot_config.get("order_size_usd", args.order_size_usd)),
-                queue_model=bot_config.get("queue_model", args.queue_model)
+                queue_model=bot_config.get("queue_model", args.queue_model),
+                max_position=float(bot_config.get("max_position", 10.0)),  # Задача 213: Риск-лимиты
+                max_drawdown_pct=float(bot_config.get("max_drawdown_pct", 10.0))  # Задача 213: Риск-лимиты
             )
             print(f"[{symbol}] Config loaded from bots/{symbol}/config.toml")
         except FileNotFoundError:
@@ -75,7 +77,9 @@ def run_backtest():
                 maker_fee_bps=args.maker_fee_bps,
                 limit_timeout_ms=args.limit_timeout_ms,
                 order_size_usd=args.order_size_usd,
-                queue_model=args.queue_model
+                queue_model=args.queue_model,
+                max_position=10.0,  # Задача 213: Риск-лимиты по умолчанию
+                max_drawdown_pct=10.0  # Задача 213: Риск-лимиты по умолчанию
             )
     
     # Задача 213: Инициализируем Event Engine с первым символом
@@ -287,15 +291,24 @@ def run_backtest():
             cols_reordered = ["symbol"] + [c for c in cols if c != "symbol"]
             trades_df = trades_df.select(cols_reordered)
         
-        # Сохраняем в CSV для каждого символа
+        # Задача 213: Сохраняем все сделки в ЕДИНЫЙ файл, отсортированный по времени
+        # (данные уже отсортированы в get_all_trades_multi_symbol)
+        output_dir = base_path / "python_lab" / "reports"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / "backtest_trades_multi.csv"
+        trades_df.write_csv(str(output_file))
+        print(f"\n✓ All trades saved to unified file: {output_file}")
+        print(f"  Total trades: {len(trades_df)}")
+        
+        # Дополнительно сохраняем отдельные файлы для каждого символа (для совместимости)
         for symbol in symbols:
             symbol_trades = trades_df.filter(pl.col("symbol") == symbol)
             if len(symbol_trades) > 0:
-                output_dir = base_path / "bots" / symbol / "logs"
-                output_dir.mkdir(parents=True, exist_ok=True)
-                output_file = output_dir / "backtest_trades.csv"
-                symbol_trades.write_csv(str(output_file))
-                print(f"\n✓ Trades for {symbol} saved to {output_file}")
+                symbol_output_dir = base_path / "bots" / symbol / "logs"
+                symbol_output_dir.mkdir(parents=True, exist_ok=True)
+                symbol_output_file = symbol_output_dir / "backtest_trades.csv"
+                symbol_trades.write_csv(str(symbol_output_file))
+                print(f"  - {symbol}: {len(symbol_trades)} trades saved to {symbol_output_file}")
     
     # Вывод результатов для каждого символа
     print("\n" + "="*60)
