@@ -1,6 +1,6 @@
 use std::str::FromStr;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 use anyhow::{Result, bail};
 use tracing::{info, warn, error, debug};
 use crate::trading::order::Order; // Новая Order с f64 и State Machine
@@ -19,13 +19,13 @@ use crate::utils::rate_limiter::RateLimiter;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::prelude::FromPrimitive;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::{timeout, Duration};
 
 pub struct OrderManager {
-    active_orders: HashMap<String, Order>, // Задача 136: Используем новую Order
-    exchange_map: HashMap<String, String>, // order_id -> link_id
-    history: Vec<Order>, // Задача 136: Используем новую Order
+    active_orders: Arc<RwLock<HashMap<String, Order>>>, // Задача 235: RwLock для потокобезопасности
+    exchange_map: Arc<Mutex<HashMap<String, String>>>, // order_id -> link_id, Mutex для потокобезопасности
+    history: Arc<Mutex<Vec<Order>>>, // Задача 136: Используем новую Order, Mutex для потокобезопасности
     nonce: AtomicU64, // Задача 176: Атомарный счетчик для уникальности order_link_id
     market_impact_tx: Option<mpsc::Sender<MarketImpactLog>>, // Задача 204: Sender для логирования влияния на цену
     is_price_shock: bool, // Задача 233: Флаг режима шока при ошибке Price Band
@@ -35,13 +35,27 @@ pub struct OrderManager {
 impl OrderManager {
     pub fn new() -> Self {
         Self {
-            active_orders: HashMap::new(),
-            exchange_map: HashMap::new(),
-            history: Vec::new(),
+            active_orders: Arc::new(RwLock::new(HashMap::new())), // Задача 235: Arc<RwLock> для потокобезопасности
+            exchange_map: Arc::new(Mutex::new(HashMap::new())),
+            history: Arc::new(Mutex::new(Vec::new())),
             nonce: AtomicU64::new(0),
             market_impact_tx: None,
             is_price_shock: false,
             rate_limiter: RateLimiter::new(10), // Задача 063: 10 запросов в секунду
+        }
+    }
+
+    /// Задача 235: Клонирование OrderManager для передачи в tokio::spawn
+    /// Клонирует только Arc-обернутые поля, остальные создаются заново
+    pub fn clone(&self) -> Self {
+        Self {
+            active_orders: Arc::clone(&self.active_orders),
+            exchange_map: Arc::clone(&self.exchange_map),
+            history: Arc::clone(&self.history),
+            nonce: AtomicU64::new(self.nonce.load(Ordering::SeqCst)),
+            market_impact_tx: self.market_impact_tx.clone(),
+            is_price_shock: self.is_price_shock,
+            rate_limiter: RateLimiter::new(10),
         }
     }
 
@@ -51,235 +65,267 @@ impl OrderManager {
     }
 
     /// Добавляет новый ордер. Возвращает ошибку, если link_id уже существует.
-    pub fn add_order(&mut self, order: Order) -> Result<()> {
-        if self.active_orders.contains_key(&order.link_id) {
+    pub async fn add_order(&self, order: Order) -> Result<()> {
+        let mut active = self.active_orders.write().await;
+        if active.contains_key(&order.link_id) {
             bail!("Duplicate link_id: {}", order.link_id);
         }
-        self.active_orders.insert(order.link_id.clone(), order);
+        active.insert(order.link_id.clone(), order);
         Ok(())
     }
 
     /// Обновляет состояние ордера через State Machine transition.
     /// Если состояние терминальное, перемещает в историю.
-    pub fn update_order(&mut self, link_id: &str, order_id: Option<String>, new_state: OrderState, exec_qty_delta: Option<f64>) {
-        if let Some(order) = self.active_orders.get_mut(link_id) {
-            let old_state = order.state.clone();
-            
-            // Обновляем order_id если пришел
-            if let Some(id) = order_id.clone() {
-                self.exchange_map.insert(id.clone(), link_id.to_string());
-                order.order_id = Some(id);
-            }
+    pub async fn update_order(&self, link_id: &str, order_id: Option<String>, new_state: OrderState, exec_qty_delta: Option<f64>) {
+        // Переменная для хранения ордера, который нужно переместить в историю
+        let mut order_to_move: Option<Order> = None;
+        
+        {
+            let mut active = self.active_orders.write().await;
+            if let Some(order) = active.get_mut(link_id) {
+                let old_state = order.state.clone();
+                
+                // Обновляем order_id если пришел
+                if let Some(id) = order_id.clone() {
+                    let mut exchange_map = self.exchange_map.lock().await;
+                    exchange_map.insert(id.clone(), link_id.to_string());
+                    order.order_id = Some(id);
+                }
 
-            // Создаем событие для transition
-            let event = match (&new_state, exec_qty_delta) {
-                (OrderState::Active, _) if matches!(old_state, OrderState::PendingNew) => {
-                    OrderEvent::Accepted {
-                        order_id: order.order_id.clone().unwrap_or_default(),
+                // Создаем событие для transition
+                let event = match (&new_state, exec_qty_delta) {
+                    (OrderState::Active, _) if matches!(old_state, OrderState::PendingNew) => {
+                        OrderEvent::Accepted {
+                            order_id: order.order_id.clone().unwrap_or_default(),
+                        }
                     }
-                }
-                (OrderState::PartiallyFilled | OrderState::Filled, Some(delta)) => {
-                    OrderEvent::Trade {
-                        exec_qty: delta,
-                        price: order.price,
+                    (OrderState::PartiallyFilled | OrderState::Filled, Some(delta)) => {
+                        OrderEvent::Trade {
+                            exec_qty: delta,
+                            price: order.price,
+                        }
                     }
-                }
-                (OrderState::Cancelled, _) if matches!(old_state, OrderState::PendingCancel) => {
-                    OrderEvent::CancelAck
-                }
-                (OrderState::Rejected(reason), _) => {
-                    OrderEvent::Rejected {
-                        reason: reason.clone(),
+                    (OrderState::Cancelled, _) if matches!(old_state, OrderState::PendingCancel) => {
+                        OrderEvent::CancelAck
                     }
-                }
-                (OrderState::Expired, _) => OrderEvent::Expired,
-                _ => {
-                    // Прямое изменение состояния без события (fallback)
-                    order.state = new_state.clone();
-                    order.updated_at = timestamp_ms();
-                    
-                    if order.is_terminal() {
-                        self.move_to_history(link_id);
+                    (OrderState::Rejected(reason), _) => {
+                        OrderEvent::Rejected {
+                            reason: reason.clone(),
+                        }
                     }
-                    return;
-                }
-            };
+                    (OrderState::Expired, _) => OrderEvent::Expired,
+                    _ => {
+                        // Прямое изменение состояния без события (fallback)
+                        order.state = new_state.clone();
+                        order.updated_at = timestamp_ms();
+                        
+                        if order.is_terminal() {
+                            // Извлекаем ордер для перемещения в историю
+                            order_to_move = active.remove(link_id);
+                        }
+                        // Блокировка active освободится здесь
+                        drop(active);
+                        
+                        // Перемещаем в историю после освобождения блокировки
+                        if let Some(ord) = order_to_move {
+                            self.move_order_to_history(ord).await;
+                        }
+                        return;
+                    }
+                };
 
-            // Применяем transition
-            match order.transition(event) {
-                Ok(()) => {
-                    info!("Order {} transitioned: {:?} -> {:?}", link_id, old_state, order.state);
+                // Применяем transition
+                match order.transition(event) {
+                    Ok(()) => {
+                        info!("Order {} transitioned: {:?} -> {:?}", link_id, old_state, order.state);
+                    }
+                    Err(e) => {
+                        warn!("Failed to transition order {}: {}. Forcing state change.", link_id, e);
+                        order.state = new_state;
+                        order.updated_at = timestamp_ms();
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to transition order {}: {}. Forcing state change.", link_id, e);
-                    order.state = new_state;
-                    order.updated_at = timestamp_ms();
+
+                // Перемещаем в историю если терминальное состояние
+                if order.is_terminal() {
+                    order_to_move = active.remove(link_id);
                 }
             }
-
-            // Перемещаем в историю если терминальное состояние
-            if order.is_terminal() {
-                self.move_to_history(link_id);
-            }
+        } // Блокировка active освобождается здесь
+        
+        // Перемещаем в историю после освобождения блокировки
+        if let Some(ord) = order_to_move {
+            self.move_order_to_history(ord).await;
         }
     }
 
-    /// Перемещает ордер из активных в историю
-    fn move_to_history(&mut self, link_id: &str) {
-        if let Some(order) = self.active_orders.remove(link_id) {
-            if let Some(ref id) = order.order_id {
-                self.exchange_map.remove(id);
-            }
-            self.history.push(order);
+    /// Перемещает ордер в историю (вызывается после извлечения из active_orders)
+    async fn move_order_to_history(&self, order: Order) {
+        if let Some(ref id) = order.order_id {
+            let mut exchange_map = self.exchange_map.lock().await;
+            exchange_map.remove(id);
         }
+        let mut history = self.history.lock().await;
+        history.push(order);
     }
 
     /// Основной метод обработки обновлений жизненного цикла ордера от биржи (WS или REST).
     /// Возвращает Ok(Some((fill_event, realized_pnl, position_closed, entry_price))), если произошло исполнение.
-    pub fn update_order_state(
-        &mut self,
+    pub async fn update_order_state(
+        &self,
         order_link_id: &str,
         event: OrderUpdate,
         position_manager: &mut PositionManager,
         lot_filter: &crate::trading::types::LotFilter, // Задача 137: Добавлен параметр для проверки пыли
         risk_manager: &mut RiskManager, // Задача 176: Для удаления интентов
     ) -> Result<Option<(FillEvent, Option<Decimal>, bool, Option<Decimal>)>> {
-        let order = match self.active_orders.get_mut(order_link_id) {
-            Some(o) => o,
-            None => bail!("Order {} not found in active_orders", order_link_id),
-        };
-
-        let old_state = order.state.clone();
-        let new_status = event.status;
-        let old_executed_qty = order.executed_qty;
-        let mut new_executed_qty = event.cum_exec_qty.to_f64().unwrap_or(0.0);
         let mut fill_info = None;
-
-        // Критическое требование: При переходе в статус Filled убеждаемся, что исполнен весь объем
-        if new_status == OrderStatus::Filled && new_executed_qty < order.qty {
-            warn!(
-                "Order {} status is Filled, but executed_qty ({}) < qty ({}). Adjusting to full qty.",
-                order_link_id, new_executed_qty, order.qty
-            );
-            new_executed_qty = order.qty;
-        }
-
-        // 1. Обработка дельты исполнения (Partial Fill logic)
-        if new_executed_qty > old_executed_qty {
-            let delta_qty = new_executed_qty - old_executed_qty;
-            let exec_price = event.exec_price.unwrap_or(Decimal::from_f64_retain(order.price).unwrap_or(Decimal::ZERO));
-
-            let fill_event = FillEvent {
-                symbol: order.symbol.clone(),
-                side: order.side,
-                exec_qty: Decimal::from_f64_retain(delta_qty).unwrap_or(Decimal::ZERO),
-                exec_price,
-                exec_fee: event.exec_fee.unwrap_or_default(),
-                is_maker: event.is_maker.unwrap_or(true),
-                exec_id: format!("exec_{}_{}", order_link_id, timestamp_ms()), 
-                order_id: event.order_id.clone(),
-                order_link_id: Some(order_link_id.to_string()),
-                timestamp: event.timestamp,
+        let mut order_to_move: Option<Order> = None;
+        
+        {
+            let mut active = self.active_orders.write().await;
+            let order = match active.get_mut(order_link_id) {
+                Some(o) => o,
+                None => bail!("Order {} not found in active_orders", order_link_id),
             };
 
-            info!(
-                "Order {} fill delta: {} @ {} (Total: {}/{})",
-                order_link_id, delta_qty, exec_price, new_executed_qty, order.qty
-            );
+            let old_state = order.state.clone();
+            let new_status = event.status;
+            let old_executed_qty = order.executed_qty;
+            let mut new_executed_qty = event.cum_exec_qty.to_f64().unwrap_or(0.0);
 
-            let (realized_pnl, position_closed, entry_price) = position_manager.update_from_fill(fill_event.clone());
-            
-            // Задача 137: Применяем apply_trade вместо transition для учета фильтров лота и проверки пыли
-            order.apply_trade(delta_qty, lot_filter);
-            
-            // Задача 179: Обновляем filled_qty в интенте для корректной работы check_stale_orders
-            risk_manager.update_order_intent_filled_qty(order_link_id, new_executed_qty);
-            
-            fill_info = Some((fill_event, realized_pnl, position_closed, entry_price));
-        }
+            // Критическое требование: При переходе в статус Filled убеждаемся, что исполнен весь объем
+            if new_status == OrderStatus::Filled && new_executed_qty < order.qty {
+                warn!(
+                    "Order {} status is Filled, but executed_qty ({}) < qty ({}). Adjusting to full qty.",
+                    order_link_id, new_executed_qty, order.qty
+                );
+                new_executed_qty = order.qty;
+            }
 
-        // 2. Обновление метаданных
-        let new_state = match new_status {
-            OrderStatus::New => OrderState::Active,
-            OrderStatus::PartiallyFilled => OrderState::PartiallyFilled,
-            OrderStatus::Filled => OrderState::Filled,
-            OrderStatus::Cancelled => {
-                // Распознавание причины отмены Post-Only
-                if let Some(ref reason) = event.reason {
-                    if reason.contains("CancelByPostOnly") || reason.contains("PostOnly") {
-                        // Задача 175: Учет Post-Only реджектов через WebSocket
-                        risk_manager.report_rejection();
-                        OrderState::Rejected("PostOnly".to_string())
+            // 1. Обработка дельты исполнения (Partial Fill logic)
+            if new_executed_qty > old_executed_qty {
+                let delta_qty = new_executed_qty - old_executed_qty;
+                let exec_price = event.exec_price.unwrap_or(Decimal::from_f64_retain(order.price).unwrap_or(Decimal::ZERO));
+
+                let fill_event = FillEvent {
+                    symbol: order.symbol.clone(),
+                    side: order.side,
+                    exec_qty: Decimal::from_f64_retain(delta_qty).unwrap_or(Decimal::ZERO),
+                    exec_price,
+                    exec_fee: event.exec_fee.unwrap_or_default(),
+                    is_maker: event.is_maker.unwrap_or(true),
+                    exec_id: format!("exec_{}_{}", order_link_id, timestamp_ms()), 
+                    order_id: event.order_id.clone(),
+                    order_link_id: Some(order_link_id.to_string()),
+                    timestamp: event.timestamp,
+                };
+
+                info!(
+                    "Order {} fill delta: {} @ {} (Total: {}/{})",
+                    order_link_id, delta_qty, exec_price, new_executed_qty, order.qty
+                );
+
+                let (realized_pnl, position_closed, entry_price) = position_manager.update_from_fill(fill_event.clone());
+                
+                // Задача 137: Применяем apply_trade вместо transition для учета фильтров лота и проверки пыли
+                order.apply_trade(delta_qty, lot_filter);
+                
+                // Задача 179: Обновляем filled_qty в интенте для корректной работы check_stale_orders
+                risk_manager.update_order_intent_filled_qty(order_link_id, new_executed_qty);
+                
+                fill_info = Some((fill_event, realized_pnl, position_closed, entry_price));
+            }
+
+            // 2. Обновление метаданных
+            let new_state = match new_status {
+                OrderStatus::New => OrderState::Active,
+                OrderStatus::PartiallyFilled => OrderState::PartiallyFilled,
+                OrderStatus::Filled => OrderState::Filled,
+                OrderStatus::Cancelled => {
+                    // Распознавание причины отмены Post-Only
+                    if let Some(ref reason) = event.reason {
+                        if reason.contains("CancelByPostOnly") || reason.contains("PostOnly") {
+                            // Задача 175: Учет Post-Only реджектов через WebSocket
+                            risk_manager.report_rejection();
+                            OrderState::Rejected("PostOnly".to_string())
+                        } else {
+                            OrderState::Cancelled
+                        }
                     } else {
                         OrderState::Cancelled
                     }
-                } else {
-                    OrderState::Cancelled
+                }
+                OrderStatus::Rejected | OrderStatus::PostOnlyRejected => {
+                    // Задача 175: Учет всех реджектов через WebSocket
+                    risk_manager.report_rejection();
+                    OrderState::Rejected(event.reason.clone().unwrap_or_default())
+                }
+                OrderStatus::Expired => OrderState::Expired,
+                _ => order.state.clone(),
+            };
+
+            // Применяем изменение состояния если оно изменилось
+            if new_state != old_state {
+                order.state = new_state.clone();
+                order.updated_at = timestamp_ms();
+                info!("Order {} state: {:?} -> {:?}", order_link_id, old_state, new_state);
+            }
+            
+            // Синхронизация цены и объема после amendment (из WebSocket)
+            if let Some(new_price) = event.new_price {
+                let new_price_f64 = new_price.to_f64().unwrap_or(0.0);
+                if (new_price_f64 - order.price).abs() > 1e-8 {
+                    info!("Order {} price updated via WebSocket: {} -> {}", order_link_id, order.price, new_price_f64);
+                    order.price = new_price_f64;
                 }
             }
-            OrderStatus::Rejected | OrderStatus::PostOnlyRejected => {
-                // Задача 175: Учет всех реджектов через WebSocket
-                risk_manager.report_rejection();
-                OrderState::Rejected(event.reason.clone().unwrap_or_default())
-            }
-            OrderStatus::Expired => OrderState::Expired,
-            _ => order.state.clone(),
-        };
-
-        // Применяем изменение состояния если оно изменилось
-        if new_state != old_state {
-            order.state = new_state.clone();
-            order.updated_at = timestamp_ms();
-            info!("Order {} state: {:?} -> {:?}", order_link_id, old_state, new_state);
-        }
-        
-        // Синхронизация цены и объема после amendment (из WebSocket)
-        if let Some(new_price) = event.new_price {
-            let new_price_f64 = new_price.to_f64().unwrap_or(0.0);
-            if (new_price_f64 - order.price).abs() > 1e-8 {
-                info!("Order {} price updated via WebSocket: {} -> {}", order_link_id, order.price, new_price_f64);
-                order.price = new_price_f64;
-            }
-        }
-        if let Some(new_qty) = event.new_qty {
-            let new_qty_f64 = new_qty.to_f64().unwrap_or(0.0);
-            if (new_qty_f64 - order.qty).abs() > 1e-8 {
-                info!("Order {} qty updated via WebSocket: {} -> {}", order_link_id, order.qty, new_qty_f64);
-                order.qty = new_qty_f64;
-            }
-        }
-        
-        // Связываем order_id если он пришел впервые
-        if order.order_id.is_none() {
-            order.order_id = Some(event.order_id.clone());
-            self.exchange_map.insert(event.order_id, order_link_id.to_string());
-        }
-
-        // 3. Обработка терминальных состояний
-        if order.is_terminal() {
-            if matches!(order.state, OrderState::Expired | OrderState::Rejected(_)) {
-                warn!(
-                    "Order {} {:?} by exchange. Reason: {:?}", 
-                    order_link_id, order.state, event.reason
-                );
-            }
-
-            // Задача 176: Удаляем интент при терминальном состоянии
-            risk_manager.remove_order_intent(order_link_id);
-
-            // Задача 202: Логирование метрик качества исполнения перед перемещением в историю
-            if let Some(order_to_log) = self.active_orders.get(order_link_id) {
-                // Отметить ордер как отменённый если он в состоянии Cancelled
-                let mut order_copy = order_to_log.clone();
-                if matches!(order_copy.state, OrderState::Cancelled) {
-                    order_copy.mark_cancelled();
+            if let Some(new_qty) = event.new_qty {
+                let new_qty_f64 = new_qty.to_f64().unwrap_or(0.0);
+                if (new_qty_f64 - order.qty).abs() > 1e-8 {
+                    info!("Order {} qty updated via WebSocket: {} -> {}", order_link_id, order.qty, new_qty_f64);
+                    order.qty = new_qty_f64;
                 }
-                // Логирование происходит асинхронно через канал (см. ExecutionEngine)
-                // Здесь мы просто подготавливаем данные
+            }
+            
+            // Связываем order_id если он пришел впервые
+            if order.order_id.is_none() {
+                order.order_id = Some(event.order_id.clone());
+                let mut exchange_map = self.exchange_map.lock().await;
+                exchange_map.insert(event.order_id, order_link_id.to_string());
             }
 
-            // Перенос в историю
-            self.move_to_history(order_link_id);
+            // 3. Обработка терминальных состояний
+            if order.is_terminal() {
+                if matches!(order.state, OrderState::Expired | OrderState::Rejected(_)) {
+                    warn!(
+                        "Order {} {:?} by exchange. Reason: {:?}", 
+                        order_link_id, order.state, event.reason
+                    );
+                }
+
+                // Задача 176: Удаляем интент при терминальном состоянии
+                risk_manager.remove_order_intent(order_link_id);
+
+                // Задача 202: Логирование метрик качества исполнения перед перемещением в историю
+                if let Some(order_to_log) = active.get(order_link_id) {
+                    // Отметить ордер как отменённый если он в состоянии Cancelled
+                    let mut order_copy = order_to_log.clone();
+                    if matches!(order_copy.state, OrderState::Cancelled) {
+                        order_copy.mark_cancelled();
+                    }
+                    // Логирование происходит асинхронно через канал (см. ExecutionEngine)
+                    // Здесь мы просто подготавливаем данные
+                }
+
+                // Извлекаем ордер для перемещения в историю
+                order_to_move = active.remove(order_link_id);
+            }
+        } // Блокировка active освобождается здесь
+        
+        // Перемещаем в историю после освобождения блокировки
+        if let Some(ord) = order_to_move {
+            self.move_order_to_history(ord).await;
         }
 
         Ok(fill_info)
@@ -324,8 +370,11 @@ impl OrderManager {
         let order_link_id = self.generate_order_link_id(&bot_config.bot_id, None);
         
         // Проверка на дубликат
-        if self.active_orders.contains_key(&order_link_id) {
-            bail!("Duplicate order_link_id: {}", order_link_id);
+        {
+            let active = self.active_orders.read().await;
+            if active.contains_key(&order_link_id) {
+                bail!("Duplicate order_link_id: {}", order_link_id);
+            }
         }
 
         // Задача 166: Проверка min_qty для reduce_only ордеров (TP close)
@@ -448,8 +497,8 @@ impl OrderManager {
             trailing_stop,
             active_price,
             // Задача 232: Self-Match Prevention (SMP)
-            smp_type: if bot_config.smp_type != "None" {
-                Some(bot_config.smp_type.clone())
+            smp_type: if bot_config.trading.smp_type != "None" {
+                Some(bot_config.trading.smp_type.clone())
             } else {
                 None
             },
@@ -484,7 +533,7 @@ impl OrderManager {
                 // Сохраняем order_id
                 order.order_id = Some(res.order_id);
                 // Добавляем в активные
-                self.add_order(order)?;
+                self.add_order(order).await?;
                 
                 // Задача 189: Инкремент метрики успешно размещенных ордеров
                 metrics::counter!("bot_orders_placed_total").increment(1);
@@ -498,13 +547,9 @@ impl OrderManager {
                 // Задача 232: Проверка на ошибку SMP (110037)
                 if let Some(bybit_err) = e.downcast_ref::<BybitError>() {
                     if bybit_err.code == 110037 {
-                        warn!(
-                            "[Order] SMP Triggered for {}. Cooling down...",
-                            bot_config.symbol
-                        );
-                        // Небольшая задержка, чтобы стакан очистился от отмененных ордеров
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        return Err(anyhow::anyhow!("SMP error {}: {}", bybit_err.code, bybit_err.msg));
+                        self.handle_smp_event(&bot_config.symbol).await?;
+                        // Возвращаем специальную ошибку, чтобы избежать паники в логах
+                        return Err(anyhow::anyhow!("SMP_TRIGGERED")); 
                     }
                 }
                 
@@ -581,7 +626,7 @@ impl OrderManager {
     /// 
     /// Задача 136: Перед отправкой запроса ордер переводится в PendingCancel.
     pub async fn cancel_order(
-        &mut self,
+        &self,
         rest_client: &impl BybitRestClientTrait,
         risk_manager: &mut RiskManager,
         bot_config: &BotConfig,
@@ -589,16 +634,22 @@ impl OrderManager {
         order_link_id: &str,
         force: bool,
     ) -> Result<()> {
-        let exists_locally = self.active_orders.contains_key(order_link_id);
+        let exists_locally = {
+            let active = self.active_orders.read().await;
+            active.contains_key(order_link_id)
+        };
         
         if !exists_locally && !force {
             bail!("Order {} not found. Use force=true to cancel anyway.", order_link_id);
         }
 
         // Переход в PendingCancel перед отправкой
-        if let Some(order) = self.active_orders.get_mut(order_link_id) {
-            order.mark_pending_cancel();
-            info!("Order {} marked as PendingCancel", order_link_id);
+        {
+            let mut active = self.active_orders.write().await;
+            if let Some(order) = active.get_mut(order_link_id) {
+                order.mark_pending_cancel();
+                info!("Order {} marked as PendingCancel", order_link_id);
+            }
         }
 
         let request = CancelOrderRequest {
@@ -618,7 +669,7 @@ impl OrderManager {
             Ok(_) => {
                 risk_manager.report_success();
                 info!("Order {} cancelled on exchange", order_link_id);
-                self.update_order(order_link_id, None, OrderState::Cancelled, None);
+                self.update_order(order_link_id, None, OrderState::Cancelled, None).await;
                 Ok(())
             }
             Err(e) => {
@@ -641,7 +692,7 @@ impl OrderManager {
                 if err_str.contains("110001") || err_str.contains("Order not exists") {
                     warn!("Order {} not found on exchange. Syncing local state.", order_link_id);
                     if exists_locally {
-                        self.update_order(order_link_id, None, OrderState::Cancelled, None);
+                        self.update_order(order_link_id, None, OrderState::Cancelled, None).await;
                     }
                     Ok(())
                 } else {
@@ -653,7 +704,7 @@ impl OrderManager {
 
     /// Изменение параметров активного ордера (amendment)
     pub async fn amend_active_order(
-        &mut self,
+        &self,
         rest_client: &impl BybitRestClientTrait,
         risk_manager: &mut RiskManager,
         bot_config: &BotConfig,
@@ -667,7 +718,8 @@ impl OrderManager {
         use tracing::error;
 
         // Проверяем, существует ли ордер локально
-        let order = match self.active_orders.get(order_link_id) {
+        let active = self.active_orders.read().await;
+        let order = match active.get(order_link_id) {
             Some(o) => o,
             None => bail!("Order {} not found in active_orders", order_link_id),
         };
@@ -698,6 +750,9 @@ impl OrderManager {
             trigger_price: new_trigger_price.map(|tp| tp.to_string()),
         };
 
+        // Освобождаем блокировку чтения перед отправкой запроса
+        drop(active);
+
         // Отправляем запрос через специализированный метод amend_order
         let result = rest_client.amend_order(&request).await;
 
@@ -707,7 +762,8 @@ impl OrderManager {
                 info!("Order {} successfully amended on exchange", order_link_id);
                 
                 // Обновляем локальные данные при успехе
-                if let Some(order) = self.active_orders.get_mut(order_link_id) {
+                let mut active = self.active_orders.write().await;
+                if let Some(order) = active.get_mut(order_link_id) {
                     let old_price = order.price;
                     let old_qty = order.qty;
                     let side = order.side;
@@ -780,7 +836,7 @@ impl OrderManager {
                 // 110001: Order not found (уже исполнен или отменен)
                 if err_str.contains("110001") || err_str.contains("Order not exists") {
                     warn!("Order {} not found on exchange (110001): removing from local state", order_link_id);
-                    self.update_order(order_link_id, None, OrderState::Cancelled, None);
+                    self.update_order(order_link_id, None, OrderState::Cancelled, None).await;
                     return Ok(());
                 }
                 
@@ -798,7 +854,7 @@ impl OrderManager {
 
     /// Массовая отмена всех ордеров по текущему символу
     pub async fn cancel_all_orders(
-        &mut self,
+        &self,
         rest_client: &impl BybitRestClientTrait,
         risk_manager: &mut RiskManager,
         bot_config: &BotConfig,
@@ -821,8 +877,9 @@ impl OrderManager {
             Ok(_) => {
                 risk_manager.report_success();
                 // Очистка локального реестра активных ордеров (Задача 063)
-                let count = self.active_orders.len();
-                self.active_orders.clear();
+                let mut active = self.active_orders.write().await;
+                let count = active.len();
+                active.clear();
                 info!("Successfully cancelled all {} active orders for {}", count, bot_config.symbol);
                 Ok(())
             }
@@ -914,36 +971,43 @@ impl OrderManager {
         Ok(())
     }
 
-    pub fn get_by_client_id(&self, client_oid: &str) -> Option<&Order> {
-        self.active_orders.get(client_oid)
+    pub async fn get_by_client_id(&self, client_oid: &str) -> Option<Order> {
+        let active = self.active_orders.read().await;
+        active.get(client_oid).cloned()
     }
 
-    pub fn get_order_mut(&mut self, client_oid: &str) -> Option<&mut Order> {
-        self.active_orders.get_mut(client_oid)
+    pub async fn get_order_mut(&self, client_oid: &str) -> Option<Order> {
+        let active = self.active_orders.read().await;
+        active.get(client_oid).cloned()
     }
 
-    pub fn get_by_exchange_id(&self, order_id: &str) -> Option<&Order> {
-        let client_oid = self.exchange_map.get(order_id)?;
-        self.active_orders.get(client_oid)
+    pub async fn get_by_exchange_id(&self, order_id: &str) -> Option<Order> {
+        let exchange_map = self.exchange_map.lock().await;
+        let client_oid = exchange_map.get(order_id)?;
+        let active = self.active_orders.read().await;
+        active.get(client_oid).cloned()
     }
 
-    pub fn get_active_orders(&self) -> &HashMap<String, Order> {
-        &self.active_orders
+    pub async fn get_active_orders(&self) -> HashMap<String, Order> {
+        let active = self.active_orders.read().await;
+        active.clone()
     }
 
     /// Количество "ожидающих" (pending) ордеров в смысле задачи 074:
     /// Количество "ожидающих" (pending) ордеров в смысле задачи 074:
     /// считаем только ордера, реально висящие в стакане или частично исполненные.
-    pub fn count_pending_orders(&self) -> usize {
-        self.active_orders
+    pub async fn count_pending_orders(&self) -> usize {
+        let active = self.active_orders.read().await;
+        active
             .values()
             .filter(|o| matches!(o.state, OrderState::Active | OrderState::PartiallyFilled | OrderState::PendingNew))
             .count()
     }
 
     /// Подсчет суммарного объема активных ордеров по конкретной стороне (Задача 114)
-    pub fn get_pending_size(&self, side: OrderSide) -> Decimal {
-        let sum_f64: f64 = self.active_orders.values()
+    pub async fn get_pending_size(&self, side: OrderSide) -> Decimal {
+        let active = self.active_orders.read().await;
+        let sum_f64: f64 = active.values()
             .filter(|o| o.side == side)
             .map(|o| o.qty)
             .sum();
@@ -951,63 +1015,77 @@ impl OrderManager {
     }
 
     /// Задача 232: Проверка наличия активных ордеров на покупку (Buy)
-    pub fn has_active_buy_orders(&self) -> bool {
-        self.active_orders.values().any(|o| o.side == OrderSide::Buy)
+    pub async fn has_active_buy_orders(&self) -> bool {
+        let active = self.active_orders.read().await;
+        active.values().any(|o| o.side == OrderSide::Buy)
     }
 
     /// Задача 232: Проверка наличия активных ордеров на продажу (Sell)
-    pub fn has_active_sell_orders(&self) -> bool {
-        self.active_orders.values().any(|o| o.side == OrderSide::Sell)
+    pub async fn has_active_sell_orders(&self) -> bool {
+        let active = self.active_orders.read().await;
+        active.values().any(|o| o.side == OrderSide::Sell)
     }
 
-    pub fn get_active_count(&self) -> usize {
-        self.active_orders.len()
+    pub async fn get_active_count(&self) -> usize {
+        let active = self.active_orders.read().await;
+        active.len()
     }
 
-    pub fn get_history(&self) -> &[Order] {
-        &self.history
+    pub async fn get_history(&self) -> Vec<Order> {
+        let history = self.history.lock().await;
+        history.clone()
     }
 
     /// Обработка события State Machine для ордера (Задача 136)
     /// 
     /// Применяет transition к ордеру на основе события.
-    pub fn process_order_event(&mut self, order_link_id: &str, event: OrderEvent) -> Result<()> {
-        let order = match self.active_orders.get_mut(order_link_id) {
-            Some(o) => o,
-            None => bail!("Order {} not found", order_link_id),
-        };
+    pub async fn process_order_event(&self, order_link_id: &str, event: OrderEvent) -> Result<()> {
+        let mut order_to_move: Option<Order> = None;
+        
+        {
+            let mut active = self.active_orders.write().await;
+            let order = match active.get_mut(order_link_id) {
+                Some(o) => o,
+                None => bail!("Order {} not found", order_link_id),
+            };
 
-        // Применяем transition
-        match order.transition(event) {
-            Ok(()) => {
-                info!("Order {} transitioned to {:?}", order_link_id, order.state);
-                
-                // Перемещаем в историю если терминальное состояние
-                if order.is_terminal() {
-                    self.move_to_history(order_link_id);
+            // Применяем transition
+            match order.transition(event) {
+                Ok(()) => {
+                    info!("Order {} transitioned to {:?}", order_link_id, order.state);
+                    
+                    // Перемещаем в историю если терминальное состояние
+                    if order.is_terminal() {
+                        order_to_move = active.remove(order_link_id);
+                    }
                 }
-                
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Invalid transition for order {}: {}", order_link_id, e);
-                // Не возвращаем ошибку - это может быть race condition
-                Ok(())
+                Err(e) => {
+                    warn!("Invalid transition for order {}: {}", order_link_id, e);
+                    // Не возвращаем ошибку - это может быть race condition
+                }
             }
         }
+        
+        // Перемещаем в историю после освобождения блокировки
+        if let Some(ord) = order_to_move {
+            self.move_order_to_history(ord).await;
+        }
+        
+        Ok(())
     }
 
     /// Логирует Fill событие с текущим mid_price (Задача 204)
     /// 
     /// Вызывается при получении Fill события для логирования влияния на цену
-    pub fn log_fill_with_mid_price(
-        &mut self,
+    pub async fn log_fill_with_mid_price(
+        &self,
         order_link_id: &str,
         fill_size: f64,
         mid_price_at_fill: f64,
         bot_path: &std::path::Path,
     ) -> Result<()> {
-        let order = match self.active_orders.get_mut(order_link_id) {
+        let mut active = self.active_orders.write().await;
+        let order = match active.get_mut(order_link_id) {
             Some(o) => o,
             None => bail!("Order {} not found for logging", order_link_id),
         };
@@ -1285,54 +1363,25 @@ impl OrderManager {
 
     /// Задача 233: Обработка ошибки Price Band (110010) и стабилизация цен
     /// Переводит бота в режим ожидания до нормализации рыночных условий
-    pub async fn handle_price_band_violation(
-        &mut self,
-        ob: &crate::data::orderbook::OrderBook,
-        risk_manager: &mut RiskManager,
-        config: &RiskConfig,
-    ) -> Result<()> {
-        self.is_price_shock = true;
-        risk_manager.set_price_shock(true);
-        error!("Price band violation detected. Suspending trading...");
-        
-        // Ожидание базового периода охлаждения
-        tokio::time::sleep(tokio::time::Duration::from_secs(config.price_band_cooldown_sec)).await;
-        
-        // Цикл проверки стабилизации (Spread + Mark Deviation)
-        loop {
-            let spread_bps = ob.get_spread_bps();
-            let mid_price = ob.get_mid_price();
-            let mark_price = ob.get_mark_price();
-            
-            // Расчет отклонения мида от марки
-            let mark_dev = if mark_price > 0.0 {
-                (mid_price - mark_price).abs() / mark_price
-            } else {
-                0.0
-            };
-            
-            // Проверка условий стабилизации
-            if spread_bps < config.max_spread_bps_shock && mark_dev < config.max_mark_deviation {
-                info!(
-                    "Market stabilized. Spread: {:.2} bps, Mark Deviation: {:.4}%. Resuming trading...",
-                    spread_bps, mark_dev * 100.0
-                );
-                self.is_price_shock = false;
-                risk_manager.set_price_shock(false);
-                break;
-            }
-            
-            // Логирование текущего состояния
-            debug!(
-                "Waiting for stabilization. Spread: {:.2} bps (max: {:.2}), Mark Dev: {:.4}% (max: {:.4}%)",
-                spread_bps, config.max_spread_bps_shock, mark_dev * 100.0, config.max_mark_deviation * 100.0
-            );
-            
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-        
+    /// Задача 232: Обработка события SMP (Self-Match Prevention)
+    pub async fn handle_smp_event(&self, symbol: &str) -> Result<()> {
+        warn!("[Order] Bybit SMP Triggered for {}. Cooling down...", symbol);
+        // Небольшая задержка, чтобы стакан очистился от отмененных ордеров
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         Ok(())
     }
+
+    pub async fn handle_price_band_violation(
+            &mut self,
+            _ob: &crate::data::orderbook::OrderBook,
+            risk_manager: &mut RiskManager,
+            _config: &RiskConfig,
+        ) -> Result<()> {
+            self.is_price_shock = true;
+            risk_manager.set_price_shock(true);
+            error!("Price band violation detected. Suspending trading. Stabilization will be checked on next market updates.");
+            Ok(())
+        }
 
     /// Задача 233: Получить статус режима шока
     #[inline(always)]
@@ -1733,7 +1782,7 @@ impl OrderManager {
     /// Сверяет локальное состояние active_orders с реальными данными на бирже
     /// и автоматически отменяет неучтенные (untracked) или слишком старые (stale) ордера
     pub async fn run_cleanup_routine(
-        &mut self,
+        &self, // Задача 235: Изменено с &mut self на &self для потокобезопасности
         rest_client: &impl BybitRestClientTrait,
         risk_manager: &mut RiskManager,
         bot_config: &BotConfig,
@@ -1753,84 +1802,53 @@ impl OrderManager {
         let mut orders_to_cancel = Vec::new();
         let now_ms = crate::utils::timestamp_ms();
 
-        // 2. Логика фильтрации
-        for remote_order in exchange_orders {
-            // Проверяем, отслеживается ли ордер локально
-            let is_untracked = !self.active_orders.contains_key(&remote_order.order_link_id) 
-                && !self.exchange_map.contains_key(&remote_order.order_id);
-            
-            // Проверяем возраст ордера (если есть created_time)
-            let mut is_too_old = false;
-            if let Some(created_time_str) = &remote_order.created_time {
-                if let Ok(created_ms) = created_time_str.parse::<u64>() {
-                    let age_minutes = (now_ms - created_ms) / 60_000;
-                    is_too_old = age_minutes > bot_config.max_stale_age_min;
-                }
-            }
-            
-            // Определяем, нужно ли отменять ордер
-            if is_untracked {
-                warn!(
-                    "[Cleanup] Found untracked order on exchange: {} (link_id: {})",
-                    remote_order.order_id, remote_order.order_link_id
-                );
-                orders_to_cancel.push(remote_order.order_link_id.clone());
-            } else if bot_config.auto_cancel_stale && is_too_old {
-                warn!(
-                    "[Cleanup] Found stale order: {} (link_id: {}, age > {} min)",
-                    remote_order.order_id, remote_order.order_link_id, bot_config.max_stale_age_min
-                );
-                orders_to_cancel.push(remote_order.order_link_id.clone());
-            }
-        }
-
-        // 3. Массовая отмена найденных ордеров с применением порога mass_cancel_threshold (Задача 209)
-        // Логика: если количество ордеров для отмены > mass_cancel_threshold, вызываем cancel_all_orders
-        // вместо цикла одиночных отмен для оптимизации лимитов API
-        
-        if orders_to_cancel.len() > exchange_config.mass_cancel_threshold {
-            // Используем массовую отмену для экономии лимитов API
-            warn!(
-                "[Cleanup] Found {} orders to cancel (threshold: {}). Using cancel-all instead of individual cancellations",
-                orders_to_cancel.len(),
-                exchange_config.mass_cancel_threshold
-            );
-            
-            // Вызываем cancel_all_orders для атомарной отмены всех ордеров
-            match self.cancel_all_orders(rest_client, risk_manager, bot_config, exchange_config).await {
-                Ok(_) => {
-                    info!("[Cleanup] Successfully cancelled all {} stale/untracked orders", orders_to_cancel.len());
-                }
-                Err(e) => {
-                    warn!("[Cleanup] Failed to cancel all orders: {}. Attempting individual cancellations...", e);
-                    // Fallback: отменяем ордера по одному, если массовая отмена не сработала
-                    for link_id in orders_to_cancel {
-                        warn!("[Cleanup] Cancelling stale/untracked order: {}", link_id);
-                        let _ = self.cancel_order(
-                            rest_client,
-                            risk_manager,
-                            bot_config,
-                            exchange_config,
-                            &link_id,
-                            true, // force
-                        ).await;
+        // 2. Логика фильтрации под блокировкой (согласно плану задачи 235)
+        {
+            let active = self.active_orders.read().await;
+            for remote_order in exchange_orders {
+                // Проверяем, отслеживается ли ордер локально
+                let is_untracked = !active.contains_key(&remote_order.order_link_id) 
+                    && !self.exchange_map.contains_key(&remote_order.order_id);
+                
+                // Проверяем возраст ордера (если есть created_time)
+                let mut is_too_old = false;
+                if let Some(created_time_str) = &remote_order.created_time {
+                    if let Ok(created_ms) = created_time_str.parse::<u64>() {
+                        let age_minutes = (now_ms - created_ms) / 60_000;
+                        is_too_old = age_minutes > bot_config.max_stale_age_min;
                     }
                 }
+                
+                // Определяем, нужно ли отменять ордер
+                if is_untracked {
+                    warn!(
+                        "[Cleanup] Found untracked order on exchange: {} (link_id: {})",
+                        remote_order.order_id, remote_order.order_link_id
+                    );
+                    orders_to_cancel.push(remote_order.order_link_id.clone());
+                } else if bot_config.auto_cancel_stale && is_too_old {
+                    warn!(
+                        "[Cleanup] Found stale order: {} (link_id: {}, age > {} min)",
+                        remote_order.order_id, remote_order.order_link_id, bot_config.max_stale_age_min
+                    );
+                    orders_to_cancel.push(remote_order.order_link_id.clone());
+                }
             }
-        } else {
-            // Используем одиночные отмены для небольшого количества ордеров
-            for link_id in orders_to_cancel {
-                warn!("[Cleanup] Cancelling stale/untracked order: {}", link_id);
-                // Используем force=true, так как ордер может не быть в active_orders
-                let _ = self.cancel_order(
-                    rest_client,
-                    risk_manager,
-                    bot_config,
-                    exchange_config,
-                    &link_id,
-                    true, // force
-                ).await;
-            }
+        } // Блокировка освобождается здесь
+
+        // 3. Отмена найденных ордеров по одному (согласно плану задачи 235)
+        // Не используем cancel_all_orders, так как она отменяет ВСЕ ордера, включая легитимные
+        for link_id in orders_to_cancel {
+            warn!("[Cleanup] Cancelling stale/untracked order: {}", link_id);
+            // Используем force=true, так как ордер может не быть в active_orders
+            let _ = self.cancel_order(
+                rest_client,
+                risk_manager,
+                bot_config,
+                exchange_config,
+                &link_id,
+                true, // force
+            ).await;
         }
         
         Ok(())

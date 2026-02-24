@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass
 from .layers import LOBPatching
 
@@ -73,7 +74,7 @@ def get_activation_for_transformer(activation_type: str):
     else:
         raise ValueError(f"Unsupported activation type: {activation_type}")
 
-def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3):
+def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3, **kwargs):
     """
     Вычисляет штраф за кривизну (Curvature Penalty) через конечные разности.
     
@@ -99,7 +100,7 @@ def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3
     
     # Инференс с возмущенными входами
     perturbed_inputs = inputs + epsilon * v
-    perturbed_outputs = model(perturbed_inputs)
+    perturbed_outputs = model(perturbed_inputs, **kwargs)
     
     # Обрабатываем случай когда модель возвращает кортеж (logits, vol)
     if isinstance(perturbed_outputs, tuple):
@@ -132,6 +133,119 @@ def apply_input_noise(x, std=0.01):
     """
     noise = torch.randn_like(x) * std
     return x + noise
+
+class CustomTransformerEncoderLayer(nn.Module):
+    """
+    Кастомный Transformer Encoder Layer с явным вызовом scaled_dot_product_attention.
+    Поддерживает как Multi-Head Attention (MHA), так и Grouped Query Attention (GQA).
+    
+    Задача 237: Требование А.2 - использование F.scaled_dot_product_attention
+    """
+    def __init__(self, d_model, num_heads, dim_feedforward, dropout=0.1, activation='gelu_exact', use_gqa=False):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.use_gqa = use_gqa
+        
+        # GQA: уменьшаем количество KV heads
+        if use_gqa:
+            self.num_kv_heads = max(1, num_heads // 4)  # Группировка 4:1
+        else:
+            self.num_kv_heads = num_heads
+        
+        # Проекции Q, K, V
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, self.num_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, self.num_kv_heads * self.head_dim)
+        self.out_proj = nn.Linear(d_model, d_model)
+        
+        # Feedforward Network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        # Dropout и LayerNorm
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Активация
+        self.activation = get_activation(activation)
+        
+    def forward(self, x, src_key_padding_mask=None):
+        """
+        x: (batch, seq_len, d_model)
+        src_key_padding_mask: (batch, seq_len) - True для padding позиций
+        """
+        # Self-Attention с residual connection
+        x = x + self._sa_block(x, src_key_padding_mask)
+        
+        # Feedforward с residual connection
+        x = x + self._ff_block(x)
+        
+        return x
+    
+    def _sa_block(self, x, attn_mask=None):
+        """Self-Attention block с явным вызовом scaled_dot_product_attention"""
+        batch_size, seq_len, _ = x.shape
+        
+        # Проецируем в Q, K, V
+        q = self.q_proj(x)  # (batch, seq_len, d_model)
+        k = self.k_proj(x)  # (batch, seq_len, num_kv_heads * head_dim)
+        v = self.v_proj(x)  # (batch, seq_len, num_kv_heads * head_dim)
+        
+        # Reshape для multi-head attention
+        # Q: (batch, seq_len, num_heads, head_dim) -> (batch, num_heads, seq_len, head_dim)
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # K, V: (batch, seq_len, num_kv_heads, head_dim) -> (batch, num_kv_heads, seq_len, head_dim)
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        
+        # GQA: расширяем KV heads для каждой группы Query heads
+        if self.use_gqa and self.num_kv_heads < self.num_heads:
+            # Повторяем каждый KV head для группы Query heads
+            # (batch, num_kv_heads, seq_len, head_dim) -> (batch, num_heads, seq_len, head_dim)
+            k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+            v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+        
+        # Задача 237 А.2: Явный вызов scaled_dot_product_attention
+        # Это гарантирует использование Flash Attention на поддерживаемом железе
+        
+        # Обработка маски для SDPA
+        # LiTModel передает маску где True=padding (игнорировать)
+        # SDPA ожидает маску где True=valid (учитывать)
+        # Поэтому инвертируем и добавляем размерности для broadcasting
+        if attn_mask is not None:
+            # Инвертируем: True -> False, False -> True
+            # Добавляем размерности: (B, S) -> (B, 1, 1, S) для broadcasting
+            attn_mask = (~attn_mask).unsqueeze(1).unsqueeze(2)
+        
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout.p if self.training else 0.0
+        )
+        
+        # Reshape обратно: (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, d_model)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        
+        # Output projection
+        attn_output = self.out_proj(attn_output)
+        attn_output = self.dropout1(attn_output)
+        
+        # LayerNorm
+        return self.norm1(attn_output)
+    
+    def _ff_block(self, x):
+        """Feedforward block"""
+        x2 = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x2 = self.dropout2(x2)
+        return self.norm2(x2)
 
 class LiTModel(nn.Module):
     """
@@ -213,24 +327,19 @@ class LiTModel(nn.Module):
             self.horizon_embedding = None
         
         # 4. Transformer Encoder
-        # Задача 237: Реализация GQA (Grouped Query Attention) если use_gqa=True
-        if self.use_gqa:
-            # GQA: уменьшаем количество Key/Value голов для эффективности
-            # Пример: 8 Query голов, но только 2 KV голов (группировка 4:1)
-            self.num_kv_groups = max(1, nhead // 4)
-            self.kv_projection = nn.Linear(d_model, d_model)
-        
-        # Используем стандартный MultiheadAttention (MHA)
-        # В PyTorch 2.0+ автоматически использует scaled_dot_product_attention (Flash Attention)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=nhead, 
-            dim_feedforward=d_model * 4,
-            batch_first=True, 
-            dropout=dropout, 
-            activation=get_activation_for_transformer(activation)
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # Задача 237: Кастомная реализация с явным вызовом scaled_dot_product_attention
+        # Используем CustomTransformerEncoderLayer для поддержки GQA и Flash Attention
+        self.transformer_layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(
+                d_model=d_model,
+                num_heads=nhead,
+                dim_feedforward=d_model * 4,
+                dropout=dropout,
+                activation=activation,
+                use_gqa=use_gqa
+            )
+            for _ in range(num_layers)
+        ])
 
         # 5. Multi-Task Heads
         self.norm = nn.LayerNorm(d_model)
@@ -294,7 +403,8 @@ class LiTModel(nn.Module):
             num_regimes=kwargs.get('num_regimes', config.num_regimes),
             regime_embedding_dim=kwargs.get('regime_embedding_dim', config.regime_embedding_dim),
             num_horizons=kwargs.get('num_horizons', config.num_horizons),
-            use_horizon_embedding=kwargs.get('use_horizon_embedding', config.use_horizon_embedding)
+            use_horizon_embedding=kwargs.get('use_horizon_embedding', config.use_horizon_embedding),
+            use_gqa=kwargs.get('use_gqa', config.use_gqa)
         )
 
     def forward(self, x, mask=None, regime_id=None):
@@ -344,7 +454,9 @@ class LiTModel(nn.Module):
         
         # Шаг 5: Transformer Encoder с поддержкой src_key_padding_mask
         # src_key_padding_mask: True для позиций, которые нужно игнорировать
-        x_trans = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+        x_trans = x
+        for layer in self.transformer_layers:
+            x_trans = layer(x_trans, src_key_padding_mask=src_key_padding_mask)
         
         # Шаг 6: Global Average Pooling по патчам (исключая CLS токен) согласно плану 130
         pooled = x_trans[:, 1:, :].mean(dim=1)

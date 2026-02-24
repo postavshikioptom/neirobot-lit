@@ -891,6 +891,7 @@ impl BybitRestClient {
         limit: i32,
     ) -> Result<crate::data::types::OrderBookUpdateOwned> {
         let endpoint = "/v5/market/orderbook";
+        self.wait_for_limiter(endpoint).await;
         let params = format!("category={}&symbol={}&limit={}", category, symbol, limit);
         
         let url = format!("{}{}?{}", self.base_url, endpoint, params);

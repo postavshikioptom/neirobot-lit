@@ -2318,26 +2318,23 @@ impl ExecutionEngine {
         // 9. Перед выставлением нового ордера отменяем все текущие активные (Задача 148)
         // Это предотвращает накопление ордеров при быстрой смене сигналов.
         // Задача 232: Локальная проверка SMP (Self-Match Prevention)
-        if self.bot_config.local_smp_enabled {
+        let mut smp_triggered = false;
+        if self.bot_config.trading.local_smp_enabled {
             let has_opposite_orders = match side {
                 OrderSide::Buy => self.order_manager.has_active_sell_orders(),
                 OrderSide::Sell => self.order_manager.has_active_buy_orders(),
             };
-            
             if has_opposite_orders {
-                info!(
-                    "[{}] Local SMP: Cancelling opposite {:?} orders before {:?}",
-                    self.symbol,
-                    match side {
-                        OrderSide::Buy => "Sell",
-                        OrderSide::Sell => "Buy",
-                    },
-                    side
-                );
-                let _ = self.order_manager.cancel_all_orders(rest_client, &mut self.risk_manager, &self.bot_config, exchange_config).await;
+                info!("[{}] Local SMP: Cancelling opposite orders before {:?}", self.symbol, side);
+                smp_triggered = true;
             }
-        } else if active_orders > 0 {
-            debug!("[{}] Cancelling {} active orders before placing new trade", self.symbol, active_orders);
+        }
+
+        // Если сработал SMP ИЛИ просто есть активные ордера (Задача 148), отменяем всё
+        if smp_triggered || active_orders > 0 {
+            if !smp_triggered {
+                debug!("[{}] Cancelling {} active orders before new trade", self.symbol, active_orders);
+            }
             let _ = self.order_manager.cancel_all_orders(rest_client, &mut self.risk_manager, &self.bot_config, exchange_config).await;
         }
 
@@ -2429,7 +2426,7 @@ impl ExecutionEngine {
         };
         
         // 10. Отправка ордера на биржу
-        if should_use_iceberg {
+        let result = if should_use_iceberg {
             let total_size = slice_qty.to_f64().unwrap_or(0.0);
             let display_ratio = (level_volume / total_size).clamp(0.1, 0.3);
             
@@ -2451,7 +2448,7 @@ impl ExecutionEngine {
                 use_post_only,
                 false, // reduce_only = false для открытия позиции
                 mid_price,
-            ).await?;
+            ).await
         } else {
             self.order_manager.place_limit_order(
                 rest_client,
@@ -2468,7 +2465,16 @@ impl ExecutionEngine {
                 None, // best_bid - не используется для обычных входов
                 None, // best_ask - не используется для обычных входов
                 None, // position_qty - не используется для обычных входов
-            ).await?;
+            ).await
+        };
+
+        if let Err(e) = result {
+            // Задача 232: Обработка "мягкой" ошибки SMP (Self-Match Prevention)
+            if e.to_string() == "SMP_TRIGGERED" {
+                debug!("[{}] Entry skipped due to SMP cooling down", self.symbol);
+                return Ok(());
+            }
+            return Err(e);
         }
 
         // Сохраняем состояние после выставления ордера

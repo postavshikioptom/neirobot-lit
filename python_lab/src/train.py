@@ -295,7 +295,8 @@ class LiTModule(pl.LightningModule):
                 self.model, 
                 x, 
                 logits, 
-                lambda_=self.curvature_lambda
+                lambda_=self.curvature_lambda,
+                regime_id=regime_id  # Передача текущего режима
             )
             # Логируем reg_loss для мониторинга
             self.log("train_loss_reg", reg_loss, on_step=False, on_epoch=True)
@@ -1160,7 +1161,7 @@ def train():
     parser.add_argument("--trade_noise_filter_pct", type=float, default=0.05, help="Noise filter percentage (trades smaller than this % of median size are excluded)")
     
     # Параметры Curvature Regularization (Задача 238)
-    parser.add_argument("--use_curvature_reg", action="store_true", default=True, help="Enable curvature regularization penalty")
+    parser.add_argument("--use_curvature_reg", action=argparse.BooleanOptionalAction, default=True, help="Enable/disable curvature regularization penalty")
     parser.add_argument("--curvature_lambda", type=float, default=1e-4, help="Curvature penalty coefficient (recommended: 1e-4 to 1e-3)")
     parser.add_argument("--input_noise_std", type=float, default=0.005, help="Standard deviation for input noise injection during training")
     

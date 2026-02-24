@@ -313,6 +313,15 @@ impl RiskManager {
         }
     }
 
+    /// Задача 233: Проверка возможности торговли с учетом ценового шока
+    pub fn is_eligible_to_trade(&self) -> bool {
+        if self.is_blocked || self.is_price_shock {
+            return false;
+        }
+        true
+    }
+
+
     /// Проверяет системные ресурсы и снижает риски при перегрузке (Задача 225)
     pub fn check_system_resources(&mut self, metrics: &crate::monitoring::resource_profiler::SystemMetricsUpdate, bot_config: &crate::config::types::BotConfig) {
         // Проверяем превышение CPU

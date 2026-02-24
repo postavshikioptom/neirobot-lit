@@ -100,6 +100,11 @@ fn default_stats_window_ms() -> i64 { 60000 } // 1 минута
 fn default_stats_max_trades() -> usize { 5000 } // Лимит сделок в очереди
 fn default_desync_tolerance() -> f64 { 0.01 } // 1%
 
+// --- Функции default для trade imbalance (задача 236) ---
+fn default_trade_imb_windows() -> Vec<String> { vec!["1s".to_string(), "5s".to_string(), "15s".to_string(), "60s".to_string()] }
+fn default_trade_imb_agg() -> String { "vol".to_string() }
+fn default_trade_noise_filter_pct() -> f64 { 0.05 }
+
 // --- Функции default для URL и конфигурации обмена ---
 fn default_bybit_category() -> String { "linear".to_string() }
 fn default_bybit_api_key_path() -> String { "api_key".to_string() }
@@ -318,7 +323,7 @@ fn default_rate_limit_threshold_pct() -> f64 { 0.15 } // 15% порог вклю
 fn default_backoff_base_ms() -> u64 { 250 }
 fn default_cleanup_interval_min() -> u64 { 60 }
 fn default_max_stale_age_min() -> u64 { 120 }
-fn default_auto_cancel_stale() -> bool { false } // 250 мс базовая задержка
+fn default_auto_cancel_stale() -> bool { false } // Автоматическая отмена старых ордеров
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TSLMode {
@@ -1115,6 +1120,29 @@ impl Default for SorConfig {
 
 // --- Конфигурация бота (Per-Symbol) ---
 
+// --- Задача 232: Параметры предотвращения самосделок (SMP) ---
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TradingConfig {
+    /// Тип предотвращения самосделок (SMP) на стороне биржи (задача 232)
+    /// "None", "CancelMaker", "CancelTaker", "CancelBoth"
+    #[serde(default = "default_smp_type")]
+    pub smp_type: String,
+    
+    /// Включить локальную проверку противоположных ордеров перед выставлением (задача 232)
+    #[serde(default = "default_local_smp_enabled")]
+    pub local_smp_enabled: bool,
+}
+
+impl Default for TradingConfig {
+    fn default() -> Self {
+        Self {
+            smp_type: default_smp_type(),
+            local_smp_enabled: default_local_smp_enabled(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct BotConfig {
@@ -1408,13 +1436,9 @@ pub struct BotConfig {
     /// Конфигурация изоляции ресурсов процесса (задача 230)
     #[serde(default)]
     pub system: SystemConfig,
-    /// Тип предотвращения самосделок (SMP) на стороне биржи (задача 232)
-    /// "None", "CancelMaker", "CancelTaker", "CancelBoth"
-    #[serde(default = "default_smp_type")]
-    pub smp_type: String,
-    /// Включить локальную проверку противоположных ордеров перед выставлением (задача 232)
-    #[serde(default = "default_local_smp_enabled")]
-    pub local_smp_enabled: bool,
+    /// Задача 232: Параметры предотвращения самосделок (SMP)
+    #[serde(default)]
+    pub trading: TradingConfig,
     /// Порог включения превентивного замедления в процентах (задача 234)
     #[serde(default = "default_rate_limit_threshold_pct")]
     pub rate_limit_threshold_pct: f64,
@@ -1430,6 +1454,15 @@ pub struct BotConfig {
     /// Разрешить ли автоматическую отмену старых, но известных ордеров (задача 235)
     #[serde(default = "default_auto_cancel_stale")]
     pub auto_cancel_stale: bool,
+    /// Временные окна для расчета trade imbalance (задача 236)
+    #[serde(default = "default_trade_imb_windows")]
+    pub trade_imb_windows: Vec<String>,
+    /// Тип агрегации для trade imbalance: "vol" или "count" (задача 236)
+    #[serde(default = "default_trade_imb_agg")]
+    pub trade_imb_agg: String,
+    /// Порог фильтрации шума для сделок в процентах от медианы (задача 236)
+    #[serde(default = "default_trade_noise_filter_pct")]
+    pub trade_noise_filter_pct: f64,
 }
 
 impl Default for BotConfig {
@@ -1567,13 +1600,15 @@ impl Default for BotConfig {
             enable_model_hotswap: default_enable_model_hotswap(),
             resource_thresholds: ResourceThresholdsConfig::default(),
             system: SystemConfig::default(),
-            smp_type: default_smp_type(),
-            local_smp_enabled: default_local_smp_enabled(),
+            trading: TradingConfig::default(),
             rate_limit_threshold_pct: default_rate_limit_threshold_pct(),
             backoff_base_ms: default_backoff_base_ms(),
             cleanup_interval_min: default_cleanup_interval_min(),
             max_stale_age_min: default_max_stale_age_min(),
             auto_cancel_stale: default_auto_cancel_stale(),
+            trade_imb_windows: default_trade_imb_windows(),
+            trade_imb_agg: default_trade_imb_agg(),
+            trade_noise_filter_pct: default_trade_noise_filter_pct(),
         }
     }
 }

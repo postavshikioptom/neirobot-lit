@@ -44,7 +44,7 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.lit_model import LiTModel
-from src.dataset import LOBPyTorchDataset, LOBDataset
+from src.dataset import LOBPyTorchDataset, LOBDataLoader
 from src.features import FeatureEngineer
 from src.labels import Labeler
 from src.normalization import Normalizer
@@ -71,7 +71,7 @@ def prepare_data(symbol: str, seq_len: int = 100):
     data_path = base_path / "bots" / symbol / "data" / "raw"
     
     # 1. Загрузка сырых данных
-    loader = LOBDataset(str(data_path), symbol)
+    loader = LOBDataLoader(str(data_path), symbol)
     df = loader.load_data()
     
     # 2. Feature Engineering
@@ -88,6 +88,7 @@ def prepare_data(symbol: str, seq_len: int = 100):
     df_norm = normalizer.transform(df_feat)
     
     # 5. Создание Dataset
+    past_returns_lags = [10, 50, 100]
     n_past_returns = len(past_returns_lags)
     full_dataset = LOBPyTorchDataset(
         df_norm,
@@ -501,8 +502,8 @@ def main():
     best_config = {
         "embed_dim": study.best_params["embed_dim"],
         "num_heads": study.best_params["num_heads"],
-        "num_layers": study.best_params["num_layers"],
-        "dropout": study.best_params["dropout"],
+        "num_layers": 2,
+        "dropout": 0.1,
         "validation_mcc": best_mcc,
         "inference_latency_ms": best_latency,
         "combined_score": study.best_value,

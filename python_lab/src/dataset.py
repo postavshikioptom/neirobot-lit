@@ -328,7 +328,7 @@ def compute_trade_imbalance(
         pl.col("signed_val").abs().alias("abs_val")
     )
     
-    # 3. Преобразуем timestamp в datetime для group_by_dynamic
+    # 3. Преобразуем timestamp в datetime для rolling_sum_by
     # timestamp в trades - это миллисекунды (i64), преобразуем в datetime
     df_trades = df_trades.with_columns(
         pl.from_epoch(pl.col("timestamp"), time_unit="ms").alias("datetime")
@@ -336,15 +336,11 @@ def compute_trade_imbalance(
     
     # 4. Для каждого окна вычисляем rolling imbalance
     for window in windows:
-        # Агрегируем сделки по временным окнам
-        df_agg = df_trades.group_by_dynamic(
-            "datetime",
-            every=window,
-            period=window,
-            closed="right"
-        ).agg([
-            pl.col("signed_val").sum().alias("sum_signed"),
-            pl.col("abs_val").sum().alias("sum_abs")
+        # Используем rolling_sum_by для устранения lookahead bias
+        # closed='right' означает, что окно включает текущую точку и смотрит назад
+        df_agg = df_trades.with_columns([
+            pl.col("signed_val").rolling_sum_by("datetime", window_size=window, closed="right").alias("sum_signed"),
+            pl.col("abs_val").rolling_sum_by("datetime", window_size=window, closed="right").alias("sum_abs")
         ])
         
         # Вычисляем imbalance: sum(signed) / (sum(abs) + 1e-6)
