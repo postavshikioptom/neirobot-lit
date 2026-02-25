@@ -18,9 +18,9 @@ struct Args {
     /// Символ для выгрузки (позиционный аргумент, например: BTCUSDT)
     symbol: String,
 
-    /// Продолжительность работы в днях
-    #[arg(short, long, default_value_t = 1)]
-    days: u32,
+    /// Продолжительность работы в часах (поддерживается дробная часть, например: 0.5)
+    #[arg(short, long, default_value_t = 1.0)]
+    hours: f32,
 
     /// Путь к конфигу бота (по умолчанию: bots/SYMBOL/config.toml)
     #[arg(short, long)]
@@ -44,32 +44,35 @@ async fn main() -> Result<()> {
         PathBuf::from("bots").join(&args.symbol).join("config.toml")
     });
     
-    let output_dir = args.output_dir.unwrap_or_else(|| {
-        PathBuf::from("bots").join(&args.symbol).join("data").join("raw")
-    });
-
     // 2. Загружаем полную конфигурацию (мердж global + exchange + bot)
     let full_config = load_full_config(Path::new("."), &config_path)?;
 
     // Формируем путь к папке бота
     let bot_path = PathBuf::from("bots").join(&args.symbol);
 
-    // Загружаем секреты для маскирования (если доступны)
+    // Загружаем секреты для маскирования
     let secrets = vec![
         std::env::var("BYBIT_API_KEY").unwrap_or_default(),
         std::env::var("BYBIT_API_SECRET").unwrap_or_default(),
     ];
 
-    // 3. Инициализируем изолированный логгер для конкретного символа с маскированием секретов
+    // 3. Инициализируем изолированный логгер
     let _log_guard = init_logger(&full_config.logging, &bot_path, secrets)?;
 
     info!(
-        "Starting dumper for {}. Duration: {} days. Output: {:?}", 
-        args.symbol, args.days, output_dir
+        "Starting dumper for {}. Duration: {} hours.", 
+        args.symbol, args.hours
     );
 
-    // TODO: В задачах 017-020 здесь появится инициализация WebSocket 
-    // и цикл записи данных в Parquet.
+    // 4. Запуск пайплайна сбора данных с ограничением по времени
+    let duration = std::time::Duration::from_secs_f32(args.hours * 3600.0);
+    
+    match tokio::time::timeout(duration, neirobot_lit::data::snapshot::run_snapshot_pipeline(full_config)).await {
+        Ok(res) => res?,
+        Err(_) => {
+            info!("Duration reached. Stopping dumper for {}.", args.symbol);
+        }
+    }
 
     Ok(())
 }

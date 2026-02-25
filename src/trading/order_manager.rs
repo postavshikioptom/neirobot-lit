@@ -1179,7 +1179,8 @@ impl OrderManager {
         base_offset_ticks: u32,
         max_rejects: u32,
     ) -> Option<u32> {
-        if let Some(order) = self.active_orders.get_mut(order_link_id) {
+        let mut orders = self.active_orders.blocking_write();
+        if let Some(order) = orders.get_mut(order_link_id) {
             order.post_only_reject_count += 1;
             
             if order.post_only_reject_count >= max_rejects {
@@ -1217,7 +1218,8 @@ impl OrderManager {
         let mut to_repeg = Vec::new();
         let threshold = tick_size * Decimal::from(repeg_threshold_ticks);
         
-        for (link_id, order) in &self.active_orders {
+        let orders = self.active_orders.blocking_read();
+        for (link_id, order) in orders.iter() {
             // Проверяем только Post-Only ордера в активном состоянии
             if !order.is_post_only {
                 continue;
@@ -1264,7 +1266,8 @@ impl OrderManager {
         let now = timestamp_ms();
         let mut timed_out = Vec::new();
         
-        for (link_id, order) in &self.active_orders {
+        let orders = self.active_orders.blocking_read();
+        for (link_id, order) in orders.iter() {
             // Проверяем только Post-Only ордера
             if !order.is_post_only {
                 continue;
@@ -1593,7 +1596,6 @@ impl OrderManager {
         
         Ok(())
     }
-}
 
     /// Задача 207: Обработка Iceberg Refill
     /// Проверяет, нужно ли выставить следующее "плечо" айсберга после исполнения текущего
@@ -1853,3 +1855,4 @@ impl OrderManager {
         
         Ok(())
     }
+}

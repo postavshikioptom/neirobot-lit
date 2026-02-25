@@ -3,7 +3,7 @@ use crate::trading::order_manager::OrderManager;
 use crate::trading::position_manager::{PositionManager, Position};
 use crate::trading::rest_client::{BybitRestClient, BybitRestClientTrait};
 use crate::risk::risk_manager::RiskManager;
-use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest, ExecutionAction};
+use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest, ExecutionAction, BybitOrderResult};
 use crate::trading::types::BotState;
 use crate::config::types::{BotConfig, ExchangeConfig};
 use crate::utils::trade_logger::TradeRecord;
@@ -781,7 +781,7 @@ impl ExecutionEngine {
         let position = self.position_manager.get_position();
         let pnl = self.position_manager.get_pnl();
         let active_order_ids: Vec<String> = self.order_manager
-            .get_active_orders()
+            .get_active_orders().await
             .values()
             .map(|o| o.order_link_id.clone())
             .collect();
@@ -1283,16 +1283,21 @@ impl ExecutionEngine {
             // Создаем рыночный ордер на закрытие
             let close_request = CreateOrderRequest {
                 symbol: self.symbol.clone(),
-                side: close_side,
+                category: exchange_config.bybit.category.clone(),
+                side: close_side.to_string(),
                 order_type: "Market".to_string(),
-                qty: close_qty,
-                price: Some(close_price),
-                time_in_force: Some("IOC".to_string()),
-                reduce_only: true,
-                post_only: false,
+                qty: close_qty.to_string(),
+                price: Some(close_price.to_string()),
+                time_in_force: "IOC".to_string(),
+                order_link_id: format!("TSL_CLOSE_{}", chrono::Utc::now().timestamp_millis()),
+                position_idx: self.bot_config.position_idx,
+                reduce_only: Some(true),
+                trailing_stop: None,
+                active_price: None,
+                smp_type: None,
             };
 
-            match rest_client.create_order(&close_request, exchange_config).await {
+            match rest_client.post::<CreateOrderRequest, BybitOrderResult>("/v5/order/create", &close_request).await {
                 Ok(order_id) => {
                     info!("[{}] TSL close order created: {}", self.symbol, order_id);
                 }
@@ -1547,12 +1552,12 @@ impl ExecutionEngine {
         self.risk_manager.check_and_reset_margin_penalty(&self.bot_config.risk);
         
         // Задача 169: Сохраняем timestamp источника сигнала для проверки свежести
-        self.last_signal_timestamp_ms = output.source_timestamp_ms;
+        self.last_signal_timestamp_ms = output.signal.source_timestamp_ms;
         
         // Задача 169: Проверка синхронизации времени с биржей (Clock Skew Check)
         // Это критично для корректного расчета возраста сигнала
         match crate::utils::helpers::check_clock_skew(
-            &exchange_config.rest_api_url,
+            &exchange_config.rest.base_url,
             self.bot_config.max_clock_skew_ms,
         ).await {
             Ok(delta) => {
@@ -1770,7 +1775,7 @@ impl ExecutionEngine {
             let elapsed = now_ms - self.last_flip_ts;
             if elapsed < self.bot_config.min_flip_interval_ms as i64 {
                 let symbol = self.symbol.as_str();
-                let active_ids: Vec<String> = self.order_manager.get_active_orders().keys().cloned().collect();
+                let active_ids: Vec<String> = self.order_manager.get_active_orders().await.keys().cloned().collect();
                 warn!(
                     "[{}] SIGNAL OSCILLATION: Suppressing flip {} -> {} (elapsed {}ms < {}ms). Active orders: {:?}",
                     symbol,
@@ -2139,7 +2144,7 @@ impl ExecutionEngine {
 
         // Проверка лимита номинального риска (Задача 114)
         let current_pos = position.qty;
-        let pending_same_side = self.order_manager.get_pending_size(side);
+        let pending_same_side = self.order_manager.get_pending_size(side).await;
         
         if !self.risk_manager.check_notional_limit(
             current_pos, 
@@ -2193,7 +2198,7 @@ impl ExecutionEngine {
         }
 
         // Количество реально "ожидающих" ордеров (New / PartiallyFilled / Untracked)
-        let active_orders = self.order_manager.count_pending_orders();
+        let active_orders = self.order_manager.count_pending_orders().await;
 
         // Риск-гейт по количеству открытых ордеров (Задача 074).
         // ВАЖНО: не блокируем сделки, которые уменьшают или закрывают позицию (Reduce-Only).
@@ -2321,8 +2326,8 @@ impl ExecutionEngine {
         let mut smp_triggered = false;
         if self.bot_config.trading.local_smp_enabled {
             let has_opposite_orders = match side {
-                OrderSide::Buy => self.order_manager.has_active_sell_orders(),
-                OrderSide::Sell => self.order_manager.has_active_buy_orders(),
+                OrderSide::Buy => self.order_manager.has_active_sell_orders().await,
+                OrderSide::Sell => self.order_manager.has_active_buy_orders().await,
             };
             if has_opposite_orders {
                 info!("[{}] Local SMP: Cancelling opposite orders before {:?}", self.symbol, side);
@@ -2499,11 +2504,11 @@ impl ExecutionEngine {
         let lot_filter = crate::trading::types::LotFilter::from_market_info(&self.market_info);
         
         // 1. Извлекаем данные до обновления (чтобы знать side и qty)
-        let (side, qty) = if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
+        let (side, qty) = if let Some(order) = self.order_manager.get_by_client_id(&order_link_id).await {
             (order.side, order.qty)
         } else {
             // Если ордера нет в активных, пробуем обновить состояние (он мог быть в истории)
-            if let Some((fill_event, realized_pnl, _position_closed, _entry_price)) = self.order_manager.update_order_state(&order_link_id, update, &mut self.position_manager, &lot_filter, &mut self.risk_manager)? {
+            if let Some((fill_event, realized_pnl, _position_closed, _entry_price)) = self.order_manager.update_order_state(&order_link_id, update, &mut self.position_manager, &lot_filter, &mut self.risk_manager).await? {
                 self.log_trade(fill_event, realized_pnl);
             }
             return Ok(());
@@ -2512,7 +2517,7 @@ impl ExecutionEngine {
         let is_filled = update.status == OrderStatus::Filled;
 
         // 2. Обновляем состояние в OrderManager
-        if let Some((fill_event, realized_pnl, position_closed, entry_price)) = self.order_manager.update_order_state(&order_link_id, update, &mut self.position_manager, &lot_filter, &mut self.risk_manager)? {
+        if let Some((fill_event, realized_pnl, position_closed, entry_price)) = self.order_manager.update_order_state(&order_link_id, update, &mut self.position_manager, &lot_filter, &mut self.risk_manager).await? {
             // Задача 202: Добавляем ордер в очередь для захвата цены через 100мс
             if is_filled {
                 let fill_time_ms = crate::utils::timestamp_ms();
@@ -2521,8 +2526,8 @@ impl ExecutionEngine {
             }
             
             // Задача 202: Логирование метрик качества исполнения
-            if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
-                if let Some(log) = self.order_manager.create_execution_quality_log(order, &self.bot_config.model_path) {
+            if let Some(order) = self.order_manager.get_by_client_id(&order_link_id).await {
+                if let Some(log) = self.order_manager.create_execution_quality_log(&order, &self.bot_config.model_path) {
                     // Отправляем лог в фоновый worker через канал
                     let _ = self.execution_quality_tx.send(log).await;
                 }
@@ -2538,7 +2543,7 @@ impl ExecutionEngine {
                     fill_event.exec_qty.to_f64().unwrap_or(0.0),
                     mid_price_f64,
                     &self.bot_config.model_path,
-                ) {
+                ).await {
                     warn!("[{}] Failed to log market impact for order {}: {}", self.symbol, order_link_id, e);
                 }
             }
@@ -2599,7 +2604,7 @@ impl ExecutionEngine {
             self.log_trade(fill_event.clone(), realized_pnl);
             
             // Задача 167: Активация Exchange-side TSL при первом исполнении ордера открытия
-            if let Some(order) = self.order_manager.get_order_mut(&order_link_id) {
+            if let Some(order) = self.order_manager.get_order_mut(&order_link_id).await {
                 if order.tsl_trailing_stop.is_some() {
                     let req = crate::trading::types::TradingStopRequest {
                         category: exchange_config.bybit.category.clone(),
@@ -2649,7 +2654,7 @@ impl ExecutionEngine {
                 
                 // Проверяем, является ли это Iceberg-ордером
                 let is_iceberg = {
-                    if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
+                    if let Some(order) = self.order_manager.get_by_client_id(&order_link_id).await {
                         order.iceberg_total_size.is_some()
                     } else {
                         false
@@ -2658,15 +2663,16 @@ impl ExecutionEngine {
                 
                 if is_iceberg {
                     // Обновляем iceberg_filled_total перед проверкой refill
-                    if let Some(order_mut) = self.order_manager.get_order_mut(&order_link_id) {
+                    if let Some(order_mut) = self.order_manager.get_order_mut(&order_link_id).await {
                         order_mut.iceberg_filled_total += order_mut.executed_qty;
                     }
                     
                     // Получаем ордер для передачи в check_iceberg_refill
-                    if let Some(order) = self.order_manager.get_by_client_id(&order_link_id) {
+                    if let Some(order) = self.order_manager.get_by_client_id(&order_link_id).await {
+                        let order_clone = order.clone();
                         // Проверяем необходимость refill
                         match self.order_manager.check_iceberg_refill(
-                            order,
+                            &order_clone,
                             mid_price_f64,
                             &self.bot_config.sor,
                             rest_client,
@@ -2736,7 +2742,7 @@ impl ExecutionEngine {
                                 // Проверка риск-гейта для следующего слайса
                                 let position = self.position_manager.get_position();
                                 let current_pnl = position.realized_pnl + position.unrealized_pnl;
-                                let active_orders = self.order_manager.count_pending_orders();
+                                let active_orders = self.order_manager.count_pending_orders().await;
                                 
                                 match self.risk_manager.check_order_gate(
                                     slice_side,
@@ -2853,7 +2859,7 @@ impl ExecutionEngine {
         }
 
         // 3. Задача 164: Если ордер был отклонен по Post-Only, обрабатываем с экспоненциальным увеличением offset
-        let is_post_only_rejected = self.order_manager.get_history().iter()
+        let is_post_only_rejected = self.order_manager.get_history().await.iter()
             .any(|o| o.link_id == order_link_id && matches!(o.state, OrderState::Rejected(ref r) if r.contains("PostOnly")));
 
         if is_post_only_rejected {
@@ -2867,7 +2873,7 @@ impl ExecutionEngine {
                     self.symbol, order_link_id, new_offset_ticks);
 
                 // Перед повторной отправкой проверяем лимит открытых ордеров (Задача 074)
-                let pending = self.order_manager.count_pending_orders();
+                let pending = self.order_manager.count_pending_orders().await;
                 if !self.risk_manager.check_orders_limit_gate(pending) {
                     warn!(
                         "[{}] Max Open Orders Gate closed (pending: {}). Skipping Post-Only retry for {}",
@@ -2922,8 +2928,8 @@ impl ExecutionEngine {
                 let _ = self.save_current_state();
 
                 // Копируем счетчик режектов в новый ордер
-                if let Some(old_order) = self.order_manager.get_history().iter().find(|o| o.link_id == order_link_id) {
-                    if let Some(new_order) = self.order_manager.get_order_mut(&new_link_id) {
+                if let Some(old_order) = self.order_manager.get_history().await.iter().find(|o| o.link_id == order_link_id) {
+                    if let Some(new_order) = self.order_manager.get_order_mut(&new_link_id).await {
                         new_order.post_only_reject_count = old_order.post_only_reject_count;
                     }
                 }
@@ -2953,7 +2959,7 @@ impl ExecutionEngine {
                 }
 
                 // Перед Taker-фоллбеком также проверяем лимит открытых ордеров
-                let pending = self.order_manager.count_pending_orders();
+                let pending = self.order_manager.count_pending_orders().await;
                 if !self.risk_manager.check_orders_limit_gate(pending) {
                     warn!(
                         "[{}] Max Open Orders Gate closed (pending: {}). Skipping Taker fallback for {}",
@@ -3033,7 +3039,7 @@ impl ExecutionEngine {
                 self.symbol, order_link_id);
             
             let (side, qty) = {
-                let o = self.order_manager.get_by_client_id(&order_link_id).unwrap();
+                let o = self.order_manager.get_by_client_id(&order_link_id).await.unwrap();
                 let remaining = o.remaining_qty();
                 (o.side, Decimal::from_f64_retain(remaining).unwrap_or(Decimal::ZERO))
             };
@@ -3062,7 +3068,7 @@ impl ExecutionEngine {
                     }
                 }
 
-                let pending = self.order_manager.count_pending_orders();
+                let pending = self.order_manager.count_pending_orders().await;
                 if !self.risk_manager.check_orders_limit_gate(pending) {
                     warn!("[{}] Max Open Orders Gate closed. Skipping rebate timeout Taker order", self.symbol);
                 } else {
@@ -3094,7 +3100,7 @@ impl ExecutionEngine {
         let base_switch_timeout = self.bot_config.sor.switch_base_timeout_ms;
         let max_switches = self.bot_config.sor.max_switches_per_signal;
         
-        let to_switch: Vec<(String, f32)> = self.order_manager.get_active_orders()
+        let to_switch: Vec<(String, f32)> = self.order_manager.get_active_orders().await
             .iter()
             .filter(|(_, o)| {
                 // Пропускаем Post-Only ордера (они обрабатываются выше через rebate_timeout)
@@ -3159,7 +3165,7 @@ impl ExecutionEngine {
                         }
 
                         // Проверяем лимит открытых ордеров
-                        let pending = self.order_manager.count_pending_orders();
+                        let pending = self.order_manager.count_pending_orders().await;
                         if !self.risk_manager.check_orders_limit_gate(pending) {
                             warn!("[{}] Max Open Orders Gate closed. Skipping aggressive order", self.symbol);
                         } else {
@@ -3198,7 +3204,7 @@ impl ExecutionEngine {
         // Оригинальная логика таймаута для обычных лимитных ордеров
         let timeout = self.bot_config.limit_timeout_ms;
 
-        let to_cancel: Vec<String> = self.order_manager.get_active_orders()
+        let to_cancel: Vec<String> = self.order_manager.get_active_orders().await
             .iter()
             .filter(|(_, o)| {
                 // Пропускаем Post-Only ордера (они обрабатываются выше через rebate_timeout)
@@ -3224,7 +3230,7 @@ impl ExecutionEngine {
             warn!("[{}] Order {} timed out after {}ms. Cancelling and falling back to GTC.", self.symbol, id, timeout);
             
             let (side, qty) = {
-                let o = self.order_manager.get_by_client_id(&id).unwrap();
+                let o = self.order_manager.get_by_client_id(&id).await.unwrap();
                 let remaining = o.remaining_qty();
                 (o.side, Decimal::from_f64_retain(remaining).unwrap_or(Decimal::ZERO))
             };
@@ -3256,7 +3262,7 @@ impl ExecutionEngine {
                 }
 
                 // Перед выставлением нового GTC-ордера проверяем лимит открытых ордеров (Задача 074)
-                let pending = self.order_manager.count_pending_orders();
+                let pending = self.order_manager.count_pending_orders().await;
                 if !self.risk_manager.check_orders_limit_gate(pending) {
                     warn!(
                         "[{}] Max Open Orders Gate closed (pending: {}). Skipping timeout fallback order for {}",
@@ -3388,7 +3394,7 @@ impl ExecutionEngine {
         // Собираем ID ордеров, требующих переставления
         let mut to_chase = Vec::new();
         
-        for (id, order) in self.order_manager.get_active_orders() {
+        for (id, order) in self.order_manager.get_active_orders().await {
             if order.chase_count >= self.bot_config.chase_max_attempts || 
                now - order.last_chase_ts < self.bot_config.chase_interval_ms as i64 {
                 continue;
@@ -3421,17 +3427,17 @@ impl ExecutionEngine {
                     continue;
                 }
 
-                to_chase.push((id.clone(), new_price));
+                to_chase.push((id.to_string(), new_price));
             }
         }
 
         for (id, new_price) in to_chase {
-            info!("[{}] Chasing order {}: price {} -> {}", self.symbol, id, 
-                  self.order_manager.get_by_client_id(&id).map(|o| o.price).unwrap_or_default(), new_price);
+            let current_price = self.order_manager.get_by_client_id(&id).await.map(|o| o.price).unwrap_or_default();
+            info!("[{}] Chasing order {}: price {} -> {}", &self.symbol, id, current_price, new_price);
             
             match self.order_manager.amend_active_order(rest_client, &mut self.risk_manager, &self.bot_config, exchange_config, None, &id, Some(new_price), None, None).await {
                 Ok(_) => {
-                    if let Some(order) = self.order_manager.get_order_mut(&id) {
+                    if let Some(order) = self.order_manager.get_order_mut(&id).await {
                         order.chase_count += 1;
                         order.last_chase_ts = now;
                     }
@@ -3441,11 +3447,11 @@ impl ExecutionEngine {
                     let err_msg = e.to_string();
                     if err_msg.contains("not found") || err_msg.contains("Order not exists") {
                         // Ордер уже исполнился или отменен
-                        warn!("[{}] Chase failed: order {} not found. Might be filled.", self.symbol, id);
+                        warn!("[{}] Chase failed: order {} not found. Might be filled.", &self.symbol, id);
                     } else {
                         // Если amend не поддерживается или другая ошибка — пробуем переставить через Cancel + Replace
-                        warn!("[{}] Amend failed for {}: {}. Attempting Cancel + Replace...", self.symbol, id, err_msg);
-                        self.cancel_and_replace_chase(rest_client, exchange_config, id, new_price, mid).await?;
+                        warn!("[{}] Amend failed for {}: {}. Attempting Cancel + Replace...", &self.symbol, id, &err_msg);
+                        self.cancel_and_replace_chase(rest_client, exchange_config, id.to_string(), new_price, mid).await?;
                     }
                 }
             }
@@ -3524,7 +3530,7 @@ impl ExecutionEngine {
         mid_price: Decimal, // Задача 201: Signal price для анализа slippage
     ) -> Result<()> {
         let (side, qty, chase_count) = {
-            if let Some(o) = self.order_manager.get_by_client_id(&old_id) {
+            if let Some(o) = self.order_manager.get_by_client_id(&old_id).await {
                 (o.side, o.qty - o.executed_qty, o.chase_count)
             } else {
                 return Ok(());
@@ -3558,7 +3564,7 @@ impl ExecutionEngine {
         ).await?;
 
         // 3. Переносим счетчик погони
-        if let Some(new_order) = self.order_manager.get_order_mut(&new_id) {
+        if let Some(mut new_order) = self.order_manager.get_order_mut(&new_id).await {
             new_order.chase_count = chase_count + 1;
             new_order.last_chase_ts = timestamp_ms() as i64;
         }
@@ -3602,7 +3608,7 @@ impl ExecutionEngine {
                 // Извлекаем ордер из очереди
                 if let Some((order_link_id, _)) = self.pending_price_checks.pop_front() {
                     // Пытаемся найти ордер в истории (он должен быть там, так как он терминальный)
-                    if let Some(order) = self.order_manager.get_history().iter().find(|o| o.link_id == order_link_id) {
+                    if let Some(order) = self.order_manager.get_history().await.iter().find(|o| o.link_id == order_link_id) {
                         let mid_price = (best_bid + best_ask) / Decimal::from(2);
                         let mid_price_f64 = mid_price.to_f64().unwrap_or(0.0);
                         
