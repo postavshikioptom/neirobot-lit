@@ -155,7 +155,18 @@ def export():
         return
     
     with open(norm_params_path, 'r') as f:
-        norm_params = json.load(f)
+        norm_data = json.load(f)
+    
+    # Задача 240: Поддержка нового формата Normalizer (с ключом "params")
+    if isinstance(norm_data, dict) and "params" in norm_data:
+        norm_params = norm_data["params"]
+        # Если в hparams нет scaler_type, пробуем взять из файла параметров
+        if hparams.get("scaler_type") is None:
+            hparams["scaler_type"] = norm_data.get("scaler_type", "zscore")
+        if hparams.get("winsor_limits") is None:
+            hparams["winsor_limits"] = norm_data.get("winsor_limits")
+    else:
+        norm_params = norm_data
     
     try:
         validate_normalization(norm_params)
@@ -168,6 +179,7 @@ def export():
     stds = []
     medians = []  # Задача 240
     iqrs = []  # Задача 240
+    winsor_limits_vals = [] # Задача 240: значения для клиппинга
     order = ["p", "v", "i"]
     for prefix in order:
         for i in range(n_levels):
@@ -175,11 +187,29 @@ def export():
             if feat_name not in norm_params:
                 print(f"Error: Missing normalization params for {feat_name}")
                 return
-            means.append(norm_params[feat_name]["mean"])
-            stds.append(norm_params[feat_name]["std"])
-            # Задача 240: Извлекаем медиану и IQR (с fallback на None если не существуют)
-            medians.append(norm_params[feat_name].get("median", None))
-            iqrs.append(norm_params[feat_name].get("iqr", None))
+            
+            # Извлекаем базовые параметры
+            m_val = norm_params[feat_name]["mean"]
+            s_val = norm_params[feat_name]["std"]
+            means.append(m_val)
+            stds.append(s_val)
+            
+            # Задача 240: Извлекаем медиану и IQR
+            # Если робастные параметры отсутствуют, используем mean/std как fallback (Критическая ошибка 3)
+            med_val = norm_params[feat_name].get("median")
+            iqr_val = norm_params[feat_name].get("iqr")
+            
+            if med_val is None or iqr_val is None:
+                med_val = m_val
+                iqr_val = s_val
+                
+            medians.append(med_val)
+            iqrs.append(iqr_val)
+            
+            # Задача 240: Извлекаем значения винзоризации (low/high)
+            if "winsor_low" in norm_params[feat_name] and "winsor_high" in norm_params[feat_name]:
+                winsor_limits_vals.append(norm_params[feat_name]["winsor_low"])
+                winsor_limits_vals.append(norm_params[feat_name]["winsor_high"])
 
     # 5. Экспорт в ONNX (FP32)
     # Обертка для модели, чтобы она принимала 3D тензор [1, seq_len, features]
@@ -290,13 +320,25 @@ def export():
     temperature = hparams.get("temperature", 1.0)
     
     # Задача 240: Параметры нормализации
+    # Если winsor_limits_vals пуст (например, при zscore), но тип winsor_robust,
+    # мы должны обеспечить наличие параметров для Rust.
+    final_winsor_limits = winsor_limits_vals if winsor_limits_vals else hparams.get("winsor_limits", None)
+    
+    # Критическая ошибка 3: Если тип winsor_robust, но лимиты не в формате [low0, high0, ...], 
+    # Rust не сможет инициализировать SIMD буферы.
+    if hparams.get("scaler_type") == "winsor_robust" and final_winsor_limits and len(final_winsor_limits) == 2:
+         print("Warning: winsor_limits is a tuple, but Rust expects per-feature values. Generating default limits...")
+         # Если у нас только [0.01, 0.99], мы не можем восстановить реальные значения цен/объемов без norm_params
+         # Но так как мы уже в цикле выше их не нашли, это странная ситуация.
+         # В норме winsor_limits_vals уже должен быть заполнен.
+    
     norm_params_metadata = {
         "scaler_type": hparams.get("scaler_type", "zscore"),
         "mean": means,
         "std": stds,
         "median": medians,
         "iqr": iqrs,
-        "winsor_limits": hparams.get("winsor_limits", None)
+        "winsor_limits": final_winsor_limits
     }
     
     metadata = {

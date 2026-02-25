@@ -10,74 +10,15 @@ from torch.utils.data import Dataset
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 import onnx
 
+from .normalization import Normalizer
+
 # ============================================================================
 # Константы для аугментации LOB данных
 # ============================================================================
 
 # ============================================================================
-# Функции устойчивой нормализации (Robust Scaler & Winsorization) - Задача 240
+# Функции расчета таргетов и признаков
 # ============================================================================
-
-def apply_winsorization(df: pl.DataFrame, limits: tuple[float, float] = (0.01, 0.99)) -> pl.DataFrame:
-    """
-    Применяет винзоризацию (клиппинг экстремальных значений) к DataFrame.
-    Ограничивает значения по заданным перцентилям для устойчивости к выбросам.
-    
-    Args:
-        df: DataFrame с признаками для винзоризации
-        limits: кортеж (нижний_перцентиль, верхний_перцентиль), например (0.01, 0.99)
-    
-    Returns:
-        DataFrame с ограниченными значениями
-    """
-    cols = df.columns
-    for c in cols:
-        low = df[c].quantile(limits[0])
-        high = df[c].quantile(limits[1])
-        df = df.with_columns(pl.col(c).clip(lower_bound=low, upper_bound=high))
-    return df
-
-
-def fit_robust_params(df_train: pl.DataFrame) -> dict:
-    """
-    Вычисляет параметры для Robust Scaling (медиана и IQR).
-    Использует медиану вместо среднего и межквартильный размах вместо стандартного отклонения.
-    
-    Args:
-        df_train: DataFrame с тренировочными данными
-    
-    Returns:
-        dict с ключами:
-            - type: "robust"
-            - median: dict с медианами для каждой колонки
-            - iqr: dict с IQR для каждой колонки
-    """
-    med = df_train.median().to_dicts()[0]
-    q25 = df_train.quantile(0.25).to_dicts()[0]
-    q75 = df_train.quantile(0.75).to_dicts()[0]
-    iqr = {k: q75[k] - q25[k] for k in med}
-    return {"type": "robust", "median": med, "iqr": iqr}
-
-
-def apply_robust_scaling(df: pl.DataFrame, params: dict) -> pl.DataFrame:
-    """
-    Применяет Robust Scaling к DataFrame используя предварительно вычисленные параметры.
-    Формула: (x - median) / (IQR + eps)
-    
-    Args:
-        df: DataFrame для масштабирования
-        params: dict с параметрами из fit_robust_params
-    
-    Returns:
-        Масштабированный DataFrame
-    """
-    eps = 1e-8
-    return df.with_columns([
-        ((pl.col(c) - params['median'][c]) / (params['iqr'][c] + eps)).alias(c)
-        for c in df.columns
-    ])
-
-
 def compute_target_vol(mid_prices, window=100):
     """
     Рассчитывает реализованную волатильность на окне вперед.
@@ -820,27 +761,31 @@ class LOBDataset(Dataset):
             feat_cols = [c for c in feat_cols if c not in self.exclude_features]
             print(f"[Ablation] Excluded {len(self.exclude_features)} features. Remaining: {len(feat_cols)}")
         
-        # Задача 240: Применяем Winsorization и Robust Scaling если задано
+        # Задача 240: Применяем Winsorization и Robust Scaling через единый интерфейс Normalizer
         if self.scaler_type in ("robust", "winsor_robust"):
             print(f"[Scaler] Applying {self.scaler_type} scaling with winsor_limits={self.winsor_limits}")
             
-            # Выбираем только признаки для масштабирования
+            # Используем Normalizer как единый интерфейс
+            norm = Normalizer("") 
+            norm.scaler_type = self.scaler_type
+            norm.winsor_limits = self.winsor_limits
+            
+            # Обучаем на текущем срезе признаков
             df_feat = df.select(feat_cols)
+            norm.fit(df_feat, winsor_limits=self.winsor_limits)
             
-            # Применяем винзоризацию если нужно
-            if self.scaler_type == "winsor_robust":
-                df_feat = apply_winsorization(df_feat, limits=self.winsor_limits)
+            # Трансформируем (винзоризация + робастное масштабирование внутри)
+            df_norm = norm.transform(df_feat)
             
-            # Вычисляем параметры robust scaling
-            robust_params = fit_robust_params(df_feat)
-            self.robust_params = robust_params  # Сохраняем для экспорта
-            
-            # Применяем robust scaling
-            df_feat = apply_robust_scaling(df_feat, robust_params)
+            self.robust_params = norm.params  # Сохраняем для экспорта
             
             # Заменяем признаки в исходном DataFrame
-            df = df.drop(feat_cols).hstack(df_feat)
-            print(f"[Scaler] Applied {self.scaler_type} scaling. Median: {list(robust_params['median'].values())[:3]}...")
+            df = df.drop(feat_cols).hstack(df_norm)
+            
+            first_feat = feat_cols[0] if feat_cols else None
+            if first_feat:
+                p = self.robust_params[first_feat]
+                print(f"[Scaler] Applied {self.scaler_type} scaling. {first_feat}: median={p['median']:.4f}, iqr={p['iqr']:.4f}")
         else:
             self.robust_params = None
         

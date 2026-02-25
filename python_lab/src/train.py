@@ -1062,6 +1062,45 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     
     return score
 
+def update_model_metadata(base_path, symbol, args, winsor_limits, norm_params_path):
+    """
+    Обновляет или создает metadata.json с параметрами нормализации (Задача 240/056).
+    """
+    metadata_path = base_path / "bots" / symbol / "models" / "metadata.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Загружаем существующие метаданные или создаем новые
+    if metadata_path.exists():
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+    else:
+        metadata = {
+            "metadata_version": "1.1.0",
+            "model_name": "LiT",
+            "export_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+    
+    # Загружаем сохраненные параметры нормализации
+    if norm_params_path.exists():
+        with open(norm_params_path, 'r') as f:
+            norm_data = json.load(f)
+        
+        # Извлекаем параметры для метаданных
+        if isinstance(norm_data, dict) and "params" in norm_data:
+            params = norm_data["params"]
+        else:
+            params = norm_data
+            
+        metadata["normalization"] = {
+            "scaler_type": args.scaler_type,
+            "winsor_limits": winsor_limits,
+            "params": params
+        }
+        
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=4)
+        print(f"[{symbol}] Metadata updated with normalization params at {metadata_path}")
+
 def train():
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
@@ -1496,8 +1535,9 @@ def train():
             print("\n⚠️  WARNING: Oversampling is not supported in 'streaming' mode. Skipping balancing.")
             # Для streaming режима все равно нужен fit
             sample_df = df.head(100000).collect(streaming=True)
-            normalizer.fit(sample_df)
-            normalizer.save()
+            normalizer.fit(sample_df, winsor_limits=winsor_limits)
+            normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+            update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
         else:
             print(f"\nApplying oversampling to training set ({args.balance_method}, ratio={args.balance_ratio})...")
             # Извлекаем "сырые" тренировочные данные
@@ -1528,8 +1568,9 @@ def train():
             
             # Извлекаем имена признаков из оригинального DataFrame
             feat_cols = [c for c in df.columns if c.startswith("feat_")]
-            normalizer.fit(train_features_flat, feature_names=feat_cols)
-            normalizer.save()
+            normalizer.fit(train_features_flat, feature_names=feat_cols, winsor_limits=winsor_limits)
+            normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+            update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
             
             # Нормализуем тренировочные данные
             train_features_res = normalizer.transform(train_features_res)
@@ -1627,13 +1668,15 @@ def train():
             
             # Извлекаем имена признаков из оригинального DataFrame
             feat_cols = [c for c in df.columns if c.startswith("feat_")]
-            normalizer.fit(train_features.reshape(-1, n_feats), feature_names=feat_cols)
-            normalizer.save()
+            normalizer.fit(train_features.reshape(-1, n_feats), feature_names=feat_cols, winsor_limits=winsor_limits)
+            normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+            update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
         else:
             # Для streaming обучаем на сэмпе
             sample_df = df.head(100000).collect(streaming=True)
-            normalizer.fit(sample_df)
-            normalizer.save()
+            normalizer.fit(sample_df, winsor_limits=winsor_limits)
+            normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+            update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
 
     # 8. Финальная нормализация всех данных
     # Применяем параметры Z-score, вычисленные на train set, ко всему набору

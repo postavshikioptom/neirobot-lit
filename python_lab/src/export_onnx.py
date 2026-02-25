@@ -347,6 +347,62 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
             "enabled": False
         }
     
+    # 10. Параметры нормализации (Задача 240)
+    norm_params_path = Path(output_path).parent / "norm_params.json"
+    norm_metadata = {
+        "scaler_type": hparams.get("scaler_type", "zscore"),
+        "winsor_limits": hparams.get("winsor_limits", None)
+    }
+    
+    if norm_params_path.exists():
+        print(f"Loading normalization params from {norm_params_path}...")
+        with open(norm_params_path, 'r') as f:
+            norm_data = json.load(f)
+        
+        if isinstance(norm_data, dict) and "params" in norm_data:
+            norm_params = norm_data["params"]
+            if "scaler_type" in norm_data:
+                norm_metadata["scaler_type"] = norm_data["scaler_type"]
+            if "winsor_limits" in norm_data:
+                norm_metadata["winsor_limits"] = norm_data.get("winsor_limits")
+        else:
+            norm_params = norm_data
+            
+        means, stds, medians, iqrs = [], [], [], []
+        winsor_limits_vals = []
+        
+        order = ["p", "v", "i"]
+        for prefix in order:
+            for i in range(n_levels):
+                feat_name = f"feat_{prefix}_{i}"
+                p = norm_params.get(feat_name, {})
+                m = p.get("mean", 0.0)
+                s = p.get("std", 1.0)
+                med = p.get("median", m)
+                iqr = p.get("iqr", s)
+                
+                means.append(float(m))
+                stds.append(float(s))
+                medians.append(float(med))
+                iqrs.append(float(iqr))
+                
+                if "winsor_low" in p and "winsor_high" in p:
+                    winsor_limits_vals.append(float(p["winsor_low"]))
+                    winsor_limits_vals.append(float(p["winsor_high"]))
+        
+        # Задача 240: Финализация параметров нормализации
+        final_winsor_limits = winsor_limits_vals if winsor_limits_vals else hparams.get("winsor_limits", None)
+        
+        norm_metadata.update({
+            "mean": means,
+            "std": stds,
+            "median": medians,
+            "iqr": iqrs,
+            "winsor_limits": final_winsor_limits
+        })
+            
+    export_metadata["normalization"] = norm_metadata
+
     # Объединяем с существующей metadata (если есть)
     metadata.update(export_metadata)
     metadata["model_params"] = model_params
