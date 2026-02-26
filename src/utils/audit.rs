@@ -60,7 +60,7 @@ impl AuditLogger {
         let file_path = log_dir.join("security_audit.csv");
         
         // Открываем файл в режиме append
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&file_path)

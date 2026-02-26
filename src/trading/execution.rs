@@ -277,7 +277,7 @@ impl<'a> ExecutionEngine<'a> {
     /// - В остальных случаях → Passive (Limit)
     pub fn select_strategy(
         &self,
-        signal: &Signal,
+        _signal: &Signal,
         side: OrderSide,
         strength: f32,
         order_book: &crate::data::orderbook::OrderBook,
@@ -459,7 +459,7 @@ impl<'a> ExecutionEngine<'a> {
         }
 
         // Применяем скейлинг (Волатильность + Сигнал)
-        let mut scaled_qty = self.calculate_combined_scaled_size(base_qty, signal, probs);
+        let mut scaled_qty = self.calculate_combined_scaled_size(base_qty, &signal, probs);
         
         // Задача 231: Применяем margin_multiplier для снижения размера позиции после ошибки маржи
         let margin_multiplier = self.risk_manager.get_margin_multiplier();
@@ -468,7 +468,7 @@ impl<'a> ExecutionEngine<'a> {
             debug!(
                 "Order size reduced by margin_multiplier ({:.1}%): {} -> {}",
                 margin_multiplier * 100.0,
-                self.calculate_combined_scaled_size(base_qty, signal, probs),
+                self.calculate_combined_scaled_size(base_qty, &signal, probs),
                 scaled_qty
             );
         }
@@ -488,7 +488,7 @@ impl<'a> ExecutionEngine<'a> {
     }
 
     /// Расчет скейлированного размера на основе волатильности и силы сигнала (Задача 110)
-    fn calculate_combined_scaled_size(&self, base_size: Decimal, signal: Signal, probs: &[f32; 3]) -> Decimal {
+    fn calculate_combined_scaled_size(&self, base_size: Decimal, signal: &Signal, probs: &[f32; 3]) -> Decimal {
         // 1. Мультипликатор волатильности (Задача 105)
         let current_vol = self.get_current_vol();
         let effective_vol = if self.mid_history.len() < self.bot_config.volatility_window {
@@ -503,7 +503,7 @@ impl<'a> ExecutionEngine<'a> {
             .clamp(self.bot_config.size_min_multiplier, self.bot_config.size_max_multiplier);
 
         // 2. Мультипликатор силы сигнала (Задача 110)
-        let signal_mult = self.get_signal_multiplier(signal, probs);
+        let signal_mult = self.get_signal_multiplier(signal.clone(), probs);
 
         if signal_mult <= 0.0 {
             return Decimal::ZERO;
@@ -1088,10 +1088,16 @@ impl<'a> ExecutionEngine<'a> {
                 .unwrap_or(0.0)
         };
 
-        // Итерация по этапам TP
-        for (stage_idx, stage) in self.bot_config.tp_stages.iter().enumerate() {
+        // Итерация по этапам TP (Задача 166)
+        // Клонируем конфигурацию этапов, чтобы избежать конфликтов заимствования при вызове &mut self методов
+        let tp_stages = self.bot_config.tp_stages.clone();
+        for (stage_idx, stage) in tp_stages.iter().enumerate() {
             // Проверяем, не выполнен ли уже этот этап
-            if position.completed_tp_stages.contains(&stage_idx) {
+            let is_completed = {
+                let position = self.position_manager.get_position();
+                position.completed_tp_stages.contains(&stage_idx)
+            };
+            if is_completed {
                 continue;
             }
 
@@ -1102,16 +1108,20 @@ impl<'a> ExecutionEngine<'a> {
                     self.symbol, stage_idx, deviation_bps, stage.threshold_bps
                 );
 
-                // Рассчитываем размер закрытия
-                let close_size = position.initial_size * stage.close_pct;
-                let close_size_decimal = Decimal::from_f64(close_size).unwrap_or(Decimal::ZERO);
+                // Рассчитываем размер закрытия на основе текущей позиции
+                let (close_size_decimal, pos_qty_abs, pos_side) = {
+                    let position = self.position_manager.get_position();
+                    let close_size = position.initial_size * stage.close_pct;
+                    let close_size_decimal = Decimal::from_f64(close_size).unwrap_or(Decimal::ZERO);
+                    (close_size_decimal, position.qty.abs(), position.side)
+                };
 
                 // Выполняем частичное закрытие
                 // Проверка min_qty и логика tp_close_all_on_min_qty теперь в place_limit_order (order_manager.rs)
                 self.execute_partial_close(
                     close_size_decimal,
-                    position.qty.abs(),
-                    position.side,
+                    pos_qty_abs,
+                    pos_side,
                     best_bid,
                     best_ask,
                     rest_client,
@@ -1581,7 +1591,7 @@ impl<'a> ExecutionEngine<'a> {
     pub async fn on_inference_output(
         &mut self, 
         output: InferenceOutput, 
-        current_price_f64: f64,
+        _current_price_f64: f64,
         best_bid: Decimal,
         bid_vol: Decimal,
         best_ask: Decimal,
@@ -1783,6 +1793,7 @@ impl<'a> ExecutionEngine<'a> {
 
         // 4. Фильтрация сигнала по порогам вероятности (Задача 044) с учетом режима рынка (Задача 161)
         let effective_signal = self.filter_signal(&fused_probs, regime);
+        let signal_side = effective_signal.side; // Сохраняем side до перемещения сигнала
         
         // Задача 201: Создаем SignalWithTimestamp для замера latency
         let signal_with_ts = crate::ml::types::SignalWithTimestamp {
@@ -1797,19 +1808,20 @@ impl<'a> ExecutionEngine<'a> {
         // 4.0. Проверка адверсариальной активности (Задача 165: Anti-Adversarial Protection, Пункт 3 плана)
         // Применяет защитный гейт через метод can_execute() для определения ExecutionAction
         // Задача 169: Передаем signal для проверки свежести сигнала
-        match self.can_execute(orderbook_update, &output.signal) {
+        let execution_action = self.can_execute(orderbook_update, &output.signal);
+        match execution_action {
             ExecutionAction::Execute => {
                 // Продолжаем с исполнением сигнала
             }
-            ExecutionAction::Skip => {
-                tracing::warn!("[{}] can_execute returned Skip, aborting inference signal processing", self.symbol);
+            ExecutionAction::PartialClose | ExecutionAction::Skip => {
+                tracing::warn!("[{}] can_execute returned {:?}, aborting inference signal processing", self.symbol, execution_action);
                 return Ok(());
             }
         }
 
         // 4.2. Защита от осцилляций (Throttling) - Задача 148
         let now_ms = timestamp_ms() as i64;
-        let is_flip = match effective_signal.side {
+        let is_flip = match signal_side {
             crate::ml::types::SignalSide::Up => position.qty.is_sign_negative(),
             crate::ml::types::SignalSide::Down => position.qty.is_sign_positive(),
             _ => false,
@@ -1824,7 +1836,7 @@ impl<'a> ExecutionEngine<'a> {
                     "[{}] SIGNAL OSCILLATION: Suppressing flip {} -> {} (elapsed {}ms < {}ms). Active orders: {:?}",
                     symbol,
                     if position.qty.is_sign_positive() { "Long" } else { "Short" },
-                    match effective_signal.side { crate::ml::types::SignalSide::Up => "Up", crate::ml::types::SignalSide::Down => "Down", _ => "Flat" },
+                    match signal_side { crate::ml::types::SignalSide::Up => "Up", crate::ml::types::SignalSide::Down => "Down", _ => "Flat" },
                     elapsed,
                     self.bot_config.min_flip_interval_ms,
                     active_ids
@@ -1871,7 +1883,7 @@ impl<'a> ExecutionEngine<'a> {
         }
 
         // 5. Логика исполнения на основе отфильтрованного сигнала
-        match effective_signal.side {
+        match signal_side {
             crate::ml::types::SignalSide::Up => {
                 if position.qty.is_sign_negative() || position.qty.is_zero() {
                     // Проверка OBI гейта перед покупкой
@@ -2123,7 +2135,7 @@ impl<'a> ExecutionEngine<'a> {
             }
         }
 
-        let qty = self.calculate_order_size(available_balance, price, signal, probs);
+        let qty = self.calculate_order_size(available_balance, price, signal.clone(), probs);
         
         if qty.is_zero() {
             info!("Skipping trade: calculated quantity is zero");
@@ -2413,7 +2425,7 @@ impl<'a> ExecutionEngine<'a> {
 
         // 9.5. Логика нарезки крупных ордеров (Задача 149)
         let max_slice = self.bot_config.max_slice_size;
-        let (final_slice_qty, remaining_qty) = if max_slice > 0.0 {
+        let (_final_slice_qty, remaining_qty) = if max_slice > 0.0 {
             let max_slice_dec = Decimal::from_f64(max_slice).unwrap_or(Decimal::ZERO);
             if slice_qty > max_slice_dec {
                 // Нарезка активирована: ограничиваем текущий ордер
@@ -2552,7 +2564,7 @@ impl<'a> ExecutionEngine<'a> {
             (order.side, order.qty)
         } else {
             // Если ордера нет в активных, пробуем обновить состояние (он мог быть в истории)
-            if let Some((fill_event, realized_pnl, _position_closed, _entry_price)) = self.order_manager.update_order_state(&order_link_id, update, &mut self.position_manager, &lot_filter, &mut self.risk_manager).await? {
+            if let Some((fill_event, realized_pnl, _position_closed, _entry_price)) = self.order_manager.update_order_state(&order_link_id, &update, &mut self.position_manager, &lot_filter, &mut self.risk_manager).await? {
                 self.log_trade(fill_event, realized_pnl);
             }
             return Ok(());
@@ -2561,7 +2573,7 @@ impl<'a> ExecutionEngine<'a> {
         let is_filled = update.status == OrderStatus::Filled;
 
         // 2. Обновляем состояние в OrderManager
-        if let Some((fill_event, realized_pnl, position_closed, entry_price)) = self.order_manager.update_order_state(&order_link_id, update, &mut self.position_manager, &lot_filter, &mut self.risk_manager).await? {
+        if let Some((fill_event, realized_pnl, position_closed, entry_price)) = self.order_manager.update_order_state(&order_link_id, &update, &mut self.position_manager, &lot_filter, &mut self.risk_manager).await? {
             // Задача 202: Добавляем ордер в очередь для захвата цены через 100мс
             if is_filled {
                 let fill_time_ms = crate::utils::timestamp_ms();
@@ -2648,7 +2660,7 @@ impl<'a> ExecutionEngine<'a> {
             self.log_trade(fill_event.clone(), realized_pnl);
             
             // Задача 167: Активация Exchange-side TSL при первом исполнении ордера открытия
-            if let Some(order) = self.order_manager.get_order_mut(&order_link_id).await {
+            if let Some(mut order) = self.order_manager.get_order_mut(&order_link_id).await {
                 if order.tsl_trailing_stop.is_some() {
                     let req = crate::trading::types::TradingStopRequest {
                         category: exchange_config.bybit.category.clone(),
@@ -2684,7 +2696,8 @@ impl<'a> ExecutionEngine<'a> {
                 // Обновляем серию убытков ТОЛЬКО при полном закрытии позиции (Задача 115, исправление Multiple Fills Bug)
                 if position_closed {
                     let mut state_guard = self.state.lock().await;
-                    self.position_manager.update_streak(trade_pnl, &mut state_guard.loss_streak, &mut state_guard.last_loss_timestamp_ms, update.timestamp);
+                    let state = &mut *state_guard;
+                    self.position_manager.update_streak(trade_pnl, &mut state.loss_streak, &mut state.last_loss_timestamp_ms, update.timestamp);
                 }
             }
             
@@ -2707,7 +2720,7 @@ impl<'a> ExecutionEngine<'a> {
                 
                 if is_iceberg {
                     // Обновляем iceberg_filled_total перед проверкой refill
-                    if let Some(order_mut) = self.order_manager.get_order_mut(&order_link_id).await {
+                    if let Some(mut order_mut) = self.order_manager.get_order_mut(&order_link_id).await {
                         order_mut.iceberg_filled_total += order_mut.executed_qty;
                     }
                     
@@ -2741,7 +2754,7 @@ impl<'a> ExecutionEngine<'a> {
                 // Задача 149: Продолжение нарезки после исполнения слайса
                 if let Some(remaining_qty) = self.pending_slice_qty {
                     if let (Some(slice_side), Some(_slice_signal), Some(_slice_probs)) = 
-                        (self.pending_slice_side, self.pending_slice_signal, self.pending_slice_probs) {
+                        (self.pending_slice_side, self.pending_slice_signal.clone(), self.pending_slice_probs) {
                         
                         info!(
                             "[{}] Slice filled. Continuing slicing: remaining {} (side: {:?})",
@@ -2973,7 +2986,7 @@ impl<'a> ExecutionEngine<'a> {
 
                 // Копируем счетчик режектов в новый ордер
                 if let Some(old_order) = self.order_manager.get_history().await.iter().find(|o| o.link_id == order_link_id) {
-                    if let Some(new_order) = self.order_manager.get_order_mut(&new_link_id).await {
+                    if let Some(mut new_order) = self.order_manager.get_order_mut(&new_link_id).await {
                         new_order.post_only_reject_count = old_order.post_only_reject_count;
                     }
                 }
@@ -3481,7 +3494,7 @@ impl<'a> ExecutionEngine<'a> {
             
             match self.order_manager.amend_active_order(rest_client, &mut self.risk_manager, &self.bot_config, exchange_config, None, &id, Some(new_price), None, None).await {
                 Ok(_) => {
-                    if let Some(order) = self.order_manager.get_order_mut(&id).await {
+                    if let Some(mut order) = self.order_manager.get_order_mut(&id).await {
                         order.chase_count += 1;
                         order.last_chase_ts = now;
                     }
@@ -3645,7 +3658,7 @@ impl<'a> ExecutionEngine<'a> {
         let price_check_delay_ms = 100u64;
         
         // Проверяем очередь и захватываем цены для ордеров, прошедших 100мс
-        while let Some((order_link_id, fill_time_ms)) = self.pending_price_checks.front() {
+        while let Some((_order_link_id, fill_time_ms)) = self.pending_price_checks.front() {
             let elapsed_ms = now.saturating_sub(*fill_time_ms);
             
             if elapsed_ms >= price_check_delay_ms {
@@ -3709,8 +3722,6 @@ impl<'a> ExecutionEngine<'a> {
         
         (effective_timeout_ms, effective_distance_bps)
     }
-}
-
 
 
     /// Задача 184: Обновление конфигурации при SIGHUP
@@ -3725,3 +3736,4 @@ impl<'a> ExecutionEngine<'a> {
         // Обновляем risk manager с новыми параметрами риска
         self.risk_manager.update_config(bot_config.risk.clone());
     }
+} 

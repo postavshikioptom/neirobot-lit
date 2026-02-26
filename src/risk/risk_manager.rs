@@ -313,6 +313,11 @@ impl RiskManager {
         }
     }
 
+    /// Обновляет конфигурацию риска
+    pub fn update_config(&mut self, config: RiskConfig) {
+        self.config = config;
+    }
+
     /// Задача 233: Проверка возможности торговли с учетом ценового шока
     pub fn is_eligible_to_trade(&self) -> bool {
         if self.is_blocked || self.is_price_shock {

@@ -1,7 +1,5 @@
-use ort::session::{Session, GraphOptimizationLevel};
-use ort::session::builder::SessionBuilder;
-use ort::session::builder::LoggingLevel;
-use ort::session::ExecutionMode;
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Value;
 use ort::{inputs, ep};
 use ndarray::ArrayView4;
@@ -14,19 +12,10 @@ use tracing::{warn, info, error};
 use sha2::{Sha256, Digest};
 use crate::ml::types::{Signal, InferenceOutput, ModelMetadata};
 use crate::monitoring::latency::HOT_PATH_STATS;
-use crate::config::types::{OnnxConfig, OnnxExecutionMode, BotConfig};
+use crate::config::types::{OnnxConfig, BotConfig};
 use crate::ml::tensor::TensorBuffer;
 use crate::ml::normalization::Normalizer;
 use std::cell::RefCell;
-
-impl From<OnnxExecutionMode> for ExecutionMode {
-    fn from(mode: OnnxExecutionMode) -> Self {
-        match mode {
-            OnnxExecutionMode::Sequential => ExecutionMode::Sequential,
-            OnnxExecutionMode::Parallel => ExecutionMode::Parallel,
-        }
-    }
-}
 
 /// Результат инференса с метриками производительности (Задача 169)
 #[derive(Debug, Clone)]
@@ -108,12 +97,9 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
     let is_int8 = model_name.contains("_int8") || model_name.contains(".int8");
 
     let mut builder = Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::All)?
-        .with_log_level(LoggingLevel::Warning)?;
+        .with_optimization_level(GraphOptimizationLevel::All)?;
 
     // Настройка пулов потоков и режима исполнения (Задача №100)
-    let mut builder = builder
-        .with_execution_mode(config.execution_mode.into())?;
     
     // Расчёт intra_threads: 1 для Windows (оптимизация) или динамический расчёт для Linux
     let intra = config.intra_threads.unwrap_or_else(|| {
@@ -129,11 +115,11 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
             (cp_total / active_bots).max(1)
         }
     });
-    builder = builder.with_intra_op_num_threads(intra as i32)?;
+    builder = builder.with_intra_threads(intra)?;
     
     // Расчёт inter_threads: 1 для небольших LOB моделей (избегаем переключений контекста)
     let inter = config.inter_threads.unwrap_or(1);
-    builder = builder.with_inter_op_num_threads(inter as i32)?;
+    builder = builder.with_inter_threads(inter as usize)?;
     
     info!(
         "[ML] ONNX Runtime configured: intra={}, inter={}, mode={:?}, active_bots={}",
@@ -148,7 +134,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
         "cuda" => {
             info!("Attempting to initialize CUDA execution provider (device_id: {}, fp16: {})", config.device_id, is_fp16);
             // Пытаемся подключить CUDA, при ошибке — откатываемся на CPU
-            match builder.with_execution_providers([
+            match builder.clone().with_execution_providers([
                 ep::CUDA::default()
                     .with_device_id(config.device_id as i32)
                     .build()
@@ -188,7 +174,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
             }
             
             let cache_path = format!("bots/{}/model/trt_cache", symbol);
-            let shape_str = format!("input:1x{}x{}", seq_len, input_features);
+            let _shape_str = format!("input:1x{}x{}", seq_len, input_features);
 
             // Настройка TensorRT с изолированным кэшем и фиксированным профилем
             // Используем FP16 для оптимальной производительности на GPU
@@ -199,7 +185,7 @@ pub fn init_session(config: &OnnxConfig, model_path: &Path, symbol: &str, seq_le
                 .with_fp16(true)  // FP16 для GPU, INT8 требует отдельной калибровки TensorRT
                 .with_builder_optimization_level(3);
 
-            match builder.with_execution_providers([
+            match builder.clone().with_execution_providers([
                 trt_options.build(),
                 ep::CUDA::default()
                     .with_device_id(config.device_id as i32)
@@ -444,49 +430,40 @@ impl OnnxEngine {
         let session = init_session(onnx_config, model_path, symbol, seq_len, input_features)?;
 
         // 2. Валидация входного тензора [batch, seq_len, features]
-        let input0 = &session.inputs[0];
-        let shape = input0.input_type.as_tensor_type()
-            .context("Input 0 is not a tensor")?.shape.clone();
+        let session_metadata = session.metadata()?;
+        let input_info = session_metadata.input(0)?;
+        let shape = input_info.dimensions().collect::<Vec<_>>();
 
         // Проверка batch_size (dim 0) - должен быть фиксирован в 1
-        if let Some(dim) = shape.get(0) {
-            if let Some(fixed) = dim.as_fixed() {
-                if fixed != 1 {
-                    bail!("Model batch_size must be 1 for optimal performance, got {}", fixed);
-                }
-            } else {
+        if let Some(Some(dim)) = shape.get(0) {
+            if *dim == -1 {
                 bail!("Dynamic batch size detected. TensorRT requires fixed batch_size=1 for optimal performance. Please re-export the model with fixed batch dimension.");
+            } else if *dim != 1 {
+                bail!("Model batch_size must be 1 for optimal performance, got {}", dim);
             }
         }
 
         // Проверка seq_len (dim 1)
-        if let Some(dim) = shape.get(1) {
-            if let Some(fixed) = dim.as_fixed() {
-                if fixed as usize != seq_len {
-                    bail!("Model seq_len mismatch: expected {}, got {}", seq_len, fixed);
-                }
+        if let Some(Some(dim)) = shape.get(1) {
+            if *dim != -1 && *dim as usize != seq_len {
+                bail!("Model seq_len mismatch: expected {}, got {}", seq_len, dim);
             }
         }
 
         // Проверка features (dim 2)
-        if let Some(dim) = shape.get(2) {
-            if let Some(fixed) = dim.as_fixed() {
-                if fixed as usize != input_features {
-                    bail!("Model features mismatch: expected {}, got {}", input_features, fixed);
-                }
+        if let Some(Some(dim)) = shape.get(2) {
+            if *dim != -1 && *dim as usize != input_features {
+                bail!("Model features mismatch: expected {}, got {}", input_features, dim);
             }
         }
 
         // 3. Валидация выходного тензора [batch, 3]
-        let output0 = &session.outputs[0];
-        let out_shape = output0.output_type.as_tensor_type()
-            .context("Output 0 is not a tensor")?.shape.clone();
+        let output_info = session_metadata.output(0)?;
+        let out_shape = output_info.dimensions().collect::<Vec<_>>();
 
-        if let Some(dim) = out_shape.get(1) {
-            if let Some(fixed) = dim.as_fixed() {
-                if fixed != 3 {
-                    bail!("Model must have 3 output classes (Flat, Up, Down), got {}", fixed);
-                }
+        if let Some(Some(dim)) = out_shape.get(1) {
+            if *dim != -1 && *dim != 3 {
+                bail!("Model must have 3 output classes (Flat, Up, Down), got {}", dim);
             }
         }
 
@@ -497,13 +474,13 @@ impl OnnxEngine {
         let mut num_regimes = 0;
         
         // Проверяем, встроена ли температура в ONNX граф
-        if let Some(embedded) = metadata.temperature_embedded {
+        if let Some(embedded) = session_metadata.temperature_embedded {
             temperature_embedded = embedded;
         }
         
         // Загружаем температуру только если она не встроена
         if !temperature_embedded {
-            if let Some(temp) = metadata.temperature {
+            if let Some(temp) = session_metadata.temperature {
                 temperature = Some(temp);
                 info!("Loaded temperature from metadata: T = {:.4}", temp);
             }
@@ -604,7 +581,7 @@ impl OnnxEngine {
             None
         };
 
-        let engine = Self { 
+        let mut engine = Self { 
             session, 
             seq_len, 
             input_features,
@@ -635,7 +612,7 @@ impl OnnxEngine {
     /// Обеспечивает передачу данных в рантайм ONNX без лишнего копирования (Zero-copy)
     /// Применяет SIMD-ускоренную нормализацию перед инфернсом (Задача 193)
     #[inline(always)]
-    pub fn predict_with_buffer(&mut self, regime_id: Option<usize>) -> Result<InferenceResult> {
+    pub fn predict_buffered(&mut self, _input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
         let start_build = Instant::now();
 
         // 0. SIMD-ускоренная нормализация данных перед инфернсом (Задача 193)
@@ -667,14 +644,14 @@ impl OnnxEngine {
             let regime_id_val = regime_id.unwrap_or(0) as i64;
             // regime_array всё еще аллоцирует малый массив, но это пренебрежимо мало (8 байт)
             let regime_array = ndarray::Array1::from_vec(vec![regime_id_val]);
-            inputs![Value::from_array(array)?, Value::from_array(regime_array)?]
+            inputs![Value::from_array(array.to_owned())?, Value::from_array(regime_array.to_owned())?]
         } else {
             // Создаём пустой массив для второго входа, чтобы размер был совместим
             let empty_regime = ndarray::Array1::<i64>::zeros(1);
-            inputs![Value::from_array(array)?, Value::from_array(empty_regime)?]
+            inputs![Value::from_array(array.to_owned())?, Value::from_array(empty_regime.to_owned())?]
         };
         
-        let build_us = start_build.elapsed().as_micros() as u64;
+        let _build_us = start_build.elapsed().as_micros() as u64;
         let start_run = Instant::now();
 
         // 4. Запуск инференса
@@ -690,8 +667,11 @@ impl OnnxEngine {
         }
         
         // 5. Извлечение тензора результатов
-        let output_tensor = outputs[0].try_extract_tensor::<f32>()?;
-        let logits = output_tensor.view();
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+        let logits = ndarray::ArrayView2::from_shape(
+            (shape[0] as usize, shape[1] as usize),
+            data
+        )?;
         let batch_logits = logits.slice(ndarray::s![0, ..]);
         
         if batch_logits.len() != 3 {
@@ -710,7 +690,7 @@ impl OnnxEngine {
         };
 
         // 7. Расчет Softmax
-        let probs = self.softmax(&calibrated_logits);
+        let probs = Self::softmax(&calibrated_logits);
 
         // 8. Определение сигнала
         let mut max_prob = -1.0;
@@ -726,7 +706,7 @@ impl OnnxEngine {
         let mut entropy = None;
         let mut drift_detected = false;
         
-        if let (Some(ref tracker), Some(ref config)) = (&self.confidence_tracker, &self.bot_config) {
+        if let (Some(tracker), Some(config)) = (&self.confidence_tracker, &self.bot_config) {
             match tracker.borrow_mut().record_inference(&probs, config) {
                 Ok((ent, drift)) => {
                     entropy = Some(ent);
@@ -762,7 +742,7 @@ impl OnnxEngine {
     /// # Аргументы
     /// * `input_data` - Входные данные модели (seq_len * input_features)
     /// * `regime_id` - Опциональный ID режима рынка (если модель использует regime embedding)
-    pub fn predict(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
+    pub fn predict(&mut self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
         let start_build = Instant::now();
 
         // 1. Валидация размера входных данных (должен соответствовать batch=1)
@@ -810,14 +790,14 @@ impl OnnxEngine {
         let ort_input = if self.use_regime_embedding {
             let regime_id_val = regime_id.unwrap_or(0) as i64;
             let regime_array = ndarray::Array1::from_vec(vec![regime_id_val]);
-            inputs![Value::from_array(array)?, Value::from_array(regime_array)?]
+            inputs![Value::from_array(array.to_owned())?, Value::from_array(regime_array.to_owned())?]
         } else {
             // Создаём пустой массив для второго входа, чтобы размер был совместим
             let empty_regime = ndarray::Array1::<i64>::zeros(1);
-            inputs![Value::from_array(array)?, Value::from_array(empty_regime)?]
+            inputs![Value::from_array(array.to_owned())?, Value::from_array(empty_regime.to_owned())?]
         };
         
-        let build_us = start_build.elapsed().as_micros() as u64;
+        let _build_us = start_build.elapsed().as_micros() as u64;
 
         let start_run = Instant::now();
         // 5. Запуск инференса
@@ -836,8 +816,11 @@ impl OnnxEngine {
         }
         
         // 6. Извлечение тензора результатов
-        let output_tensor = outputs[0].try_extract_tensor::<f32>()?;
-        let logits = output_tensor.view();
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+        let logits = ndarray::ArrayView2::from_shape(
+            (shape[0] as usize, shape[1] as usize),
+            data
+        )?;
         
         // Берем результаты для первого (и единственного) элемента батча
         let batch_logits = logits.slice(ndarray::s![0, ..]);
@@ -859,7 +842,7 @@ impl OnnxEngine {
         };
 
         // 8. Расчет Softmax
-        let probs = self.softmax(&calibrated_logits);
+        let probs = Self::softmax(&calibrated_logits);
 
         // 9. Определение сигнала (Argmax)
         let mut max_prob = -1.0;
@@ -875,7 +858,7 @@ impl OnnxEngine {
         let mut entropy = None;
         let mut drift_detected = false;
         
-        if let (Some(ref tracker), Some(ref config)) = (&self.confidence_tracker, &self.bot_config) {
+        if let (Some(tracker), Some(config)) = (&self.confidence_tracker, &self.bot_config) {
             match tracker.borrow_mut().record_inference(&probs, config) {
                 Ok((ent, drift)) => {
                     entropy = Some(ent);
@@ -901,7 +884,7 @@ impl OnnxEngine {
 
     /// Задача 169: Метод для получения результата инференса с метриками производительности
     /// Возвращает InferenceResult с duration_us для отслеживания задержки
-    pub fn predict_with_metrics(&self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
+    pub fn predict_with_metrics(&mut self, input_data: &[f32], regime_id: Option<usize>) -> Result<InferenceResult> {
         let start_total = Instant::now();
         let output = self.predict(input_data, regime_id)?;
         let duration_us = start_total.elapsed().as_micros() as u64;
@@ -913,7 +896,7 @@ impl OnnxEngine {
     }
 
     /// Прогрев модели (warmup) для исключения пиков при старте
-    pub fn warmup(&self) -> Result<()> {
+    pub fn warmup(&mut self) -> Result<()> {
         info!("Starting ONNX model warmup (50 iterations)...");
         let input_size = self.seq_len * self.input_features;
         let dummy_data = vec![0.0f32; input_size];
@@ -933,7 +916,7 @@ impl OnnxEngine {
 
     /// Приватный метод Softmax для 3-х классов
     #[inline(always)]
-    fn softmax(&self, logits: &[f32]) -> [f32; 3] {
+    fn softmax(logits: &[f32]) -> [f32; 3] {
         let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
         let exps: Vec<f32> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
         let sum_exps: f32 = exps.iter().sum();

@@ -17,7 +17,6 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use native_tls::TlsConnector;
 use tokio_native_tls::TlsConnector as TokioTlsConnector;
-use secrecy::Secret;
 use tokio::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -574,10 +573,6 @@ impl BybitWsClient {
             tokio::select! {
                 _ = token.cancelled() => {
                     info!("[{}] WS stopping due to cancellation", self.symbol);
-                    let _ = ws_sink.send(Message::Close(Some(CloseFrame {
-                        code: 1000.into(),
-                        reason: "Graceful shutdown".into(),
-                    }))).await;
                     return Ok(());
                 }
                 msg = ws_read.next() => {

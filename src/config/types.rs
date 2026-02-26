@@ -320,7 +320,7 @@ fn default_local_smp_enabled() -> bool { false }
 
 // Задача 234: Адаптивный Rate Limit и динамический Backoff defaults
 fn default_rate_limit_threshold_pct() -> f64 { 0.15 } // 15% порог включения замедления
-fn default_backoff_base_ms() -> u64 { 250 }
+
 fn default_cleanup_interval_min() -> u64 { 60 }
 fn default_max_stale_age_min() -> u64 { 120 }
 fn default_auto_cancel_stale() -> bool { false } // Автоматическая отмена старых ордеров

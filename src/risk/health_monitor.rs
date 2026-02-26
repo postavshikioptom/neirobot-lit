@@ -712,7 +712,6 @@ impl HealthMonitor {
         
         Ok(())
     }
-}
 
 
     /// Задача 184: Обновление конфигурации при SIGHUP
@@ -855,4 +854,4 @@ impl HealthMonitor {
         }
 
         Ok((freed_bytes, deleted_count))
-    }
+    }} 

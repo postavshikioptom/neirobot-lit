@@ -4,7 +4,7 @@ use std::str::FromStr;
 use anyhow::{Result, Context};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use secrecy::{Secret, ExposeSecret};
+use secrecy::{SecretString, ExposeSecret};
 use reqwest::{Client, header, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -243,7 +243,7 @@ pub trait BybitRestClientTrait: Send + Sync {
 pub struct BybitRestClient {
     client: Client,
     api_key: String,
-    api_secret: Secret<String>,
+    api_secret: SecretString,
     base_url: String,
     recv_window: u64,
     orders_limiter: Arc<RateLimiter>,
@@ -263,7 +263,7 @@ impl BybitRestClient {
         let api_key = std::env::var("BYBIT_API_KEY")
             .context("BYBIT_API_KEY not found in environment")?;
         let api_secret = std::env::var("BYBIT_API_SECRET")
-            .map(Secret::new)
+            .map(|s| SecretString::new(s.into_boxed_str()))
             .context("BYBIT_API_SECRET not found in environment")?;
 
         Ok(Self {
@@ -296,7 +296,7 @@ impl BybitRestClient {
         let api_key = std::env::var("BYBIT_API_KEY")
             .context("BYBIT_API_KEY not found in environment")?;
         let api_secret = std::env::var("BYBIT_API_SECRET")
-            .map(Secret::new)
+            .map(|s| SecretString::new(s.into_boxed_str()))
             .context("BYBIT_API_SECRET not found in environment")?;
 
         Ok(Self {

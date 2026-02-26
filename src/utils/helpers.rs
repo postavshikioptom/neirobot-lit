@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
+use rand::RngExt;
 use rust_decimal::prelude::FromPrimitive;
-use rand::Rng;
 
 #[inline(always)]
 pub fn now_ms() -> u64 {
@@ -457,8 +457,7 @@ mod clock_skew_tests {
 /// - Добавляет случайный джиттер (0..100 мс) для предотвращения "thundering herd"
 /// - Ограничивает максимальное время ожидания 60 секундами
 pub async fn apply_backoff(attempt: u32, base_ms: u64) {
-    let mut rng = rand::rng();
-    let jitter = rng.gen_range(0..100);
+    let jitter = rand::rng().random_range(0..100);
     
     // Экспоненциальный расчет: base_ms * 2^attempt
     let exponential_wait = base_ms.saturating_mul(2u64.saturating_pow(attempt));

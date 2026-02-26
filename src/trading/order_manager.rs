@@ -174,7 +174,7 @@ impl OrderManager {
     pub async fn update_order_state(
         &self,
         order_link_id: &str,
-        event: OrderUpdate,
+        event: &OrderUpdate,
         position_manager: &mut PositionManager,
         lot_filter: &crate::trading::types::LotFilter, // Задача 137: Добавлен параметр для проверки пыли
         risk_manager: &mut RiskManager, // Задача 176: Для удаления интентов
@@ -292,7 +292,7 @@ impl OrderManager {
             if order.order_id.is_none() {
                 order.order_id = Some(event.order_id.clone());
                 let mut exchange_map = self.exchange_map.lock().await;
-                exchange_map.insert(event.order_id, order_link_id.to_string());
+                exchange_map.insert(event.order_id.clone(), order_link_id.to_string());
             }
 
             // 3. Обработка терминальных состояний
@@ -935,7 +935,7 @@ impl OrderManager {
                     new_price: Some(remote.price),
                     new_qty: Some(remote.qty),
                 };
-                let _ = self.update_order_state(&link_id, update, position_manager, lot_filter, risk_manager).await?;
+                let _ = self.update_order_state(&link_id, &update, position_manager, lot_filter, risk_manager).await?;
             } else {
                 // Ордер не найден в активных, проверяем историю для уточнения причины
                 info!("Order {} not found in realtime list, checking history...", link_id);
@@ -956,7 +956,7 @@ impl OrderManager {
                         new_price: Some(remote_hist.price),
                         new_qty: Some(remote_hist.qty),
                     };
-                    let _ = self.update_order_state(&link_id, update, position_manager, lot_filter, risk_manager).await?;
+                    let _ = self.update_order_state(&link_id, &update, position_manager, lot_filter, risk_manager).await?;
                 } else {
                     // Ордера нет ни в активных, ни в истории (возможно, очень старый или ошибка ID)
                     warn!("Order {} not found in exchange history! Closing locally as Cancelled.", link_id);
