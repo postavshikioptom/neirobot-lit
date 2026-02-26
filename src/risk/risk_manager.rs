@@ -1513,7 +1513,7 @@ impl RiskManager {
         }
 
         // Получаем текущее время
-        let now = crate::utils::helpers::get_unix_ms();
+        let now = crate::utils::helpers::unix_ms();
 
         // Проверяем возраст позиции
         position.is_aged(now, &bot_config.time_decay)
@@ -2127,6 +2127,125 @@ impl RiskManager {
         
         (total, stale_count, stale_ratio)
     }
+
+    // ============================================================================
+    // Динамическое сокращение лимитов позиции (Задача 178)
+    // ============================================================================
+
+    /// Расчет масштабирующего фактора на основе просадки (Drawdown Scaling)
+    /// 
+    /// # Параметры
+    /// - `current_drawdown_pct`: Текущая просадка в процентах (например, 8.0 для 8%)
+    /// 
+    /// # Возвращает
+    /// - Масштабирующий фактор от min_scale_factor до 1.0
+    fn calculate_drawdown_scaling(&self, current_drawdown_pct: f64) -> f64 {
+        let start = self.config.drawdown_scaling_start_pct;
+        let max_dd = self.config.drawdown_stop_pct;
+        let min_factor = self.config.min_scale_factor;
+
+        if current_drawdown_pct <= start {
+            return 1.0; // Нет сокращения
+        }
+
+        if current_drawdown_pct >= max_dd {
+            return min_factor; // Максимальное сокращение
+        }
+
+        // Линейное сокращение между start и max_dd
+        let f_dd = 1.0 - (current_drawdown_pct - start) / (max_dd - start) * (1.0 - min_factor);
+        f_dd.clamp(min_factor, 1.0)
+    }
+
+    /// Расчет масштабирующего фактора на основе волатильности (Volatility Scaling)
+    /// 
+    /// # Параметры
+    /// - `current_vol`: Текущая волатильность
+    /// - `hist_vol`: Историческая (медианная) волатильность
+    /// 
+    /// # Возвращает
+    /// - Масштабирующий фактор от min_scale_factor до 1.0
+    fn calculate_volatility_scaling(&self, current_vol: f64, hist_vol: f64) -> f64 {
+        if hist_vol <= 0.0 || current_vol <= 0.0 {
+            return 1.0; // Недостаточно данных
+        }
+
+        let vol_ratio = current_vol / hist_vol;
+        let threshold = self.config.volatility_threshold;
+
+        if vol_ratio > threshold {
+            // Обратная волатильность (Inverse Vol)
+            let f_vol = 1.0 / vol_ratio;
+            f_vol.clamp(self.config.min_scale_factor, 1.0)
+        } else {
+            1.0 // Волатильность в норме
+        }
+    }
+
+    /// Обновление масштаба лимита позиции с применением гистерезиса
+    /// 
+    /// # Параметры
+    /// - `current_drawdown_pct`: Текущая просадка в процентах
+    /// - `current_vol`: Текущая волатильность
+    /// - `hist_vol`: Историческая волатильность
+    pub fn update_position_scale(
+        &mut self,
+        current_drawdown_pct: f64,
+        current_vol: f64,
+        hist_vol: f64,
+    ) {
+        // Расчет масштабирующих факторов
+        let f_dd = self.calculate_drawdown_scaling(current_drawdown_pct);
+        let f_vol = self.calculate_volatility_scaling(current_vol, hist_vol);
+
+        // Итоговый целевой масштаб (берем минимум из двух факторов)
+        let target_scale = f_dd.min(f_vol).clamp(self.config.min_scale_factor, 1.0);
+
+        // Применение гистерезиса (асимметричное обновление)
+        if target_scale < self.current_scale {
+            // Мгновенное сокращение при росте риска
+            self.current_scale = target_scale;
+            debug!(
+                "Position limit reduced: {:.1}% (dd_factor={:.2}, vol_factor={:.2})",
+                self.current_scale * 100.0,
+                f_dd,
+                f_vol
+            );
+        } else {
+            // Плавное восстановление при снижении риска
+            let new_scale = (self.current_scale + self.config.recovery_rate).min(target_scale);
+            if new_scale > self.current_scale {
+                debug!(
+                    "Position limit recovering: {:.1}% -> {:.1}% (target={:.1}%)",
+                    self.current_scale * 100.0,
+                    new_scale * 100.0,
+                    target_scale * 100.0
+                );
+            }
+            self.current_scale = new_scale;
+        }
+    }
+
+    /// Получение текущего эффективного лимита позиции
+    /// Получение текущего масштаба лимита (для тестирования и мониторинга)
+    pub fn get_current_scale(&self) -> f64 {
+        self.current_scale
+    }
+
+    /// Расчет текущей просадки в процентах от пика дневного эквити
+    /// Используется для передачи в update_position_scale
+    pub fn get_current_drawdown_pct(&self, current_pnl: Decimal) -> f64 {
+        let current_equity = self.initial_equity + current_pnl;
+        
+        if self.peak_daily_equity <= Decimal::ZERO {
+            return 0.0;
+        }
+
+        let drawdown_usd = self.peak_daily_equity - current_equity;
+        let drawdown_pct = (drawdown_usd / self.peak_daily_equity) * Decimal::from(100);
+        
+        drawdown_pct.to_f64().unwrap_or(0.0).max(0.0)
+    }
 }
 
 #[cfg(test)]
@@ -2376,144 +2495,4 @@ mod tests {
         
         // Благодаря saturating_sub не должно быть паники, lockout не активен
         assert!(!risk.is_in_lockout(&state, &bot_config));
-    }
-
-    // ============================================================================
-    // Динамическое сокращение лимитов позиции (Задача 178)
-    // ============================================================================
-
-    /// Расчет масштабирующего фактора на основе просадки (Drawdown Scaling)
-    /// 
-    /// # Параметры
-    /// - `current_drawdown_pct`: Текущая просадка в процентах (например, 8.0 для 8%)
-    /// 
-    /// # Возвращает
-    /// - Масштабирующий фактор от min_scale_factor до 1.0
-    fn calculate_drawdown_scaling(&self, current_drawdown_pct: f64) -> f64 {
-        let start = self.config.drawdown_scaling_start_pct;
-        let max_dd = self.config.drawdown_stop_pct;
-        let min_factor = self.config.min_scale_factor;
-
-        if current_drawdown_pct <= start {
-            return 1.0; // Нет сокращения
-        }
-
-        if current_drawdown_pct >= max_dd {
-            return min_factor; // Максимальное сокращение
-        }
-
-        // Линейное сокращение между start и max_dd
-        let f_dd = 1.0 - (current_drawdown_pct - start) / (max_dd - start) * (1.0 - min_factor);
-        f_dd.clamp(min_factor, 1.0)
-    }
-
-    /// Расчет масштабирующего фактора на основе волатильности (Volatility Scaling)
-    /// 
-    /// # Параметры
-    /// - `current_vol`: Текущая волатильность
-    /// - `hist_vol`: Историческая (медианная) волатильность
-    /// 
-    /// # Возвращает
-    /// - Масштабирующий фактор от min_scale_factor до 1.0
-    fn calculate_volatility_scaling(&self, current_vol: f64, hist_vol: f64) -> f64 {
-        if hist_vol <= 0.0 || current_vol <= 0.0 {
-            return 1.0; // Недостаточно данных
-        }
-
-        let vol_ratio = current_vol / hist_vol;
-        let threshold = self.config.volatility_threshold;
-
-        if vol_ratio > threshold {
-            // Обратная волатильность (Inverse Vol)
-            let f_vol = 1.0 / vol_ratio;
-            f_vol.clamp(self.config.min_scale_factor, 1.0)
-        } else {
-            1.0 // Волатильность в норме
-        }
-    }
-
-    /// Обновление масштаба лимита позиции с применением гистерезиса
-    /// 
-    /// # Параметры
-    /// - `current_drawdown_pct`: Текущая просадка в процентах
-    /// - `current_vol`: Текущая волатильность
-    /// - `hist_vol`: Историческая волатильность
-    pub fn update_position_scale(
-        &mut self,
-        current_drawdown_pct: f64,
-        current_vol: f64,
-        hist_vol: f64,
-    ) {
-        // Расчет масштабирующих факторов
-        let f_dd = self.calculate_drawdown_scaling(current_drawdown_pct);
-        let f_vol = self.calculate_volatility_scaling(current_vol, hist_vol);
-
-        // Итоговый целевой масштаб (берем минимум из двух факторов)
-        let target_scale = f_dd.min(f_vol).clamp(self.config.min_scale_factor, 1.0);
-
-        // Применение гистерезиса (асимметричное обновление)
-        if target_scale < self.current_scale {
-            // Мгновенное сокращение при росте риска
-            self.current_scale = target_scale;
-            debug!(
-                "Position limit reduced: {:.1}% (dd_factor={:.2}, vol_factor={:.2})",
-                self.current_scale * 100.0,
-                f_dd,
-                f_vol
-            );
-        } else {
-            // Плавное восстановление при снижении риска
-            let new_scale = (self.current_scale + self.config.recovery_rate).min(target_scale);
-            if new_scale > self.current_scale {
-                debug!(
-                    "Position limit recovering: {:.1}% -> {:.1}% (target={:.1}%)",
-                    self.current_scale * 100.0,
-                    new_scale * 100.0,
-                    target_scale * 100.0
-                );
-            }
-            self.current_scale = new_scale;
-        }
-    }
-
-    /// Получение текущего эффективного лимита позиции
-    /// 
-    /// # Параметры
-    /// - `base_max_pos`: Базовый максимальный размер позиции из конфига
-    /// 
-    /// # Возвращает
-    /// - Эффективный лимит с учетом текущего масштаба
-    pub fn get_effective_position_limit(&self, base_max_pos: Decimal) -> Decimal {
-        let scale = Decimal::from_f64(self.current_scale).unwrap_or(Decimal::ONE);
-        base_max_pos * scale
-    }
-
-    /// Получение текущего масштаба лимита (для тестирования и мониторинга)
-    pub fn get_current_scale(&self) -> f64 {
-        self.current_scale
-    }
-
-    /// Расчет текущей просадки в процентах от пика дневного эквити
-    /// Используется для передачи в update_position_scale
-    pub fn get_current_drawdown_pct(&self, current_pnl: Decimal) -> f64 {
-        let current_equity = self.initial_equity + current_pnl;
-        
-        if self.peak_daily_equity <= Decimal::ZERO {
-            return 0.0;
-        }
-
-        let drawdown_usd = self.peak_daily_equity - current_equity;
-        let drawdown_pct = (drawdown_usd / self.peak_daily_equity) * Decimal::from(100);
-        
-        drawdown_pct.to_f64().unwrap_or(0.0).max(0.0)
-    }
-
-
-
-    /// Задача 184: Обновление конфигурации при SIGHUP
-    /// Применяет новые параметры риска к risk manager и health monitor
-    pub fn update_config(&mut self, config: RiskConfig) {
-        tracing::info!("[Audit] Updating RiskManager config");
-        self.config = config.clone();
-        self.health_monitor.update_config(config);
     }

@@ -120,7 +120,7 @@ async fn flush_to_parquet(buffer: &mut Vec<OrderBookSnapshot>, data_dir: &Path) 
         columns.push(Column::new(format!("bid_v_{}", i).into(), &bid_volumes[i]));
     }
 
-    let mut df = DataFrame::new(columns).context("Failed to create DataFrame")?;
+    let mut df = DataFrame::new(buffer.len(), columns).context("Failed to create DataFrame")?;
 
     // Имя файла: SYMBOL_FIRSTTIMESTAMP.parquet
     let first_ts = timestamps[0];
@@ -313,7 +313,7 @@ async fn flush_trades_to_parquet(buffer: &mut Vec<crate::data::types::PublicTrad
         Column::new("side".into(), &sides),
     ];
 
-    let mut df = DataFrame::new(columns).context("Failed to create trades DataFrame")?;
+    let mut df = DataFrame::new(buffer.len(), columns).context("Failed to create trades DataFrame")?;
 
     // Имя файла: trades_FIRSTTIMESTAMP.parquet
     let first_ts = timestamps[0];

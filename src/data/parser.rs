@@ -156,7 +156,7 @@ pub fn parse_orderbook_msg<'a>(json_str: &'a str) -> Result<Option<crate::data::
     }))
 }
 
-use crate::data::types::{PublicTradeOwned, Side};
+use crate::data::types::Side;
 
 #[derive(Debug, Deserialize)]
 pub struct BybitPublicTradeMsg<'a> {

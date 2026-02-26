@@ -3,11 +3,10 @@ use crate::trading::order_manager::OrderManager;
 use crate::trading::position_manager::{PositionManager, Position};
 use crate::trading::rest_client::{BybitRestClient, BybitRestClientTrait};
 use crate::risk::risk_manager::RiskManager;
-use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest, ExecutionAction, BybitOrderResult};
+use crate::trading::types::{OrderSide, MarketInfo, OrderUpdate, OrderState, OrderStatus, CreateOrderRequest, ExecutionAction, BybitOrderResult, RiskOrderInfo};
 use crate::trading::types::BotState;
 use crate::config::types::{BotConfig, ExchangeConfig};
 use crate::utils::trade_logger::TradeRecord;
-use crate::data::orderbook::OrderBook;
 use tokio::sync::{mpsc, Mutex};
 use std::sync::Arc;
 use anyhow::Result;
@@ -20,7 +19,7 @@ use crate::utils::timestamp_ms;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use crate::utils::helpers::RollingPriceStats;
-use crate::data::types::{PublicTrade, OrderBookUpdateOwned, Side};
+use crate::data::types::{PublicTrade, OrderBookUpdateOwned};
 
 /// Стратегия исполнения ордера (задача 206: Smart Order Routing)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,7 +52,7 @@ pub struct ExecutionInstruction {
     pub urgency: f32,
 }
 
-pub struct ExecutionEngine {
+pub struct ExecutionEngine<'a> {
     pub order_manager: OrderManager,
     pub position_manager: PositionManager,
     pub risk_manager: RiskManager,
@@ -70,7 +69,7 @@ pub struct ExecutionEngine {
     pub last_probabilities: [f32; 3], // [Flat, Up, Down]
     pub last_signal_timestamp_ms: u64, // Время получения последнего сигнала (Задача 169)
     pub spread_ema: Option<Decimal>,  // EMA спреда для динамического фильтра
-    pub price_stats: RollingPriceStats, // Статистика цен для VWAP/TWAP
+    pub price_stats: RollingPriceStats<'a>, // Статистика цен для VWAP/TWAP
     pub mid_history: VecDeque<f64>,
     pub sum_returns: f64,
     pub sum_returns_sq: f64,
@@ -93,7 +92,7 @@ pub struct ExecutionEngine {
     // Задача 165: Детектор адверсариальной активности
     pub adversarial_detector: crate::risk::AdversarialDetector,
     // Задача 165: Накопление сделок для VPIN расчета
-    pub pending_trades: Vec<PublicTrade>,
+    pub pending_trades: Vec<PublicTrade<'a>>,
     // Задача 170: Текущая ставка финансирования и время следующего клиринга
     pub current_funding_rate: f64,
     pub next_funding_time: u64,
@@ -103,7 +102,7 @@ pub struct ExecutionEngine {
     pub last_slice_time: Instant,
 }
 
-impl ExecutionEngine {
+impl<'a> ExecutionEngine<'a> {
     pub fn new(
         symbol: String, 
         risk_manager: RiskManager, 
@@ -190,7 +189,7 @@ impl ExecutionEngine {
 
     /// Обработка публичных сделок для обновления статистики VWAP/TWAP и VPIN
     #[inline(always)]
-    pub fn on_public_trade(&mut self, trade: PublicTrade) {
+    pub fn on_public_trade(&mut self, trade: PublicTrade<'a>) {
         self.price_stats.update(trade.clone());
         // Задача 165: Накапливаем сделку для VPIN расчета
         self.pending_trades.push(trade);
@@ -779,11 +778,11 @@ impl ExecutionEngine {
     pub async fn save_current_state(&mut self) -> Result<()> {
         // Получить текущее состояние из position_manager и order_manager
         let position = self.position_manager.get_position();
-        let pnl = self.position_manager.get_pnl();
+        let pnl = self.position_manager.get_position().realized_pnl;
         let active_order_ids: Vec<String> = self.order_manager
             .get_active_orders().await
             .values()
-            .map(|o| o.order_link_id.clone())
+            .map(|o| o.link_id.clone())
             .collect();
 
         // Создать BotStateData
@@ -797,7 +796,7 @@ impl ExecutionEngine {
         );
 
         let state_data = crate::trading::BotStateData {
-            position: position.to_f64().unwrap_or(0.0),
+            position: position.qty.to_f64().unwrap_or(0.0),
             pnl: pnl.to_f64().unwrap_or(0.0),
             active_order_ids,
             metadata,
@@ -956,11 +955,35 @@ impl ExecutionEngine {
         let local_position = self.position_manager.get_position().clone();
         let local_orders = &state_guard.active_orders;
 
-        // 4. Проверка консистентности
+        // 4. Преобразуем RiskOrderInfo в OrderInfo
+        let local_orders_converted: std::collections::HashMap<String, crate::trading::types::OrderInfo> = 
+            local_orders.iter().map(|(k, v)| {
+                (k.clone(), crate::trading::types::OrderInfo {
+                    side: v.side,
+                    price: v.price,
+                    qty: v.qty,
+                    status: match v.state {
+                        crate::trading::types::OrderState::Created => crate::trading::types::OrderStatus::Created,
+                        crate::trading::types::OrderState::PendingNew => crate::trading::types::OrderStatus::New,
+                        crate::trading::types::OrderState::Active => crate::trading::types::OrderStatus::New,
+                        crate::trading::types::OrderState::PartiallyFilled => crate::trading::types::OrderStatus::PartiallyFilled,
+                        crate::trading::types::OrderState::Filled => crate::trading::types::OrderStatus::Filled,
+                        crate::trading::types::OrderState::PendingCancel => crate::trading::types::OrderStatus::Cancelled,
+                        crate::trading::types::OrderState::Cancelled => crate::trading::types::OrderStatus::Cancelled,
+                        crate::trading::types::OrderState::Expired => crate::trading::types::OrderStatus::Expired,
+                        crate::trading::types::OrderState::Rejected(_) => crate::trading::types::OrderStatus::Rejected,
+                    },
+                    chase_count: 0,
+                    last_chase_ts: 0,
+                    link_id: v.link_id.clone(),
+                })
+            }).collect();
+
+        // 5. Проверка консистентности
         let is_consistent = self.risk_manager.verify_consistency(
             &local_position,
             &ex_position,
-            local_orders,
+            &local_orders_converted,
             &ex_orders,
             self.bot_config.price_desync_threshold,
         );
@@ -977,13 +1000,34 @@ impl ExecutionEngine {
                 // Синхронизация ордеров: отменяем локальные "призраки" и принимаем биржевые
                 state_guard.active_orders.clear();
                 for order in ex_orders {
+                    // Преобразуем OrderInfo в RiskOrderInfo
+                    let state = match order.status {
+                        OrderStatus::New => OrderState::Active,
+                        OrderStatus::PartiallyFilled => OrderState::PartiallyFilled,
+                        OrderStatus::Filled => OrderState::Filled,
+                        OrderStatus::Cancelled => OrderState::Cancelled,
+                        OrderStatus::Rejected => OrderState::Rejected("Rejected".to_string()),
+                        OrderStatus::Expired => OrderState::Expired,
+                        OrderStatus::Created => OrderState::Created,
+                        OrderStatus::PostOnlyRejected => OrderState::Rejected("PostOnlyRejected".to_string()),
+                        OrderStatus::Untracked => OrderState::Active,
+                    };
+                    
+                    let risk_order = RiskOrderInfo {
+                        side: order.side,
+                        price: order.price,
+                        qty: order.qty,
+                        state,
+                        link_id: order.link_id.clone(),
+                    };
+                    
                     // Используем link_id из биржевого ордера
-                    if let Some(link_id) = order.link_id.clone() {
-                        state_guard.active_orders.insert(link_id, order);
+                    if let Some(link_id) = risk_order.link_id.clone() {
+                        state_guard.active_orders.insert(link_id, risk_order);
                     } else {
                         // Если link_id отсутствует, генерируем его на основе параметров
-                        let link_id = format!("{:?}_{}_{}",  order.side, order.price, order.qty);
-                        state_guard.active_orders.insert(link_id, order);
+                        let link_id = format!("{:?}_{}_{}",  risk_order.side, risk_order.price, risk_order.qty);
+                        state_guard.active_orders.insert(link_id, risk_order);
                     }
                 }
                 
@@ -1299,7 +1343,7 @@ impl ExecutionEngine {
 
             match rest_client.post::<CreateOrderRequest, BybitOrderResult>("/v5/order/create", &close_request).await {
                 Ok(order_id) => {
-                    info!("[{}] TSL close order created: {}", self.symbol, order_id);
+                    info!("[{}] TSL close order created: {:?}", self.symbol, order_id);
                 }
                 Err(e) => {
                     error!("[{}] Failed to create TSL close order: {}", self.symbol, e);
@@ -1861,7 +1905,7 @@ impl ExecutionEngine {
         }
 
         // Задача 202: Проверка очереди ордеров, ожидающих захвата цены через 100мс
-        self.check_and_capture_100ms_prices(best_bid, best_ask);
+        self.check_and_capture_100ms_prices(best_bid, best_ask).await;
 
         Ok(())
     }
@@ -3596,7 +3640,7 @@ impl ExecutionEngine {
 
     /// Проверка очереди ордеров, ожидающих захвата цены через 100мс (Задача 202)
     /// Вызывается при каждом обновлении orderbook
-    pub fn check_and_capture_100ms_prices(&mut self, best_bid: Decimal, best_ask: Decimal) {
+    pub async fn check_and_capture_100ms_prices(&mut self, best_bid: Decimal, best_ask: Decimal) {
         let now = crate::utils::timestamp_ms();
         let price_check_delay_ms = 100u64;
         

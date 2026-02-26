@@ -1,7 +1,9 @@
-use ort::{
-    Session, SessionBuilder, GraphOptimizationLevel, 
-    LoggingLevel, inputs, ep, ExecutionMode, Value
-};
+use ort::session::{Session, GraphOptimizationLevel};
+use ort::session::builder::SessionBuilder;
+use ort::session::builder::LoggingLevel;
+use ort::session::ExecutionMode;
+use ort::value::Value;
+use ort::{inputs, ep};
 use ndarray::ArrayView4;
 use std::path::Path;
 use std::time::Instant;

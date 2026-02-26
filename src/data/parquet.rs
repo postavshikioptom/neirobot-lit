@@ -12,7 +12,7 @@ impl FastParquetScanner {
     }
 
     pub fn get_batches(&self) -> Result<impl Iterator<Item = DataFrame>, PolarsError> {
-        let file = File::open(&self.file_path).map_err(|e| PolarsError::ComputeError(e.into()))?;
+        let file = File::open(&self.file_path).map_err(|e| PolarsError::ComputeError(e.to_string().into()))?;
         
         let mut reader = ParquetReader::new(file);
         
@@ -21,7 +21,7 @@ impl FastParquetScanner {
         
         // Check timestamp_ms
         match schema.get("timestamp_ms") {
-            Some(dtype) if matches!(dtype, DataType::Int64) => {},
+            Some(field) if matches!(field.dtype(), ArrowDataType::Int64) => {},
             Some(_) => return Err(PolarsError::ComputeError("Column 'timestamp_ms' must be Int64".into())),
             None => return Err(PolarsError::ComputeError("Column 'timestamp_ms' missing in schema".into())),
         }
@@ -37,7 +37,7 @@ impl FastParquetScanner {
                 
                 // Validate existence and type (Float32 in Parquet, may be read as Float64)
                 match schema.get(&col_name) {
-                    Some(dtype) if matches!(dtype, DataType::Float32 | DataType::Float64) => {},
+                    Some(field) if matches!(field.dtype(), ArrowDataType::Float32 | ArrowDataType::Float64) => {},
                     Some(_) => return Err(PolarsError::ComputeError(format!("Column '{}' must be Float32/64", col_name).into())),
                     None => return Err(PolarsError::ComputeError(format!("Column '{}' missing in schema", col_name).into())),
                 }
@@ -46,10 +46,20 @@ impl FastParquetScanner {
         }
 
         // 3. Batched reader for low-memory processing
-        let batched_reader = reader
+        let df = ParquetReader::new(File::open(&self.file_path).map_err(|e| PolarsError::ComputeError(e.to_string().into()))?)
             .with_columns(Some(columns))
-            .batched(self.batch_size)?;
+            .finish()?;
 
-        Ok(batched_reader.into_iter().filter_map(|b| b.ok()))
+        let height = df.height();
+        let batch_size = self.batch_size;
+        let batches: Vec<DataFrame> = (0..height)
+            .step_by(batch_size)
+            .map(|offset| {
+                let len = std::cmp::min(batch_size, height - offset);
+                df.slice(offset as i64, len)
+            })
+            .collect();
+
+        Ok(batches.into_iter())
     }
 }

@@ -1,5 +1,4 @@
 use std::time::Duration;
-use rand::Rng;
 
 /// Структура для управления экспоненциальной задержкой с джиттером
 pub struct ExponentialBackoff {
@@ -33,11 +32,11 @@ impl ExponentialBackoff {
     /// Использует Equal Jitter стратегию для симметричного случайного отклонения
     /// вокруг базовой задержки.
     pub fn next_delay(&mut self) -> Duration {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         
         // 1. Применяем джиттер к текущей базе (Equal Jitter)
         // Формула: 1.0 + jitter * (rand * 2 - 1) дает значение от (1 - jitter) до (1 + jitter)
-        let jitter_factor = self.jitter * (rng.gen::<f64>() * 2.0 - 1.0);
+        let jitter_factor = self.jitter * (rng.r#gen::<f64>() * 2.0 - 1.0);
         let actual_delay = self.current_delay.mul_f64(1.0 + jitter_factor);
 
         // 2. Рассчитываем следующую базу для экспоненциального роста

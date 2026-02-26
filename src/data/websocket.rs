@@ -74,7 +74,7 @@ async fn create_optimized_socket(
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
 
     // Настройка TCP_NODELAY (отключение алгоритма Нагла)
-    socket.set_nodelay(tcp_nodelay)?;
+    socket.set_tcp_nodelay(tcp_nodelay)?;
 
     // Настройка буферов сокета
     socket.set_recv_buffer_size(recv_buffer_size)?;
@@ -249,7 +249,7 @@ impl BybitPrivateWsClient {
             .context("TLS handshake failed for Private WS")?;
 
         // Используем client_async для WebSocket поверх TLS
-        let (ws_stream, _) = client_async(Url::parse(url)?, tls_stream).await
+        let (ws_stream, _) = client_async(url, tls_stream).await
             .context("Failed to connect to Bybit Private WS")?;
 
         info!("Connected to Bybit Private WS");
@@ -293,7 +293,7 @@ impl BybitPrivateWsClient {
             "op": "subscribe",
             "args": ["order", "execution", "position", "wallet"]
         });
-        ws_sink.send(Message::Text(sub_msg.to_string())).await?;
+        ws_sink.send(Message::Text(sub_msg.to_string().into())).await?;
         info!("Private WS subscriptions sent");
 
         // 4. Heartbeat логика
@@ -318,7 +318,7 @@ impl BybitPrivateWsClient {
                         
                         if elapsed > timeout.as_secs() {
                             warn!("Private WS Heartbeat timeout: {}s. Triggering reconnect...", elapsed);
-                            let _ = reconnect_tx.send(()).await;
+                            let _ = reconnect_tx.send(ReconnectSignal::Immediate).await;
                             break;
                         }
 
@@ -328,7 +328,7 @@ impl BybitPrivateWsClient {
 
                         if let Err(_) = ping_tx.send(()).await {
                             error!("Failed to send ping signal");
-                            let _ = reconnect_tx.send(()).await;
+                            let _ = reconnect_tx.send(ReconnectSignal::Immediate).await;
                             break;
                         }
                     }
@@ -498,7 +498,7 @@ impl BybitWsClient {
             .context("TLS handshake failed for Public WS")?;
 
         // Используем client_async для WebSocket поверх TLS
-        let (ws_stream, _) = client_async(Url::parse(url)?, tls_stream).await
+        let (ws_stream, _) = client_async(url, tls_stream).await
             .context("Failed to connect to Bybit WS")?;
 
         info!("[{}] Connected to Bybit WS", self.symbol);
@@ -518,7 +518,7 @@ impl BybitWsClient {
         let ping_interval = Duration::from_secs(self.config.websocket.ping_interval_sec);
         let timeout = Duration::from_secs(self.config.websocket.pong_timeout_sec);
         
-        let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel(1);
+        let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel::<ReconnectSignal>(1);
         
         let last_activity_clone = self.last_activity.clone();
         let last_ping_sent_at_clone = self.last_ping_sent_at.clone();
@@ -536,7 +536,7 @@ impl BybitWsClient {
                         
                         if elapsed > timeout.as_secs() {
                             warn!("[{}] WS Heartbeat timeout: {}s. Triggering reconnect...", symbol_clone, elapsed);
-                            let _ = reconnect_tx.send(()).await;
+                            let _ = reconnect_tx.send(ReconnectSignal::Immediate).await;
                             break;
                         }
 
@@ -550,7 +550,7 @@ impl BybitWsClient {
                         // Отправка пинга
                         if let Err(e) = ws_sink.send(Message::Text(r#"{"op":"ping"}"#.into())).await {
                             error!("[{}] Failed to send WS ping: {}", symbol_clone, e);
-                            let _ = reconnect_tx.send(()).await;
+                            let _ = reconnect_tx.send(ReconnectSignal::Immediate).await;
                             break;
                         }
                     }
@@ -757,12 +757,11 @@ impl BybitWsClient {
                         None => return Err(anyhow::anyhow!("WS connection closed by server")),
                     }
                 }
-                _ = reconnect_rx.recv() => {
-                    return Err(anyhow::anyhow!("Heartbeat watchdog triggered reconnect"));
-                }
                 Some(signal) = reconnect_rx.recv() => {
                     if signal == ReconnectSignal::Immediate {
                         return Err(anyhow::anyhow!("External Immediate reconnect signal received"));
+                    } else {
+                        return Err(anyhow::anyhow!("Heartbeat watchdog triggered reconnect"));
                     }
                 }
             }

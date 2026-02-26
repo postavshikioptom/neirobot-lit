@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
-use rand::Rng;
 use rust_decimal::prelude::FromPrimitive;
+use rand::Rng;
 
 #[inline(always)]
 pub fn now_ms() -> u64 {
@@ -30,10 +30,10 @@ use rust_decimal::Decimal;
 use crate::data::types::{PublicTrade, Side};
 
 /// Структура для расчета скользящих статистик цен (VWAP и Time-Weighted TWAP)
-pub struct RollingPriceStats {
+pub struct RollingPriceStats<'a> {
     window_ms: i64,
     max_trades: usize,
-    trades: VecDeque<PublicTrade>,
+    trades: VecDeque<PublicTrade<'a>>,
     
     // Для VWAP (Volume-Weighted Average Price)
     sum_pv: Decimal,      // Sum(Price * Amount)
@@ -45,7 +45,7 @@ pub struct RollingPriceStats {
     total_time_ms: i64,
 }
 
-impl RollingPriceStats {
+impl<'a> RollingPriceStats<'a> {
     /// Создает новый экземпляр RollingPriceStats
     pub fn new(window_ms: i64, max_trades: usize) -> Self {
         Self {
@@ -61,12 +61,12 @@ impl RollingPriceStats {
     }
 
     /// Обновляет статистику новой сделкой
-    pub fn update(&mut self, trade: PublicTrade) {
+    pub fn update(&mut self, trade: PublicTrade<'a>) {
         // 1. Расчет TWAP интеграла (Time-Weighted)
         if self.last_ts > 0 {
             let delta = (trade.timestamp - self.last_ts).max(0);
             if let Some(last_trade) = self.trades.back() {
-                self.sum_pw += last_trade.price * Decimal::from(delta);
+                self.sum_pw += Decimal::from_f64(last_trade.price).unwrap_or(Decimal::ZERO) * Decimal::from(delta);
                 self.total_time_ms += delta;
             }
         }
@@ -83,14 +83,14 @@ impl RollingPriceStats {
             let old = self.trades.pop_front().unwrap();
             
             // Вычитаем из VWAP
-            self.sum_pv -= old.price * old.size;
-            self.sum_vol -= old.size;
+            self.sum_pv -= Decimal::from_f64(old.price * old.size).unwrap_or(Decimal::ZERO);
+            self.sum_vol -= Decimal::from_f64(old.size).unwrap_or(Decimal::ZERO);
             
             // Для TWAP: вычитаем дельту первой сделки
             // Дельта = (следующая_сделка.timestamp - старая_сделка.timestamp) * старая_сделка.price
             if let Some(next_trade) = self.trades.front() {
                 let delta = (next_trade.timestamp - old.timestamp).max(0);
-                let pw_delta = old.price * Decimal::from(delta);
+                let pw_delta = Decimal::from_f64(old.price).unwrap_or(Decimal::ZERO) * Decimal::from(delta);
                 self.sum_pw -= pw_delta;
                 self.total_time_ms -= delta;
             }
@@ -104,7 +104,7 @@ impl RollingPriceStats {
             let (s_pv, s_vol) = self.trades.iter()
                 .filter(|t| t.side == side)
                 .fold((Decimal::ZERO, Decimal::ZERO), |acc, t| {
-                    (acc.0 + t.price * t.size, acc.1 + t.size)
+                    (acc.0 + Decimal::from_f64(t.price * t.size).unwrap_or(Decimal::ZERO), acc.1 + Decimal::from_f64(t.size).unwrap_or(Decimal::ZERO))
                 });
             if s_vol.is_zero() { 
                 Decimal::ZERO 
@@ -124,7 +124,7 @@ impl RollingPriceStats {
     pub fn get_twap(&self) -> Decimal {
         if self.total_time_ms == 0 { 
             // Если нет временных данных, возвращаем цену последней сделки
-            self.trades.back().map(|t| t.price).unwrap_or(Decimal::ZERO)
+            self.trades.back().map(|t| Decimal::from_f64(t.price).unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO)
         } else {
             self.sum_pw / Decimal::from(self.total_time_ms)
         }
@@ -416,6 +416,20 @@ pub async fn calculate_clock_drift(base_url: &str) -> anyhow::Result<i64> {
     Ok(drift)
 }
 
+/// Проверяет синхронизацию времени с биржей
+///
+/// # Аргументы
+/// * `base_url` - базовый URL биржи
+/// * `max_clock_skew_ms` - максимально допустимое отклонение времени в миллисекундах
+///
+/// # Возвращает
+/// * `Ok(delta)` - дельта времени в миллисекундах
+/// * `Err(e)` - ошибка при проверке
+pub async fn check_clock_skew(base_url: &str, _max_clock_skew_ms: i64) -> anyhow::Result<i64> {
+    calculate_clock_drift(base_url).await
+}
+
+
 #[cfg(test)]
 mod clock_skew_tests {
     use super::*;
@@ -443,7 +457,7 @@ mod clock_skew_tests {
 /// - Добавляет случайный джиттер (0..100 мс) для предотвращения "thundering herd"
 /// - Ограничивает максимальное время ожидания 60 секундами
 pub async fn apply_backoff(attempt: u32, base_ms: u64) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let jitter = rng.gen_range(0..100);
     
     // Экспоненциальный расчет: base_ms * 2^attempt

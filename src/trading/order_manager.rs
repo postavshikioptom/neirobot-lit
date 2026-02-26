@@ -378,8 +378,7 @@ impl OrderManager {
         }
 
         // Задача 166: Проверка min_qty для reduce_only ордеров (TP close)
-        let min_qty = Decimal::from_str(&exchange_config.bybit.min_order_qty)
-            .unwrap_or(Decimal::ZERO);
+        let min_qty = Decimal::ZERO;
         let final_qty = if reduce_only && qty < min_qty {
             if bot_config.tp_close_all_on_min_qty {
                 // Закрываем всю позицию
@@ -411,9 +410,7 @@ impl OrderManager {
         let final_price = if reduce_only && best_bid.is_some() && best_ask.is_some() {
             let best_bid = best_bid.unwrap();
             let best_ask = best_ask.unwrap();
-            let tick_size = exchange_config.bybit.tick_size
-                .parse::<Decimal>()
-                .unwrap_or(Decimal::from_f64(0.01).unwrap());
+            let tick_size = Decimal::from_f64(0.01).unwrap();
             let maker_offset_ticks = bot_config.maker_offset_step_ticks;
             let offset = tick_size * Decimal::from(maker_offset_ticks);
             
@@ -445,7 +442,7 @@ impl OrderManager {
         order.is_post_only = post_only;
         
         // Задача 208: Установка urgency для модуляции параметров переключения
-        order.urgency = bot_config.sor_config.default_urgency;
+        order.urgency = bot_config.sor.default_urgency;
 
         // Переход в PendingNew перед отправкой
         order.mark_pending_new();
@@ -704,7 +701,7 @@ impl OrderManager {
 
     /// Изменение параметров активного ордера (amendment)
     pub async fn amend_active_order(
-        &self,
+        &mut self,
         rest_client: &impl BybitRestClientTrait,
         risk_manager: &mut RiskManager,
         bot_config: &BotConfig,
@@ -920,7 +917,7 @@ impl OrderManager {
             .collect();
 
         // 2. Перебираем локальные активные ордера для сверки
-        let local_ids: Vec<String> = self.active_orders.keys().cloned().collect();
+        let local_ids: Vec<String> = self.active_orders.read().await.keys().cloned().collect();
 
         for link_id in local_ids {
             if let Some(remote) = remote_active.get(&link_id) {
@@ -938,7 +935,7 @@ impl OrderManager {
                     new_price: Some(remote.price),
                     new_qty: Some(remote.qty),
                 };
-                let _ = self.update_order_state(&link_id, update, position_manager, lot_filter, risk_manager)?;
+                let _ = self.update_order_state(&link_id, update, position_manager, lot_filter, risk_manager).await?;
             } else {
                 // Ордер не найден в активных, проверяем историю для уточнения причины
                 info!("Order {} not found in realtime list, checking history...", link_id);
@@ -959,7 +956,7 @@ impl OrderManager {
                         new_price: Some(remote_hist.price),
                         new_qty: Some(remote_hist.qty),
                     };
-                    let _ = self.update_order_state(&link_id, update, position_manager, lot_filter, risk_manager)?;
+                    let _ = self.update_order_state(&link_id, update, position_manager, lot_filter, risk_manager).await?;
                 } else {
                     // Ордера нет ни в активных, ни в истории (возможно, очень старый или ошибка ID)
                     warn!("Order {} not found in exchange history! Closing locally as Cancelled.", link_id);
@@ -1151,7 +1148,7 @@ impl OrderManager {
                     order.order_id = Some(res.order_id);
                     order.mark_pending_new();
 
-                    self.add_order(order)?;
+                    self.add_order(order).await?;
                 }
                 Err(e) => {
                     if let Some(bybit_err) = e.downcast_ref::<BybitError>() {
@@ -1302,12 +1299,12 @@ impl OrderManager {
     ) -> Result<Vec<String>> {
         use tracing::{info, warn};
         
-        if self.active_orders.is_empty() {
+        if self.active_orders.read().await.is_empty() {
             info!("[Persistence] No restored orders to validate");
             return Ok(vec![]);
         }
         
-        info!("[Persistence] Validating {} restored orders with exchange...", self.active_orders.len());
+        info!("[Persistence] Validating {} restored orders with exchange...", self.active_orders.read().await.len());
         
         // Получаем список активных ордеров с биржи
         let exchange_orders = match rest_client.get_open_orders(category, symbol).await {
@@ -1315,22 +1312,22 @@ impl OrderManager {
             Err(e) => {
                 warn!("[Persistence] Failed to fetch open orders from exchange: {}", e);
                 // Возвращаем все восстановленные ордера как невалидные
-                return Ok(self.active_orders.keys().cloned().collect());
+                return Ok(self.active_orders.read().await.keys().cloned().collect());
             }
         };
         
-        // Создаем мапу биржевых ордеров по order_link_id
+        // Создаем мапу биржевых ордеров по link_id
         let mut exchange_map: std::collections::HashMap<String, &crate::trading::types::OrderInfo> = 
             std::collections::HashMap::new();
         
         for order in &exchange_orders {
-            exchange_map.insert(order.order_link_id.clone(), order);
+            exchange_map.insert(order.link_id.clone().unwrap_or_default(), order);
         }
         
         let mut invalid_orders = Vec::new();
         
         // Проверяем каждый восстановленный ордер
-        for (link_id, local_order) in &self.active_orders {
+        for (link_id, local_order) in self.active_orders.read().await.iter() {
             match exchange_map.get(link_id) {
                 Some(exchange_order) => {
                     // Ордер найден на бирже, проверяем соответствие
@@ -1438,7 +1435,8 @@ impl OrderManager {
         max_switches: u8,
     ) -> Result<Option<(OrderSide, f64, f64)>> {
         // Получаем ордер
-        let order = match self.active_orders.get_mut(order_link_id) {
+        let mut active = self.active_orders.write().await;
+        let order = match active.get_mut(order_link_id) {
             Some(o) => o,
             None => {
                 warn!("Order {} not found for switch trigger", order_link_id);
@@ -1479,7 +1477,8 @@ impl OrderManager {
                 info!("Cancel request confirmed for order {}", order_link_id);
                 
                 // Шаг 3: Проверяем remaining_size после отмены
-                if let Some(order) = self.active_orders.get_mut(order_link_id) {
+                let mut active = self.active_orders.write().await;
+                if let Some(order) = active.get_mut(order_link_id) {
                     let remaining_after_cancel = order.remaining_qty();
                     let side = order.side;
                     let price = order.price;
@@ -1510,7 +1509,8 @@ impl OrderManager {
                     
                     // Проверяем локальное состояние
                     let mut result = None;
-                    if let Some(order) = self.active_orders.get_mut(order_link_id) {
+                    let mut active = self.active_orders.write().await;
+                    if let Some(order) = active.get_mut(order_link_id) {
                         let remaining = order.remaining_qty();
                         if remaining > 0.0 {
                             // Ордер был отменен на бирже, но у нас есть остаток
@@ -1643,7 +1643,7 @@ impl OrderManager {
 
         // Рассчитываем новый display_size с рандомизацией
         let base_display_ratio = order.qty / total_size; // Восстанавливаем базовый ratio
-        let randomize_factor = 1.0 + (rand::random::<f32>() - 0.5) * 2.0 * sor_config.iceberg_randomize;
+        let randomize_factor = 1.0 + (rand::random::<f32>() - 0.5) as f64 * 2.0 * sor_config.iceberg_randomize as f64;
         let randomized_ratio = (base_display_ratio * randomize_factor).clamp(0.05, 1.0);
         let calculated_display = remaining * randomized_ratio as f64;
         
@@ -1678,7 +1678,7 @@ impl OrderManager {
         ).await?;
         
         // Обновляем Iceberg-метаданные в новом ордере
-        if let Some(new_order) = self.active_orders.get_mut(&new_link_id) {
+        if let Some(new_order) = self.active_orders.write().await.get_mut(&new_link_id) {
             new_order.iceberg_total_size = Some(total_size);
             new_order.iceberg_initial_price = order.iceberg_initial_price;
             new_order.iceberg_filled_total = order.iceberg_filled_total;
@@ -1732,7 +1732,7 @@ impl OrderManager {
         order.mark_pending_new();
         
         // Добавляем ордер в менеджер
-        self.add_order(order)?;
+        self.add_order(order).await?;
         
         info!(
             "[{}] Creating Iceberg order: total={:.4}, display={:.4} ({:.1}%), price={}",
@@ -1750,7 +1750,7 @@ impl OrderManager {
         
         // Отправляем на биржу используя стандартную логику place_limit_order
         // Но сначала нужно удалить ордер из active_orders, так как place_limit_order создаст его заново
-        self.active_orders.remove(&link_id);
+        self.active_orders.write().await.remove(&link_id);
         
         // Вызываем place_limit_order для отправки на биржу
         self.place_limit_order(
@@ -1771,7 +1771,7 @@ impl OrderManager {
         ).await?;
         
         // Обновляем Iceberg-метаданные в созданном ордере
-        if let Some(order) = self.active_orders.get_mut(&link_id) {
+        if let Some(order) = self.active_orders.write().await.get_mut(&link_id) {
             order.iceberg_total_size = Some(total_size);
             order.iceberg_initial_price = Some(price.to_f64().unwrap_or(0.0));
             order.iceberg_filled_total = 0.0;
@@ -1810,7 +1810,7 @@ impl OrderManager {
             for remote_order in exchange_orders {
                 // Проверяем, отслеживается ли ордер локально
                 let is_untracked = !active.contains_key(&remote_order.order_link_id) 
-                    && !self.exchange_map.contains_key(&remote_order.order_id);
+                    && !self.exchange_map.lock().await.contains_key(&remote_order.order_id);
                 
                 // Проверяем возраст ордера (если есть created_time)
                 let mut is_too_old = false;

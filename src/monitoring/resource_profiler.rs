@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::Duration;
-use sysinfo::{Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tokio::sync::broadcast;
 use tokio::time;
 use tracing::{debug, error, info, warn};
@@ -86,7 +86,7 @@ impl ResourceProfiler {
         let networks = Networks::new_with_refreshed_list();
 
         let profiler = Self {
-            config,
+            config: config.clone(),
             system,
             networks,
             current_pid,
@@ -129,16 +129,17 @@ impl ResourceProfiler {
     /// Собрать метрики и отправить в broadcast канал
     async fn collect_and_broadcast(&mut self) -> Result<()> {
         // Обновляем информацию о процессе
-        self.system.refresh_process_specifics(
-            self.current_pid,
-            ProcessRefreshKind::new()
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[self.current_pid]),
+            false,
+            ProcessRefreshKind::everything()
                 .with_cpu()
                 .with_memory()
                 .with_disk_usage(),
         );
 
         // Обновляем сетевые интерфейсы
-        self.networks.refresh();
+        self.networks.refresh(false);
 
         // Получаем процесс
         let process = self.system.process(self.current_pid)
@@ -180,6 +181,7 @@ impl ResourceProfiler {
             network_rx_bytes,
             network_tx_bytes,
             memory_leak_detected,
+            soft_limit_reached: false,
         };
 
         // Логируем метрики
