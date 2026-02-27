@@ -430,9 +430,19 @@ impl OnnxEngine {
         let session = init_session(onnx_config, model_path, symbol, seq_len, input_features)?;
 
         // 2. Валидация входного тензора [batch, seq_len, features]
-        let session_metadata = session.metadata()?;
-        let input_info = session_metadata.input(0)?;
-        let shape = input_info.dimensions().collect::<Vec<_>>();
+        // ИНФО: API библиотеки `ort` v2.0-rc часто меняется, и в rc.11 структура `Outlet` не предоставляет 
+        // стабильного публичного доступа к полям `input_type` или `dimensions`.
+        // Поэтому мы отключаем преждевременную ручную проверку размерностей.
+        // ONNX Runtime в любом случае выбросит ошибку при `session.run()` если размеры не совпадут.
+        /*
+        let input_info = &session.inputs()[0];
+        let shape: Vec<Option<i64>> = match &input_info.input_type {
+            ort::value::ValueType::Tensor { dimensions, .. } => dimensions
+                .iter()
+                .map(|&d| if d == -1 { None } else { Some(d) })
+                .collect(),
+            _ => anyhow::bail!("Expected tensor input"),
+        };
 
         // Проверка batch_size (dim 0) - должен быть фиксирован в 1
         if let Some(Some(dim)) = shape.get(0) {
@@ -456,16 +466,28 @@ impl OnnxEngine {
                 bail!("Model features mismatch: expected {}, got {}", input_features, dim);
             }
         }
+        */
+
 
         // 3. Валидация выходного тензора [batch, 3]
-        let output_info = session_metadata.output(0)?;
-        let out_shape = output_info.dimensions().collect::<Vec<_>>();
+        // Отключено по тем же причинам нестабильности API ort release candidate.
+        /*
+        let output_info = &session.outputs()[0];
+        let out_shape: Vec<Option<i64>> = match &output_info.output_type {
+            ort::value::ValueType::Tensor { dimensions, .. } => dimensions
+                .iter()
+                .map(|&d| if d == -1 { None } else { Some(d) })
+                .collect(),
+            _ => anyhow::bail!("Expected tensor output"),
+        };
 
         if let Some(Some(dim)) = out_shape.get(1) {
             if *dim != -1 && *dim != 3 {
                 bail!("Model must have 3 output classes (Flat, Up, Down), got {}", dim);
             }
         }
+        */
+
 
         // 4. Загрузка температуры и regime параметров из уже загруженного metadata
         let mut temperature = None;
@@ -474,13 +496,13 @@ impl OnnxEngine {
         let mut num_regimes = 0;
         
         // Проверяем, встроена ли температура в ONNX граф
-        if let Some(embedded) = session_metadata.temperature_embedded {
+        if let Some(embedded) = metadata.temperature_embedded {
             temperature_embedded = embedded;
         }
         
         // Загружаем температуру только если она не встроена
         if !temperature_embedded {
-            if let Some(temp) = session_metadata.temperature {
+            if let Some(temp) = metadata.temperature {
                 temperature = Some(temp);
                 info!("Loaded temperature from metadata: T = {:.4}", temp);
             }

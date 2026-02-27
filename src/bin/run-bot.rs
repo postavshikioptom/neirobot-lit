@@ -7,12 +7,14 @@ use tokio_util::sync::CancellationToken;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn, error, debug};
-use anyhow::{Result, Context, bail};
+use anyhow::{Result, Context};
 use std::sync::Arc;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use polars::prelude::*;
 use std::panic;
 use std::process;
+use rand::RngExt;
+
 
 #[cfg(all(windows, not(feature = "jemalloc")))]
 use mimalloc::MiMalloc;
@@ -33,9 +35,11 @@ static GLOBAL: Jemalloc = Jemalloc;
 use neirobot_lit::config::loader::load_full_config;
 use neirobot_lit::config::types::FullConfig;
 use neirobot_lit::data::websocket::{BybitWsClient, BybitPrivateWsClient, ReconnectSignal};
-use neirobot_lit::data::types::WsData;
-use neirobot_lit::ml::{OnnxEngine, TensorBuilder, Normalizer};
-use neirobot_lit::trading::{ExecutionEngine, RiskManager, BybitRestClient};
+use neirobot_lit::data::types::{WsData, OrderBookUpdateArc, PublicTrade, PublicTradeArc};
+
+use neirobot_lit::ml::{OnnxEngine, TensorBuilder};
+use neirobot_lit::trading::{ExecutionEngine, BybitRestClient};
+use neirobot_lit::risk::risk_manager::RiskManager;
 use neirobot_lit::trading::emergency;
 use neirobot_lit::data::orderbook::OrderBook;
 use neirobot_lit::utils::logger::init_logger;
@@ -43,7 +47,7 @@ use neirobot_lit::utils::trade_logger::CsvTradeLogger;
 use neirobot_lit::monitoring::resource_profiler::SystemMetricsUpdate;
 use neirobot_lit::monitoring::command_server::{start_command_server, StatusResponse, Command};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 
 #[derive(Parser)]
 #[command(author, version, about = "Neirobot LiT - Live Bot Runner", long_about = None)]
@@ -201,14 +205,12 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         info!("Test alert mode activated");
         
         // Получаем токен и chat_id из конфигурации
-        let telegram_token = full_config.global.as_ref()
-            .and_then(|g| g.telegram_token.clone())
+        let telegram_token = full_config.global.telegram_token.clone()
             .or_else(|| std::env::var("TELEGRAM_TOKEN").ok())
             .context("TELEGRAM_TOKEN must be set in config or .env for test-alert mode")?;
         
         let chat_id = full_config.bot.override_chat_id.clone()
-            .or_else(|| full_config.global.as_ref()
-                .and_then(|g| g.default_chat_id.clone()))
+            .or_else(|| full_config.global.default_chat_id.clone())
             .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
             .context("TELEGRAM_CHAT_ID must be set in config or .env for test-alert mode")?;
         
@@ -224,7 +226,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             chat_id,
             full_config.bot.alert_dedup_ttl_secs,
             master_password.as_deref(),
-            Some(audit_logger.clone()),
+            Some(Arc::new(audit_logger.clone())),
         ).context("Failed to create AlertManager")?;
         
         // Отправляем тестовый алерт
@@ -362,7 +364,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     // Задача 169: Проверка синхронизации времени с биржей
     info!("Checking clock synchronization with Bybit...");
     match neirobot_lit::utils::helpers::check_clock_skew(
-        &full_config.exchange.rest_api_url,
+        &full_config.exchange.rest.base_url,
         full_config.bot.max_clock_skew_ms,
     ).await {
         Ok(delta) => {
@@ -423,7 +425,6 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         ws_connected: AtomicBool::new(true),
         emergency_mode: AtomicBool::new(false),
         start_time: tokio::time::Instant::now(),
-        config: full_config.monitoring.clone().unwrap_or_default(),
     });
 
     // Запуск задачи мониторинга ресурсов в фоновом рантайме (каждые 5 секунд)
@@ -603,13 +604,11 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     risk_manager.set_audit_logger(audit_logger.clone());
     
     // Задача 222: Инициализация AlertManager
-    let alert_manager = if let Some(ref telegram_token) = full_config.global.as_ref()
-        .and_then(|g| g.telegram_token.clone())
+    let alert_manager = if let Some(telegram_token) = full_config.global.telegram_token.clone()
         .or_else(|| std::env::var("TELEGRAM_TOKEN").ok()) {
         
         let chat_id = full_config.bot.override_chat_id.clone()
-            .or_else(|| full_config.global.as_ref()
-                .and_then(|g| g.default_chat_id.clone()))
+            .or_else(|| full_config.global.default_chat_id.clone())
             .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
             .context("TELEGRAM_CHAT_ID must be set in config or .env")?;
         
@@ -624,7 +623,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             chat_id,
             full_config.bot.alert_dedup_ttl_secs,
             master_password.as_deref(),
-            Some(audit_logger.clone()),
+            Some(Arc::new(audit_logger.clone())),
         ) {
             Ok(manager) => {
                 info!("AlertManager initialized for {}", args.symbol);
@@ -764,7 +763,8 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             ws: WebSocketUpgrade,
             axum::extract::State(state): axum::extract::State<(tokio::sync::broadcast::Sender<neirobot_lit::monitoring::types::EquityUpdate>, String, neirobot_lit::utils::audit::AuditLogger)>,
         ) -> impl IntoResponse {
-            ws.on_upgrade(move |socket| handle_socket(socket, state.0, state.1, state.2))
+            let (equity_tx, symbol, audit_logger) = state;
+            ws.on_upgrade(move |socket| handle_socket(socket, equity_tx, symbol, audit_logger))
         }
         
         async fn handle_socket(
@@ -804,7 +804,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             });
             
             let mut recv_task = tokio::spawn(async move {
-                while let Some(Ok(_msg)) = receiver.next().await {
+                while let Some(Ok(_msg)) = futures_util::StreamExt::next(&mut receiver).await {
                     // Игнорируем входящие сообщения от клиента
                 }
             });
@@ -900,8 +900,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     
     bg_handle.spawn(async move {
         // Добавляем небольшой джиттер к интервалу для избежания спама в ровные минуты
-        use rand::Rng;
-        let jitter_secs = rand::thread_rng().gen_range(0..60);
+        let jitter_secs = rand::rng().random_range(0..60);
         let base_interval_secs = cleanup_interval_min * 60;
         let interval_with_jitter = base_interval_secs + jitter_secs;
         
@@ -1137,7 +1136,12 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
             remote_avg_price, 
             remote_leverage, 
             remote_pnl,
-            &ob.market_info
+            &neirobot_lit::trading::types::MarketInfo {
+                qty_step: Decimal::from_f64(full_config.exchange.bybit.lot_step).unwrap_or(Decimal::from_str("0.01").unwrap()),
+                min_order_qty: Decimal::from_f64(full_config.exchange.bybit.min_lot).unwrap_or(Decimal::from_str("0.01").unwrap()),
+                max_order_qty: Decimal::from_f64(1000000.0).unwrap(),
+                tick_size: Decimal::from_f64(full_config.exchange.bybit.tick_size).unwrap_or(Decimal::from_str("0.1").unwrap()),
+            }
         );
         info!("Initial position sync completed. Local qty: {}", execution.position_manager.get_position().qty);
     } else {
@@ -1204,6 +1208,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         config_content, // Задача 184: Передаем содержимое конфига
         config_tx_for_loop, // Задача 184: Передаем sender для отправки обновлений
         persistence_rx, // Задача 218: Канал для периодического сохранения состояния
+        trades_tx, // Задача 236: Канал для дампа сделок
     ).await;
 
     if let Err(ref e) = loop_result {
@@ -1236,7 +1241,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
         
         // Собираем активные ордера из RiskManager
         let active_orders: Vec<(String, neirobot_lit::utils::persistence::OrderIntent)> = 
-            execution.risk_manager.active_intents.iter()
+            execution.risk_manager.get_active_intents().iter()
                 .map(|(link_id, intent)| {
                     let persist_intent = neirobot_lit::utils::persistence::OrderIntent {
                         side: intent.side,
@@ -1317,7 +1322,7 @@ pub async fn run_bot_loop<S>(
     mut ob: OrderBook,
     mut tensor_builder: TensorBuilder,
     engine: &mut OnnxEngine,
-    execution: &mut ExecutionEngine,
+    execution: &mut ExecutionEngine<'_>,
     symbol: &str,
     rest_client: &BybitRestClient,
     config: &FullConfig,
@@ -1336,6 +1341,7 @@ pub async fn run_bot_loop<S>(
     config_content: Arc<std::sync::Mutex<String>>, // Задача 184: Хранение содержимого конфига
     config_tx_clone: mpsc::Sender<neirobot_lit::config::types::FullConfig>, // Задача 184: Отправка обновлений конфига
     mut persistence_rx: mpsc::Receiver<()>, // Задача 218: Канал для периодического сохранения состояния
+    trades_tx: mpsc::Sender<PublicTradeArc>, // Задача 236: Канал для дампа сделок
 ) -> Result<()> 
 where S: tokio_stream::Stream<Item = WsData> + Unpin
 {
@@ -1344,7 +1350,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
     let mut heartbeat_tick = tokio::time::interval(Duration::from_millis(1000));
     let mut stop_check_interval = tokio::time::interval(Duration::from_millis(config.bot.stop_check_interval_ms));
     let mut snapshot_interval = tokio::time::interval(Duration::from_millis(config.bot.snapshot_interval_ms));
-    let mut stale_order_check_interval = tokio::time::interval(Duration::from_millis(config.bot.stale_check_interval_ms)); // Задача 179
+    let mut stale_order_check_interval = tokio::time::interval(Duration::from_millis(config.bot.risk.stale_check_interval_ms)); // Задача 179
     let mut log_archival_interval = tokio::time::interval(Duration::from_secs(3600)); // Задача 182: Архивация логов раз в час
     let mut data_cleanup_interval = tokio::time::interval(Duration::from_secs(config.bot.risk.cleanup_interval_hours as u64 * 3600)); // Задача 187: Очистка данных
     let mut clock_drift_check_interval = tokio::time::interval(Duration::from_secs(config.bot.risk.clock_sync_interval_s)); // Задача 172: Проверка дрифта часов
@@ -1443,7 +1449,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                 if execution.risk_manager.check_time_stop(position, &config.bot) {
                     let side = if position.qty.is_sign_positive() { "Long" } else { "Short" };
                     let opened_at = position.opened_at.unwrap_or(0);
-                    let now = neirobot_lit::utils::helpers::get_unix_ms();
+                    let now = neirobot_lit::utils::helpers::unix_ms();
                     let age_ms = now.saturating_sub(opened_at);
                     let limit_ms = if position.qty.is_sign_positive() {
                         config.bot.time_decay.max_age_long_ms
@@ -1482,7 +1488,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                         remote_avg_price, 
                         remote_leverage, 
                         remote_pnl,
-                        &ob.market_info
+                        &execution.market_info
                     );
                 } else {
                     debug!("Position sync failed for {}, will retry on next interval", symbol);
@@ -1634,7 +1640,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
             _ = stale_order_check_interval.tick() => {
                 // Задача 179: Периодическая проверка "зависших" ордеров
                 if let Err(e) = execution.health_monitor.check_stale_orders(
-                    &rest_client,
+                    rest_client,
                     &config.bot,
                     &config.exchange,
                     &mut execution.risk_manager.active_intents,
@@ -1655,7 +1661,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
             _ = clock_drift_check_interval.tick() => {
                 // Задача 172: Периодическая проверка дрифта часов
                 if let Err(e) = execution.health_monitor.check_clock_drift(
-                    &config.exchange.base_url
+                    &config.exchange.rest.base_url
                 ).await {
                     error!("Clock drift check failed: {}", e);
                 }
@@ -1685,11 +1691,8 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                 info!("[Audit] Applying config update in run_bot_loop");
                 
                 // Обновляем конфигурацию в execution engine (каскадно обновляет все компоненты)
-                if let Err(e) = execution.update_config(&new_config.bot) {
-                    error!("[Audit] Failed to apply config update: {}", e);
-                } else {
+                execution.update_config(new_config.bot);
                     info!("[Audit] Config update applied successfully");
-                }
             }
             Some(remote_balance) = balance_sync_rx.recv() => {
                 // Задача 221: Синхронизация баланса с биржей для устранения дрейфа
@@ -1717,7 +1720,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                     tracing::error!("[Persistence] Failed to save state: {}", e);
                 }
             }
-            Some(metrics) = metrics_rx.recv() => {
+            Ok(metrics) = metrics_rx.recv() => {
                 // Задача 225: Обработка системных метрик от ResourceProfiler
                 execution.on_system_metrics(metrics);
             }
@@ -1825,7 +1828,7 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
             
             // Получаем latency из мониторинга
             use neirobot_lit::monitoring::latency::LATENCY_MONITOR;
-            status.latency_ms = Some(LATENCY_MONITOR.get_last_e2e_ms());
+            status.latency_ms = Some(LATENCY_MONITOR.get_last_total_ms() as f64);
 
             status.status = if execution.emergency_mode {
                 "emergency".to_string()
@@ -1834,7 +1837,6 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
             } else {
                 "running".to_string()
             };
-        }
         }
     }
     
@@ -1847,10 +1849,10 @@ async fn handle_market_update(
     ob: &mut OrderBook,
     tensor_builder: &mut TensorBuilder,
     engine: &mut OnnxEngine,
-    execution: &mut ExecutionEngine,
+    execution: &mut ExecutionEngine<'_>,
     rest_client: &neirobot_lit::trading::BybitRestClient,
     exchange_config: &neirobot_lit::config::types::ExchangeConfig,
-    ws_reconnect_tx: mpsc::Sender<crate::data::websocket::ReconnectSignal>,
+    ws_reconnect_tx: mpsc::Sender<ReconnectSignal>,
 ) -> Result<()> {
     use chrono::Utc;
     
@@ -1902,7 +1904,7 @@ async fn handle_market_update(
                     ob.clear();
                     
                     // Отправляем сигнал на немедленный реконнект в WebSocket
-                    let _ = ws_reconnect_tx.send(crate::data::websocket::ReconnectSignal::Immediate).await;
+                    let _ = ws_reconnect_tx.send(ReconnectSignal::Immediate).await;
                     
                     return Err(anyhow::anyhow!("Checksum mismatch limit exceeded"));
                 }
@@ -1927,7 +1929,16 @@ async fn handle_market_update(
         ).await {
             Ok(snapshot) => {
                 // 2. Сброс стакана и применение снимка
-                ob.apply_update(&snapshot);
+                let snapshot_arc = OrderBookUpdateArc {
+                    symbol: Arc::from(snapshot.symbol.as_str()),
+                    timestamp_ms: snapshot.timestamp_ms,
+                    last_update_id: snapshot.last_update_id,
+                    is_snapshot: snapshot.is_snapshot,
+                    bids: snapshot.bids,
+                    asks: snapshot.asks,
+                    checksum: snapshot.checksum,
+                };
+                ob.apply_update(&snapshot_arc);
                 
                 // 3. Сброс флага коррупции в HealthMonitor и разблокировка RiskManager
                 execution.risk_manager.health_monitor.reset_corruption();
@@ -1978,7 +1989,7 @@ async fn handle_market_update(
 
         // Инкрементируем метрику для Prometheus (задача 163)
         if let Some(counter) = neirobot_lit::monitoring::prometheus::TIME_DECAY_EXIT_COUNTER.get() {
-            counter.with_label_values(&[symbol]).inc();
+            counter.with_label_values(&[&execution.symbol]).inc();
         }
 
         // Экстренное закрытие позиции
@@ -1989,15 +2000,16 @@ async fn handle_market_update(
     }
 
     // 4. Задача 161: Обновление и детекция режима рынка (ПЕРЕД инференсом)
-    let current_regime = if let Some(ref mut detector) = execution.regime_detector {
-        detector.update(&ob, now_ms as u64);
-        detector.detect()
+    let current_regime = if let Some(det) = execution.regime_detector.as_mut() {
+        let snapshot_ref: &neirobot_lit::data::orderbook::OrderBookSnapshot = &snapshot;
+        det.update(snapshot_ref, now_ms as u64);
+        det.detect()
     } else {
         neirobot_lit::config::types::RegimeId::Unknown
     };
     
     // Преобразуем RegimeId в usize для передачи в инференс
-    let regime_id = match current_regime {
+    let regime_id: usize = match current_regime {
         neirobot_lit::config::types::RegimeId::Quiet => 0,
         neirobot_lit::config::types::RegimeId::Trend => 1,
         neirobot_lit::config::types::RegimeId::Volatile => 2,
@@ -2022,12 +2034,12 @@ async fn handle_market_update(
         let start_inf = std::time::Instant::now();
         
         // Выполняем инференс напрямую из заполненного буфера (Zero-copy)
-        let mut inference = engine.predict_with_buffer(Some(regime_id)).context("Inference prediction failed")?;
+        let mut inference = engine.predict_buffered(&[], Some(regime_id)).context("Inference prediction failed")?;
         let inference_micros = start_inf.elapsed().as_micros() as u64;
         
         // Задача 169: Устанавливаем timestamp источника сигнала (receive_ts из snapshot)
         // Это время получения исходного снепшота стакана для проверки свежести сигнала
-        inference.source_timestamp_ms = snapshot.timestamp_ms as u64;
+        inference.output.signal.source_timestamp_ms = snapshot.timestamp_ms as u64;
 
         // Логирование высокой задержки (задача 047, задача 082)
         if inference_micros > 50_000 {
@@ -2060,14 +2072,14 @@ async fn handle_market_update(
 
         // 6. Execution logic - Задача 161: передаем current_regime для динамических порогов
         execution.on_inference_output(
-            inference, 
+            inference.output, 
             price, 
             Decimal::from_f64(best_bid).unwrap_or_default(), 
             Decimal::from_f64(bid_vol).unwrap_or_default(),
             Decimal::from_f64(best_ask).unwrap_or_default(),
             Decimal::from_f64(ask_vol).unwrap_or_default(),
-            &ob,  // Задача 191: Передаем живой стакан вместо снапшота для консистентности
-            &update,
+            &ob,  
+            &update.to_owned(),
             rest_client,
             exchange_config,
             current_regime  // Задача 161: текущий режим рынка для динамических порогов
@@ -2099,7 +2111,7 @@ async fn run_replay_loop(
     mut ob: OrderBook,
     mut tensor_builder: TensorBuilder,
     engine: &mut OnnxEngine,
-    execution: &mut ExecutionEngine,
+    execution: &mut ExecutionEngine<'_>,
     symbol: &str,
     rest_client: &BybitRestClient,
     config: &FullConfig,

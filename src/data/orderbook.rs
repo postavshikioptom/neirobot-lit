@@ -565,8 +565,8 @@ impl OrderBook {
 
     #[inline(always)]
     pub fn get_best_bid_ask_with_vol(&self) -> (f64, f64, f64, f64) {
-        let bid = self.bids.first().map(|(p, v)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
-        let ask = self.asks.first().map(|(p, v)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
+        let bid = self.bids.first().map(|(p, v): &(Decimal, Decimal)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
+        let ask = self.asks.first().map(|(p, v): &(Decimal, Decimal)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
         (bid.0, bid.1, ask.0, ask.1)
     }
 

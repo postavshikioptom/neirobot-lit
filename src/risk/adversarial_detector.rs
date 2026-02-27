@@ -1,5 +1,5 @@
 use crate::config::AdversarialConfig;
-use crate::data::types::{OrderBookUpdateOwned, PublicTrade, Side};
+use crate::data::types::{OrderBookUpdateOwned, PublicTradeArc, Side};
 use std::collections::VecDeque;
 use smallvec::SmallVec;
 use wide::f64x2;
@@ -110,9 +110,9 @@ impl AdversarialDetector {
     }
 
     /// Обновить VPIN с новой сделкой
-    fn update_vpin(&mut self, trade: &PublicTrade, mid_price: Option<f64>) {
-        let trade_price = trade.price.to_f64().unwrap_or(0.0);
-        let trade_volume = trade.size.to_f64().unwrap_or(0.0);
+    fn update_vpin(&mut self, trade: &PublicTradeArc, mid_price: Option<f64>) {
+        let trade_price = trade.price;
+        let trade_volume = trade.size;
 
         // Классифицировать сделку через Tick Test с Mid Price
         let side = self.classify_trade_side(trade_price, mid_price);
@@ -341,7 +341,7 @@ impl AdversarialDetector {
     }
 
     /// Проверить Spoofing (спуфинг) с инкрементальными обновлениями и zero-allocation
-    fn check_spoofing(&mut self, update: &OrderBookUpdateOwned, trades: &[PublicTrade]) -> bool {
+    fn check_spoofing(&mut self, update: &OrderBookUpdateOwned, trades: &[PublicTradeArc]) -> bool {
         // Инкрементальное обновление среднего объема (SIMD-оптимизировано, задача 078)
         let all_levels = update.bids.len() + update.asks.len();
         if all_levels > 0 {
@@ -361,8 +361,8 @@ impl AdversarialDetector {
 
         // Обновить поле filled в основе сделок (FIX #1: Update filled field)
         for trade in trades {
-            let trade_price = trade.price.to_f64().unwrap_or(0.0);
-            let trade_size = trade.size.to_f64().unwrap_or(0.0);
+            let trade_price = trade.price;
+            let trade_size = trade.size;
             let key = Self::price_to_key(trade_price);
             
             // Обновить bid историю если сделка попала на bid цену
@@ -453,7 +453,7 @@ impl AdversarialDetector {
     pub fn update_and_check(
         &mut self,
         orderbook: &OrderBookUpdateOwned,
-        trades: &[PublicTrade],
+        trades: &[PublicTradeArc],
     ) -> bool {
         // Вычислить Mid Price (средняя цена best bid и best ask)
         let mid_price = if !orderbook.bids.is_empty() && !orderbook.asks.is_empty() {

@@ -128,6 +128,21 @@ pub struct OrderBookUpdateArc {
     pub checksum: Option<u32>,
 }
 
+impl OrderBookUpdateArc {
+    /// Конвертирует Arc версию в owned для совместимости с ExecutionEngine
+    pub fn to_owned(&self) -> OrderBookUpdateOwned {
+        OrderBookUpdateOwned {
+            symbol: self.symbol.to_string(),
+            timestamp_ms: self.timestamp_ms,
+            last_update_id: self.last_update_id,
+            is_snapshot: self.is_snapshot,
+            bids: self.bids.clone(),
+            asks: self.asks.clone(),
+            checksum: self.checksum,
+        }
+    }
+}
+
 /// PublicTrade с Arc<str> для дешёвого clone
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicTradeArc {

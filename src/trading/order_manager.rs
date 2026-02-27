@@ -960,7 +960,7 @@ impl OrderManager {
                 } else {
                     // Ордера нет ни в активных, ни в истории (возможно, очень старый или ошибка ID)
                     warn!("Order {} not found in exchange history! Closing locally as Cancelled.", link_id);
-                    self.update_order(&link_id, None, OrderState::Cancelled, None);
+                    self.update_order(&link_id, None, OrderState::Cancelled, None).await;
                 }
             }
         }
@@ -1489,7 +1489,7 @@ impl OrderManager {
                         info!("Order {} switched to aggressive. Switch count: {}", order_link_id, order.switch_count);
                         
                         // Обновляем состояние ордера (это переместит его в историю)
-                        self.update_order(order_link_id, None, OrderState::Cancelled, None);
+                        self.update_order(order_link_id, None, OrderState::Cancelled, None).await;
                         
                         // Возвращаем данные для агрессивного ордера
                         return Ok(Some((side, remaining_after_cancel, price)));
@@ -1522,7 +1522,7 @@ impl OrderManager {
                     }
                     
                     if result.is_some() {
-                        self.update_order(order_link_id, None, OrderState::Cancelled, None);
+                        self.update_order(order_link_id, None, OrderState::Cancelled, None).await;
                     }
                     return Ok(result);
                 }

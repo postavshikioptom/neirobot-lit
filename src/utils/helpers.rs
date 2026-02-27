@@ -27,13 +27,13 @@ pub fn now_secs() -> u64 {
 
 use std::collections::VecDeque;
 use rust_decimal::Decimal;
-use crate::data::types::{PublicTrade, Side};
+use crate::data::types::{Side, PublicTradeArc};
 
 /// Структура для расчета скользящих статистик цен (VWAP и Time-Weighted TWAP)
-pub struct RollingPriceStats<'a> {
+pub struct RollingPriceStats {
     window_ms: i64,
     max_trades: usize,
-    trades: VecDeque<PublicTrade<'a>>,
+    trades: VecDeque<PublicTradeArc>,
     
     // Для VWAP (Volume-Weighted Average Price)
     sum_pv: Decimal,      // Sum(Price * Amount)
@@ -45,7 +45,7 @@ pub struct RollingPriceStats<'a> {
     total_time_ms: i64,
 }
 
-impl<'a> RollingPriceStats<'a> {
+impl RollingPriceStats {
     /// Создает новый экземпляр RollingPriceStats
     pub fn new(window_ms: i64, max_trades: usize) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl<'a> RollingPriceStats<'a> {
     }
 
     /// Обновляет статистику новой сделкой
-    pub fn update(&mut self, trade: PublicTrade<'a>) {
+    pub fn update(&mut self, trade: PublicTradeArc) {
         // 1. Расчет TWAP интеграла (Time-Weighted)
         if self.last_ts > 0 {
             let delta = (trade.timestamp - self.last_ts).max(0);
@@ -183,16 +183,18 @@ mod tests {
         let mut stats = RollingPriceStats::new(60000, 100);
         
         // Добавляем несколько сделок
-        stats.update(PublicTrade {
-            price: dec!(100.0),
-            size: dec!(10.0),
+        stats.update(PublicTradeArc {
+            symbol: std::sync::Arc::from("BTCUSDT"),
+            price: 100.0,
+            size: 10.0,
             side: Side::Buy,
             timestamp: 1000,
         });
         
-        stats.update(PublicTrade {
-            price: dec!(110.0),
-            size: dec!(20.0),
+        stats.update(PublicTradeArc {
+            symbol: std::sync::Arc::from("BTCUSDT"),
+            price: 110.0,
+            size: 20.0,
             side: Side::Sell,
             timestamp: 2000,
         });
@@ -206,16 +208,18 @@ mod tests {
     fn test_rolling_price_stats_twap() {
         let mut stats = RollingPriceStats::new(60000, 100);
         
-        stats.update(PublicTrade {
-            price: dec!(100.0),
-            size: dec!(10.0),
+        stats.update(PublicTradeArc {
+            symbol: std::sync::Arc::from("BTCUSDT"),
+            price: 100.0,
+            size: 10.0,
             side: Side::Buy,
             timestamp: 1000,
         });
         
-        stats.update(PublicTrade {
-            price: dec!(110.0),
-            size: dec!(20.0),
+        stats.update(PublicTradeArc {
+            symbol: std::sync::Arc::from("BTCUSDT"),
+            price: 110.0,
+            size: 20.0,
             side: Side::Sell,
             timestamp: 3000,
         });
@@ -229,16 +233,18 @@ mod tests {
     fn test_rolling_price_stats_sliding_window() {
         let mut stats = RollingPriceStats::new(5000, 100); // 5 секунд окно
         
-        stats.update(PublicTrade {
-            price: dec!(100.0),
-            size: dec!(10.0),
+        stats.update(PublicTradeArc {
+            symbol: std::sync::Arc::from("BTCUSDT"),
+            price: 100.0,
+            size: 10.0,
             side: Side::Buy,
             timestamp: 1000,
         });
         
-        stats.update(PublicTrade {
-            price: dec!(110.0),
-            size: dec!(20.0),
+        stats.update(PublicTradeArc {
+            symbol: std::sync::Arc::from("BTCUSDT"),
+            price: 110.0,
+            size: 20.0,
             side: Side::Sell,
             timestamp: 7000, // Старая сделка должна быть удалена
         });

@@ -212,7 +212,7 @@ pub enum RiskResult {
 }
 
 pub struct RiskManager {
-    config: RiskConfig,
+    pub config: RiskConfig,
     initial_equity: Decimal,
     peak_equity: Decimal,
     daily_start_equity: Decimal,
@@ -236,7 +236,7 @@ pub struct RiskManager {
     consecutive_rejections: u32,
     rejection_history: VecDeque<u64>,
     // Задача 176: Защита от дублирования ордеров
-    active_intents: HashMap<String, OrderIntent>, // ключ - order_link_id
+    pub active_intents: HashMap<String, OrderIntent>, // ключ - order_link_id
     // Задача 178: Динамическое сокращение лимитов позиции
     current_scale: f64, // Текущий масштаб лимита позиции (1.0 = 100%, 0.2 = 20%)
     // Задача №198: Статическая диспетчеризация риск-гейтов
@@ -1832,6 +1832,11 @@ impl RiskManager {
         }
 
         false
+    }
+
+    /// Получение активных интентов (для сохранения состояния)
+    pub fn get_active_intents(&self) -> &HashMap<String, OrderIntent> {
+        &self.active_intents
     }
 
     /// Получение мутабельной ссылки на активные интенты (для cleanup в HealthMonitor)

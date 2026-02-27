@@ -19,7 +19,7 @@ use crate::utils::timestamp_ms;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use crate::utils::helpers::RollingPriceStats;
-use crate::data::types::{PublicTrade, OrderBookUpdateOwned};
+use crate::data::types::{PublicTradeArc, OrderBookUpdateOwned};
 
 /// Стратегия исполнения ордера (задача 206: Smart Order Routing)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,7 +52,7 @@ pub struct ExecutionInstruction {
     pub urgency: f32,
 }
 
-pub struct ExecutionEngine<'a> {
+pub struct ExecutionEngine {
     pub order_manager: OrderManager,
     pub position_manager: PositionManager,
     pub risk_manager: RiskManager,
@@ -69,7 +69,7 @@ pub struct ExecutionEngine<'a> {
     pub last_probabilities: [f32; 3], // [Flat, Up, Down]
     pub last_signal_timestamp_ms: u64, // Время получения последнего сигнала (Задача 169)
     pub spread_ema: Option<Decimal>,  // EMA спреда для динамического фильтра
-    pub price_stats: RollingPriceStats<'a>, // Статистика цен для VWAP/TWAP
+    pub price_stats: RollingPriceStats, // Статистика цен для VWAP/TWAP
     pub mid_history: VecDeque<f64>,
     pub sum_returns: f64,
     pub sum_returns_sq: f64,
@@ -92,7 +92,7 @@ pub struct ExecutionEngine<'a> {
     // Задача 165: Детектор адверсариальной активности
     pub adversarial_detector: crate::risk::AdversarialDetector,
     // Задача 165: Накопление сделок для VPIN расчета
-    pub pending_trades: Vec<PublicTrade<'a>>,
+    pub pending_trades: Vec<PublicTradeArc>,
     // Задача 170: Текущая ставка финансирования и время следующего клиринга
     pub current_funding_rate: f64,
     pub next_funding_time: u64,
@@ -102,7 +102,7 @@ pub struct ExecutionEngine<'a> {
     pub last_slice_time: Instant,
 }
 
-impl<'a> ExecutionEngine<'a> {
+impl ExecutionEngine {
     pub fn new(
         symbol: String, 
         risk_manager: RiskManager, 
@@ -189,7 +189,7 @@ impl<'a> ExecutionEngine<'a> {
 
     /// Обработка публичных сделок для обновления статистики VWAP/TWAP и VPIN
     #[inline(always)]
-    pub fn on_public_trade(&mut self, trade: PublicTrade<'a>) {
+    pub fn on_public_trade(&mut self, trade: PublicTradeArc) {
         self.price_stats.update(trade.clone());
         // Задача 165: Накапливаем сделку для VPIN расчета
         self.pending_trades.push(trade);

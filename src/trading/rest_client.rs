@@ -240,6 +240,7 @@ pub trait BybitRestClientTrait: Send + Sync {
     ) -> Result<serde_json::Value>;
 }
 
+#[derive(Clone)]
 pub struct BybitRestClient {
     client: Client,
     api_key: String,

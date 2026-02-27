@@ -108,6 +108,9 @@ fn default_trade_noise_filter_pct() -> f64 { 0.05 }
 // --- Функции default для URL и конфигурации обмена ---
 fn default_bybit_category() -> String { "linear".to_string() }
 fn default_bybit_api_key_path() -> String { "api_key".to_string() }
+fn default_tick_size() -> f64 { 0.1 }
+fn default_lot_step() -> f64 { 0.01 }
+fn default_min_lot() -> f64 { 0.01 }
 fn default_public_url() -> String { "wss://stream.bybit.com/v5/public/linear".to_string() }
 fn default_private_ws_url() -> String { "wss://stream.bybit.com/v5/private".to_string() }
 fn default_base_url() -> String { "https://api.bybit.com".to_string() }
@@ -910,6 +913,12 @@ pub struct BybitConfig {
     pub category: String,
     #[serde(default = "default_bybit_api_key_path")]
     pub api_key_path: String,
+    #[serde(default = "default_tick_size")]
+    pub tick_size: f64,
+    #[serde(default = "default_lot_step")]
+    pub lot_step: f64,
+    #[serde(default = "default_min_lot")]
+    pub min_lot: f64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]

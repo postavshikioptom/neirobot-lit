@@ -75,6 +75,13 @@ impl LatencyMonitor {
         );
     }
 
+    /// Получает последнее значение (медиану) из гистограммы total в миллисекундах
+    pub fn get_last_total_ms(&self) -> u64 {
+        let total = self.total.lock();
+        // Возвращаем медиану (P50) в миллисекундах, конвертируя из микросекунд
+        total.value_at_quantile(0.5) / 1000
+    }
+
     /// Сбрасывает все гистограммы
     pub fn reset(&self) {
         self.network.lock().clear();

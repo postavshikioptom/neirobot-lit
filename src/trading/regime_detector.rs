@@ -1,5 +1,5 @@
 use crate::config::types::RegimeId;
-use crate::data::orderbook::OrderBook;
+use crate::data::orderbook::OrderBookSnapshot;
 use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -64,7 +64,7 @@ impl RegimeDetector {
     }
     
     /// Обновляет буферы данными из нового снапшота
-    pub fn update(&mut self, orderbook: &OrderBook, timestamp_ms: u64) {
+    pub fn update(&mut self, orderbook: &OrderBookSnapshot, timestamp_ms: u64) {
         let window = self.config.window;
         
         // Получаем данные из стакана

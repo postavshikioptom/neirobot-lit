@@ -18,7 +18,7 @@ toml = "1.0.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time", "json"] }
 tracing-appender = "0.2.3"
-clap = { version = "4.5.59", features = ["derive"] }
+clap = { version = "4.5.59", features = ["derive", "env"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-native-tls = "0.3"
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
@@ -38,7 +38,7 @@ diffy = "0.4.2"
 hex = "0.4.3"
 rust_decimal = { version = "1.40.0", features = ["serde-float"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
-ort = { version = "2.0.0-rc.6", features = ["ndarray", "cuda", "tensorrt"] }
+ort = { version = "2.0.0-rc.11", features = ["ndarray", "cuda", "tensorrt"] }
 polars = { version = "0.53.0", features = ["parquet", "lazy", "new_streaming", "regex", "temporal", "dtype-datetime", "dtype-date", "dtype-duration"] }
 ndarray = "0.17.2"
 ordered-float = "5.1.0"
@@ -57,7 +57,7 @@ libc = "0.2.180"
 core_affinity = "0.8.3"
 hdrhistogram = "7.5.4"
 parking_lot = "0.12.5"
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.7", features = ["json", "ws"] }
 ureq = "3.2.0"
 prometheus = "0.14"
 metrics = "0.24.3"

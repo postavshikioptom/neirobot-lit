@@ -57,7 +57,6 @@ fn fetch_data(data: &mut DashboardData) {
                 
                 // Mock данные для демонстрации (в реальности нужен отдельный эндпоинт)
                 // Генерируем случайную цену для sparkline
-                use std::f64::consts::PI;
                 let time = Instant::now().elapsed().as_secs_f64();
                 data.current_price = 100.0 + (time * 0.5).sin() * 10.0;
                 
