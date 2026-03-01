@@ -52,8 +52,7 @@ lazy_static = "1.5.0"
 csv = "1.4.0"
 async-trait = "0.1.89"
 num_cpus = "1.17.0"
-nix = "0.30.1"
-libc = "0.2.180"
+# nix и libc перенесены в раздел [target.'cfg(unix)'.dependencies] ниже
 core_affinity = "0.8.3"
 hdrhistogram = "7.5.4"
 parking_lot = "0.12.5"
@@ -75,6 +74,10 @@ tempfile = "3.25.0"
 dashmap = "6.1.0"
 fs2 = "0.4.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.30.1"
+libc = "0.2.180"
 tikv-jemallocator = { version = "0.6.1", optional = true }
 
 [features]
@@ -93,12 +96,19 @@ mockito = "1.7.2"
 criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"] }
 rust_decimal_macros = "1.40.0"
 
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = false
+codegen-units = 1
+panic = "abort"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-debug = true
-strip = false
+debug = false
+strip = true
 panic = "abort"
 
 [[bench]]

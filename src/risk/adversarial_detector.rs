@@ -3,7 +3,6 @@ use crate::data::types::{OrderBookUpdateOwned, PublicTradeArc, Side};
 use std::collections::VecDeque;
 use smallvec::SmallVec;
 use wide::f64x2;
-use rust_decimal::prelude::ToPrimitive;
 
 /// Структура для отслеживания жизненного цикла уровня (для Spoofing detection)
 #[derive(Debug, Clone)]

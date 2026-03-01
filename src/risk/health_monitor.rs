@@ -608,25 +608,22 @@ impl HealthMonitor {
     ///    - Repeg: переставить ордер к best_bid/ask
     /// 4. Удаляет интент после завершения действия
     pub async fn check_stale_orders(
-        &self,
         rest_client: &impl crate::trading::rest_client::BybitRestClientTrait,
         bot_config: &crate::config::types::BotConfig,
         exchange_config: &crate::config::types::ExchangeConfig,
-        active_intents: &mut std::collections::HashMap<String, crate::risk::risk_manager::OrderIntent>,
-        order_manager: &mut crate::trading::order_manager::OrderManager,
-        risk_manager: &mut crate::risk::risk_manager::RiskManager,
+        execution: &mut crate::trading::ExecutionEngine,
     ) -> anyhow::Result<()> {
         use crate::config::types::StaleOrderAction;
         
         let now = chrono::Utc::now().timestamp_millis() as u64;
-        let max_order_life_ms = self.config.max_order_life_ms;
-        let min_fill_pct_to_keep = self.config.min_fill_pct_to_keep;
-        let stale_order_action = self.config.stale_order_action;
+        let max_order_life_ms = execution.health_monitor.config.max_order_life_ms;
+        let min_fill_pct_to_keep = execution.health_monitor.config.min_fill_pct_to_keep;
+        let stale_order_action = execution.health_monitor.config.stale_order_action;
         
         // Собираем список "зависших" ордеров
         let mut stale_orders: Vec<String> = Vec::new();
         
-        for (link_id, intent) in active_intents.iter() {
+        for (link_id, intent) in execution.risk_manager.active_intents.iter() {
             let age_ms = now.saturating_sub(intent.timestamp);
             
             // Проверяем, превышено ли время жизни
@@ -655,9 +652,9 @@ impl HealthMonitor {
                 StaleOrderAction::CancelOnly => {
                     tracing::info!("Cancelling stale order: {} (action: CancelOnly)", link_id);
                     // Отменяем ордер с force=true (ордер может быть уже исполнен на бирже)
-                    if let Err(e) = order_manager.cancel_order(
+                    if let Err(e) = execution.order_manager.cancel_order(
                         rest_client,
-                        risk_manager,
+                        &mut execution.risk_manager,
                         bot_config,
                         exchange_config,
                         &link_id,
@@ -666,8 +663,8 @@ impl HealthMonitor {
                         tracing::error!("Failed to cancel stale order {}: {}", link_id, e);
                     }
                     // Удаляем интент
-                    risk_manager.remove_order_intent(&link_id);
-                    active_intents.remove(&link_id);
+                    execution.risk_manager.remove_order_intent(&link_id);
+                    execution.risk_manager.active_intents.remove(&link_id);
                 }
                 
                 StaleOrderAction::CancelAndMarketFill => {
@@ -675,9 +672,9 @@ impl HealthMonitor {
                     // TODO: Реализовать логику CancelAndMarketFill
                     // Требует доступа к текущему сигналу (задача 169) и best_bid/ask
                     // Пока просто отменяем
-                    if let Err(e) = order_manager.cancel_order(
+                    if let Err(e) = execution.order_manager.cancel_order(
                         rest_client,
-                        risk_manager,
+                        &mut execution.risk_manager,
                         bot_config,
                         exchange_config,
                         &link_id,
@@ -685,8 +682,8 @@ impl HealthMonitor {
                     ).await {
                         tracing::error!("Failed to cancel stale order {}: {}", link_id, e);
                     }
-                    risk_manager.remove_order_intent(&link_id);
-                    active_intents.remove(&link_id);
+                    execution.risk_manager.remove_order_intent(&link_id);
+                    execution.risk_manager.active_intents.remove(&link_id);
                 }
                 
                 StaleOrderAction::Repeg => {
@@ -694,9 +691,9 @@ impl HealthMonitor {
                     // TODO: Реализовать логику Repeg
                     // Требует доступа к best_bid/ask (задача 108) и сохранения оригинального created_at
                     // Пока просто отменяем
-                    if let Err(e) = order_manager.cancel_order(
+                    if let Err(e) = execution.order_manager.cancel_order(
                         rest_client,
-                        risk_manager,
+                        &mut execution.risk_manager,
                         bot_config,
                         exchange_config,
                         &link_id,
@@ -704,8 +701,8 @@ impl HealthMonitor {
                     ).await {
                         tracing::error!("Failed to cancel stale order {}: {}", link_id, e);
                     }
-                    risk_manager.remove_order_intent(&link_id);
-                    active_intents.remove(&link_id);
+                    execution.risk_manager.remove_order_intent(&link_id);
+                    execution.risk_manager.active_intents.remove(&link_id);
                 }
             }
         }

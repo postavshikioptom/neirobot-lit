@@ -76,6 +76,11 @@ pub fn load_env_config() -> Result<EnvConfig> {
 
 /// Сборка полной конфигурации с мерджем и валидацией
 pub fn load_full_config(root_path: &Path, bot_config_path: &Path) -> Result<FullConfig> {
+    load_full_config_with_validation(root_path, bot_config_path, true)
+}
+
+/// Сборка полной конфигурации с опциональной валидацией модели
+pub fn load_full_config_with_validation(root_path: &Path, bot_config_path: &Path, validate_model: bool) -> Result<FullConfig> {
     let global = load_global(root_path)?;
     let exchange = load_exchange(root_path)?;
     let bot = load_bot(bot_config_path)?;
@@ -146,13 +151,18 @@ pub fn load_full_config(root_path: &Path, bot_config_path: &Path) -> Result<Full
     }
 
     // 3. Валидация
-    validate_full_config(&full)?;
+    validate_full_config_ext(&full, validate_model)?;
 
     Ok(full)
 }
 
 /// Строгая валидация итоговой конфигурации
 pub fn validate_full_config(cfg: &FullConfig) -> Result<()> {
+    validate_full_config_ext(cfg, true)
+}
+
+/// Расширенная валидация с флагом проверки модели
+pub fn validate_full_config_ext(cfg: &FullConfig, validate_model: bool) -> Result<()> {
     // 1. Проверка символа (не должен быть пустым)
     if cfg.symbol.trim().is_empty() {
         bail!("Config validation error: 'symbol' is empty");
@@ -176,9 +186,11 @@ pub fn validate_full_config(cfg: &FullConfig) -> Result<()> {
     }
 
     // 2. Проверка пути к модели
-    let model_path = Path::new(&cfg.bot.model_path);
-    if !model_path.exists() {
-        bail!("Config validation error: model file not found at {:?}", model_path);
+    if validate_model {
+        let model_path = Path::new(&cfg.bot.model_path);
+        if !model_path.exists() {
+            bail!("Config validation error: model file not found at {:?}", model_path);
+        }
     }
 
     // 3. Проверка логики порогов (Buy должен быть выше Sell)

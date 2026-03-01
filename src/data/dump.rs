@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tracing::{info, error};
 use crate::data::orderbook::{OrderBookSnapshot, LOB_DEPTH};
+use crate::data::types::PublicTradeArc;
 
 /// Асинхронный воркер для периодического дампа снимков стакана (задача 132)
 /// Принимает снимки через канал и сохраняет их в JSON (для восстановления) и Parquet (для истории)
@@ -245,10 +246,10 @@ impl Drop for ParquetDumper {
 /// Асинхронный воркер для периодического дампа публичных сделок (задача 236)
 /// Принимает сделки через канал и сохраняет их в Parquet
 pub async fn start_trades_writer(
-    mut rx: mpsc::Receiver<crate::data::types::PublicTradeOwned>,
+    mut rx: mpsc::Receiver<PublicTradeArc>,
     bot_path: PathBuf,
 ) {
-    let mut buffer: Vec<crate::data::types::PublicTradeOwned> = Vec::with_capacity(1000);
+    let mut buffer: Vec<PublicTradeArc> = Vec::with_capacity(1000);
     let data_dir = bot_path.join("data");
     
     // Создаем директорию для данных
@@ -281,7 +282,7 @@ pub async fn start_trades_writer(
 }
 
 /// Записывает накопленный буфер сделок в Parquet файл
-async fn flush_trades_to_parquet(buffer: &mut Vec<crate::data::types::PublicTradeOwned>, data_dir: &Path) -> Result<()> {
+async fn flush_trades_to_parquet(buffer: &mut Vec<PublicTradeArc>, data_dir: &Path) -> Result<()> {
     if buffer.is_empty() {
         return Ok(());
     }

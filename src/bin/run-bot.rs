@@ -35,7 +35,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 use neirobot_lit::config::loader::load_full_config;
 use neirobot_lit::config::types::FullConfig;
 use neirobot_lit::data::websocket::{BybitWsClient, BybitPrivateWsClient, ReconnectSignal};
-use neirobot_lit::data::types::{WsData, OrderBookUpdateArc, PublicTrade, PublicTradeArc};
+use neirobot_lit::data::types::{WsData, OrderBookUpdateArc, PublicTradeArc};
 
 use neirobot_lit::ml::{OnnxEngine, TensorBuilder};
 use neirobot_lit::trading::{ExecutionEngine, BybitRestClient};
@@ -277,8 +277,8 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     info!("Panic handler initialized for emergency order cancellation");
 
     // Задача 184: Обработка SIGHUP для перезагрузки конфигурации
-    let config_path_clone = config_path.clone();
-    let symbol_clone = args.symbol.clone();
+    let _config_path_clone = config_path.clone();
+    let _symbol_clone = args.symbol.clone();
     
     // Создаем канал для передачи обновленной конфигурации в run_bot_loop
     let (config_tx, config_rx) = mpsc::channel::<neirobot_lit::config::types::FullConfig>(1);
@@ -853,7 +853,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     let balance_symbol = args.symbol.clone();
     
     // Создаем канал для передачи обновлений баланса в основной цикл
-    let (balance_sync_tx, mut balance_sync_rx) = mpsc::channel::<rust_decimal::Decimal>(1);
+    let (balance_sync_tx, balance_sync_rx) = mpsc::channel::<rust_decimal::Decimal>(1);
     
     bg_handle.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(balance_sync_interval));
@@ -896,7 +896,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     let cleanup_symbol = args.symbol.clone();
     
     // Создаем канал для триггера cleanup routine
-    let (cleanup_trigger_tx, mut cleanup_trigger_rx) = mpsc::channel::<()>(1);
+    let (cleanup_trigger_tx, cleanup_trigger_rx) = mpsc::channel::<()>(1);
     
     bg_handle.spawn(async move {
         // Добавляем небольшой джиттер к интервалу для избежания спама в ровные минуты
@@ -948,12 +948,13 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     
     let (private_tx, private_rx) = mpsc::channel(1024);
     let private_ws = BybitPrivateWsClient::new(full_config.exchange.clone());
-    let (priv_reconnect_tx, priv_reconnect_rx) = mpsc::channel(1);
+    let (_priv_reconnect_tx, priv_reconnect_rx) = mpsc::channel(1);
     
     let token_ws = shutdown_token.clone();
+    let symbol_for_error = args.symbol.clone();
     tokio::spawn(async move {
         if let Err(e) = ws_client.run(tx, ws_reconnect_rx, token_ws).await {
-            error!("Public WS Client fatal error for {}: {}", args.symbol, e);
+            error!("Public WS Client fatal error for {}: {}", symbol_for_error, e);
         }
     });
 
@@ -965,13 +966,13 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     });
 
     // 6. Основной цикл обработки
-    let mut ob = OrderBook::new(&args.symbol);
+    let ob = OrderBook::new(&args.symbol);
     info!("Bot is ready and waiting for market data for {}...", args.symbol);
 
     // Задача 174: Канал для периодической проверки прав API
-    let (api_check_tx, mut api_check_rx) = mpsc::channel(1);
+    let (api_check_tx, api_check_rx) = mpsc::channel(1);
     let api_rest_client = rest_client.clone();
-    let api_full_config = full_config.clone();
+    let _api_full_config = full_config.clone();
     let api_shutdown_token = shutdown_token.clone();
 
     tokio::spawn(async move {
@@ -1065,7 +1066,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     });
 
     // Создаем канал для дампа публичных сделок (задача 236)
-    let (trades_tx, trades_rx) = mpsc::channel(1000);
+    let (trades_tx, trades_rx) = mpsc::channel::<PublicTradeArc>(1000);
     let bot_path_trades = PathBuf::from("bots").join(&args.symbol);
     
     // Запускаем фоновый воркер для записи сделок в фоновом рантайме
@@ -1079,7 +1080,7 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     let bot_path = PathBuf::from("bots").join(&args.symbol);
     
     // Задача 225: Инициализация ResourceProfiler для мониторинга системных ресурсов
-    let (mut resource_profiler, mut metrics_rx) = {
+    let (mut resource_profiler, metrics_rx) = {
         let _guard = bg_handle.enter();
         neirobot_lit::monitoring::resource_profiler::ResourceProfiler::new(
             full_config.bot.resource_thresholds.clone()
@@ -1322,7 +1323,7 @@ pub async fn run_bot_loop<S>(
     mut ob: OrderBook,
     mut tensor_builder: TensorBuilder,
     engine: &mut OnnxEngine,
-    execution: &mut ExecutionEngine<'_>,
+    execution: &mut ExecutionEngine,
     symbol: &str,
     rest_client: &BybitRestClient,
     config: &FullConfig,
@@ -1639,13 +1640,11 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
             }
             _ = stale_order_check_interval.tick() => {
                 // Задача 179: Периодическая проверка "зависших" ордеров
-                if let Err(e) = execution.health_monitor.check_stale_orders(
+                if let Err(e) = neirobot_lit::risk::health_monitor::HealthMonitor::check_stale_orders(
                     rest_client,
                     &config.bot,
                     &config.exchange,
-                    &mut execution.risk_manager.active_intents,
-                    &mut execution.order_manager,
-                    &mut execution.risk_manager,
+                    execution,
                 ).await {
                     error!("Failed to check stale orders: {}", e);
                 }
@@ -1849,7 +1848,7 @@ async fn handle_market_update(
     ob: &mut OrderBook,
     tensor_builder: &mut TensorBuilder,
     engine: &mut OnnxEngine,
-    execution: &mut ExecutionEngine<'_>,
+    execution: &mut ExecutionEngine,
     rest_client: &neirobot_lit::trading::BybitRestClient,
     exchange_config: &neirobot_lit::config::types::ExchangeConfig,
     ws_reconnect_tx: mpsc::Sender<ReconnectSignal>,
@@ -2106,12 +2105,12 @@ async fn handle_market_update(
 
 
 /// Задача 199: Replay Mode Loop
-async fn run_replay_loop(
+async fn run_replay_loop<'a>(
     path: PathBuf,
     mut ob: OrderBook,
     mut tensor_builder: TensorBuilder,
-    engine: &mut OnnxEngine,
-    execution: &mut ExecutionEngine<'_>,
+    engine: &'a mut OnnxEngine,
+    execution: &'a mut ExecutionEngine,
     symbol: &str,
     rest_client: &BybitRestClient,
     config: &FullConfig,
