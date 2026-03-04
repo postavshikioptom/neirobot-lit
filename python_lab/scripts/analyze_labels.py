@@ -22,14 +22,19 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from utils import analyze_labels
+from features import FeatureEngineer
+from labels import Labeler
 
 
-def load_parquet_data(data_path: Path):
+def load_parquet_data(data_path: Path, horizon: int = 100, threshold: float = 0.0005):
     """
     Загружает train.parquet и val.parquet из указанной директории.
+    Если колонки 'label' нет, рассчитывает её на лету.
     
     Args:
         data_path: Путь к директории с parquet-файлами
+        horizon: Горизонт для Labeler
+        threshold: Порог для Labeler
     
     Returns:
         tuple: (train_df, val_df) или (None, None) если файлы не найдены
@@ -37,22 +42,31 @@ def load_parquet_data(data_path: Path):
     train_path = data_path / "train.parquet"
     val_path = data_path / "val.parquet"
     
-    train_df = None
-    val_df = None
-    
-    if train_path.exists():
-        print(f"✓ Загружаем train.parquet из {train_path}")
-        train_df = pl.read_parquet(train_path)
-        print(f"  Размер: {len(train_df)} строк")
-    else:
-        print(f"⚠️  train.parquet не найден: {train_path}")
-    
-    if val_path.exists():
-        print(f"✓ Загружаем val.parquet из {val_path}")
-        val_df = pl.read_parquet(val_path)
-        print(f"  Размер: {len(val_df)} строк")
-    else:
-        print(f"⚠️  val.parquet не найден: {val_path}")
+    def process_file(path: Path, name: str):
+        if not path.exists():
+            print(f"[WARN] {name} не найден: {path}")
+            return None
+        
+        print(f"[INFO] Загружаем {name} из {path}")
+        df = pl.read_parquet(path)
+        
+        if "label" not in df.columns:
+            print(f"  [WARN] Колонка 'label' не найдена в {name}. Генерируем на лету (h={horizon}, t={threshold})...")
+            # 1. Расчет mid_price и базовых признаков
+            fe = FeatureEngineer(n_levels=50)
+            df = fe.transform(df)
+            
+            # 2. Расчет меток
+            labeler = Labeler(horizon=horizon, threshold=threshold)
+            df = labeler.add_labels(df)
+            print(f"  [INFO] Метки для {name} сгенерированы. Размер после разметки: {len(df)}")
+        else:
+            print(f"  [INFO] Размер {name}: {len(df)} строк")
+            
+        return df
+
+    train_df = process_file(train_path, "train.parquet")
+    val_df = process_file(val_path, "val.parquet")
     
     return train_df, val_df
 
@@ -82,7 +96,7 @@ def check_consistency(train_result, val_result, threshold=5.0):
         val_pct = val_dist.get(label, 0.0)
         diff = abs(train_pct - val_pct)
         
-        status = "✓" if diff <= threshold else "⚠️"
+        status = "[OK]" if diff <= threshold else "[WARN]"
         
         print(f"{status} Класс {label}: Train={train_pct:.2f}%, Val={val_pct:.2f}%, Diff={diff:.2f}%")
         
@@ -90,10 +104,10 @@ def check_consistency(train_result, val_result, threshold=5.0):
             inconsistent = True
     
     if inconsistent:
-        print(f"\n⚠️  WARNING: Обнаружены различия >={threshold}% между train и val!")
+        print(f"\n[WARN] WARNING: Обнаружены различия >={threshold}% между train и val!")
         print("   Это может указывать на проблемы с разделением данных.")
     else:
-        print(f"\n✓ Распределения train и val консистентны (различия <{threshold}%)")
+        print(f"\n[OK] Распределения train и val консистентны (различия <{threshold}%)")
 
 
 def save_metadata(output_path: Path, train_result, val_result=None):
@@ -123,7 +137,7 @@ def save_metadata(output_path: Path, train_result, val_result=None):
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     
-    print(f"\n✓ Метаданные сохранены: {metadata_path}")
+    print(f"\n[OK] Метаданные сохранены: {metadata_path}")
 
 
 def main():
@@ -148,13 +162,25 @@ def main():
         default=5.0,
         help="Порог различия в %% для предупреждения о несоответствии train/val (по умолчанию: 5.0)"
     )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=100,
+        help="Горизонт предсказания (K) для генерации меток (default: 100)"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0005,
+        help="Порог доходности для меток (default: 0.0005)"
+    )
     
     args = parser.parse_args()
     
     data_path = Path(args.data_path)
     
     if not data_path.exists():
-        print(f"❌ Ошибка: Путь не существует: {data_path}")
+        print(f"[ERROR] Ошибка: Путь не существует: {data_path}")
         sys.exit(1)
     
     # Определяем output_dir
@@ -169,10 +195,10 @@ def main():
     print("="*60)
     
     # Загружаем данные
-    train_df, val_df = load_parquet_data(data_path)
+    train_df, val_df = load_parquet_data(data_path, horizon=args.horizon, threshold=args.threshold)
     
     if train_df is None and val_df is None:
-        print("\n❌ Ошибка: Не найдено ни одного parquet-файла!")
+        print("\n[ERROR] Ошибка: Не найдено ни одного parquet-файла!")
         sys.exit(1)
     
     # Анализируем train
@@ -208,7 +234,7 @@ def main():
         save_metadata(output_dir, train_result, val_result)
     
     print("\n" + "="*60)
-    print("✓ Анализ завершен успешно!")
+    print("[OK] Анализ завершен успешно!")
     print("="*60)
 
 

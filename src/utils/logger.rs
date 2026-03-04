@@ -170,7 +170,7 @@ where
 /// - `config`: Конфигурация логирования
 /// - `bot_path`: Путь к директории бота
 /// - `secrets`: Список секретов для маскирования в логах (API ключи и т.д.)
-pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>) -> Result<WorkerGuard> {
+pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>) -> Result<Vec<WorkerGuard>> {
     let log_dir = bot_path.join("logs");
     std::fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
 
@@ -184,26 +184,24 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
     let file_appender = RollingFileAppender::new(rotation, &log_dir, &config.file_name);
 
     // 3. Настройка Non-blocking с Lossy стратегией (критично для HFT)
-    // Используем logger_queue_size из конфига вместо хардкода
-    // Если очередь переполнена, старые логи отбрасываются, чтобы не тормозить main thread
-    let (non_blocking, guard) = NonBlockingBuilder::default()
+    let (file_non_blocking, file_guard) = NonBlockingBuilder::default()
         .buffered_lines_limit(config.logger_queue_size)
         .lossy(true) // Drop logs if full - критично для HFT!
         .finish(file_appender);
 
+    let mut guards = vec![file_guard];
+
     // 4. Установка Panic Hook для надежного вывода критических ошибок
-    // Используем только eprintln! для гарантированного вывода в stderr
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("!!! FATAL PANIC !!!");
         eprintln!("{}", panic_info);
-        // Не используем sleep, полагаясь на WorkerGuard для flush при завершении
     }));
 
     // 5. UTC Таймер с миллисекундами
     let timer = fmt::time::UtcTime::rfc_3339();
 
-    // 6. Слой для файла с маскированием секретов (без ANSI, с target для отладки многопоточного кода)
-    let masking_writer = MaskingMakeWriter::new(non_blocking, secrets.clone());
+    // 6. Слой для файла с маскированием секретов
+    let masking_writer = MaskingMakeWriter::new(file_non_blocking, secrets.clone());
     let file_layer = fmt::layer()
         .with_writer(masking_writer)
         .with_ansi(false)
@@ -212,72 +210,50 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
         .with_target(true)
         .with_filter(EnvFilter::new(&config.level));
 
-    // 7. Инициализация Telegram Layer (опционально)
     let registry = tracing_subscriber::registry().with(file_layer);
     
-    // Попытка загрузить Telegram credentials из переменных окружения
+    // 7. Инициализация Telegram Layer (опционально)
     let telegram_layer = match (
         std::env::var("TELEGRAM_TOKEN").ok(),
         std::env::var("TELEGRAM_CHAT_ID").ok(),
     ) {
         (Some(token), Some(chat_id)) => {
-            // Создаем bounded канал для Telegram сообщений (размер 100)
             let (tx, rx) = mpsc::channel::<String>(100);
-            
-            // Запускаем Telegram воркер в фоновом режиме
             let worker = TelegramWorker::new(token, chat_id);
             tokio::spawn(async move {
-                worker.run(rx, 1000).await; // 1 сообщение в секунду
+                worker.run(rx, 1000).await;
             });
-            
-            // Создаем Layer для ERROR уровня
             Some(TelegramLayer::new(tx, tracing::Level::ERROR))
         }
-        _ => {
-            tracing::info!("Telegram notifications disabled: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set");
-            None
-        }
+        _ => None,
     };
 
-    // 8. Сборка слоев с опциональным Telegram Layer
-    if let Some(tg_layer) = telegram_layer {
-        let registry = registry.with(tg_layer);
-        
-        // 9. Опциональный консольный слой с маскированием секретов и выбором формата
-        if config.console_enabled {
-            let console_masking_writer = MaskingMakeWriter::new(std::io::stdout, secrets);
-            let console_layer = fmt::layer()
-                .with_writer(console_masking_writer)
-                .with_ansi(true)
-                .with_timer(timer)
-                .with_thread_names(true)
-                .with_target(true);
-            match config.format.as_str() {
-                "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
-                "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
-                _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
-            };
-        } else {
-            registry.init();
-        }
+    // 8. Сборка слоев с Telegram Layer
+    let registry = registry.with(telegram_layer);
+
+    // 9. Опциональный консольный слой с Non-blocking
+    if config.console_enabled {
+        let (stdout_non_blocking, stdout_guard) = NonBlockingBuilder::default()
+            .buffered_lines_limit(config.logger_queue_size)
+            .lossy(true)
+            .finish(std::io::stdout());
+        guards.push(stdout_guard);
+
+        let console_masking_writer = MaskingMakeWriter::new(stdout_non_blocking, secrets);
+        let console_layer = fmt::layer()
+            .with_writer(console_masking_writer)
+            .with_ansi(true)
+            .with_timer(timer)
+            .with_thread_names(true)
+            .with_target(true);
+            
+        match config.format.as_str() {
+            "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
+            "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
+            _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
+        };
     } else {
-        // 9. Опциональный консольный слой с маскированием секретов и выбором формата
-        if config.console_enabled {
-            let console_masking_writer = MaskingMakeWriter::new(std::io::stdout, secrets);
-            let console_layer = fmt::layer()
-                .with_writer(console_masking_writer)
-                .with_ansi(true)
-                .with_timer(timer)
-                .with_thread_names(true)
-                .with_target(true);
-            match config.format.as_str() {
-                "json" => registry.with(console_layer.json().with_filter(EnvFilter::new(&config.level))).init(),
-                "compact" => registry.with(console_layer.compact().with_filter(EnvFilter::new(&config.level))).init(),
-                _ => registry.with(console_layer.pretty().with_filter(EnvFilter::new(&config.level))).init(),
-            };
-        } else {
-            registry.init();
-        }
+        registry.init();
     }
 
     let max_files = config.max_files;
@@ -286,7 +262,7 @@ pub fn init_logger(config: &LoggingConfig, bot_path: &Path, secrets: Vec<String>
         clean_old_logs(log_dir_clone, max_files).await;
     });
 
-    Ok(guard)
+    Ok(guards)
 }
 
 async fn clean_old_logs(dir: PathBuf, max_files: usize) {

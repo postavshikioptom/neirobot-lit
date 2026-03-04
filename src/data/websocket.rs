@@ -8,15 +8,11 @@ use std::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{sleep, Duration, interval, Instant};
 use tokio_util::sync::CancellationToken;
-use tokio_tungstenite::{client_async, tungstenite::protocol::Message, tungstenite::protocol::frame::CloseFrame};
-use socket2::{Socket, Domain, Type, Protocol};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, tungstenite::protocol::frame::CloseFrame};
 use tracing::{info, warn, error, debug};
-use url::Url;
 use serde::Deserialize;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use native_tls::TlsConnector;
-use tokio_native_tls::TlsConnector as TokioTlsConnector;
 use tokio::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,73 +40,10 @@ pub async fn inject_chaos(config: &ChaosConfig, rng: &mut StdRng) -> bool {
     false
 }
 use crate::data::types::WsData;
-use crate::data::parser::{parse_orderbook_msg, parse_public_trade_msg, parse_ticker_msg, parse_mark_price_msg};
+use crate::data::parser::{parse_orderbook_msg, parse_public_trade_msg, parse_ticker_msg};
 use crate::utils::helpers::now_secs;
 use crate::utils::backoff::ExponentialBackoff;
 use smallvec::SmallVec;
-
-/// Создаёт и настраивает TCP сокет с оптимизациями для Windows WinSock
-async fn create_optimized_socket(
-    url: &str,
-    tcp_nodelay: bool,
-    recv_buffer_size: usize,
-    send_buffer_size: usize,
-) -> Result<tokio::net::TcpStream> {
-    let parsed_url = Url::parse(url)?;
-    let host = parsed_url.host_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL: no host"))?;
-    let port = parsed_url.port_or_known_default()
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL: no port"))?;
-
-    // Резолвим адрес
-    let addr = tokio::net::lookup_host(format!("{}:{}", host, port))
-        .await?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Failed to resolve host: {}", host))?;
-
-    // Создаём сокет через socket2
-    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-
-    // Настройка TCP_NODELAY (отключение алгоритма Нагла)
-    socket.set_tcp_nodelay(tcp_nodelay)?;
-
-    // Настройка буферов сокета
-    socket.set_recv_buffer_size(recv_buffer_size)?;
-    socket.set_send_buffer_size(send_buffer_size)?;
-
-    // Считываем фактические размеры буферов (Windows может ограничить)
-    let actual_recv = socket.recv_buffer_size()?;
-    let actual_send = socket.send_buffer_size()?;
-
-    info!(
-        "[Network] Socket buffer: recv requested {} KB, actual {} KB; send requested {} KB, actual {} KB",
-        recv_buffer_size / 1024,
-        actual_recv / 1024,
-        send_buffer_size / 1024,
-        actual_send / 1024
-    );
-
-    // Устанавливаем неблокирующий режим ДО подключения (актуально для Tokio)
-    socket.set_nonblocking(true)?;
-
-    // Асинхронный коннект через socket2
-    match socket.connect(&addr.into()) {
-        Ok(_) => {}
-        Err(e) if e.raw_os_error() == Some(10035) || e.kind() == std::io::ErrorKind::WouldBlock => {
-            // Это нормально для неблокирующего сокета, коннект завершится позже
-        }
-        Err(e) => return Err(e.into()),
-    }
-
-    // Преобразуем в std::net::TcpStream
-    let std_tcp: std::net::TcpStream = socket.into();
-    
-    // Преобразуем в tokio::net::TcpStream
-    let tokio_tcp = tokio::net::TcpStream::from_std(std_tcp)?;
-
-    Ok(tokio_tcp)
-}
 
 pub struct BybitWsClient {
     config: ExchangeConfig,
@@ -229,26 +162,8 @@ impl BybitPrivateWsClient {
     async fn connect_and_auth(&self, tx: &Sender<serde_json::Value>, token: CancellationToken) -> Result<()> {
         let url = &self.config.websocket.private_ws_url;
         
-        // Создаём оптимизированный сокет с настройками TCP_NODELAY и буферов
-        let tcp_stream = create_optimized_socket(
-            url,
-            self.config.websocket.tcp_nodelay,
-            self.config.websocket.socket_recv_buffer_size,
-            self.config.websocket.socket_send_buffer_size,
-        ).await?;
-
-        // Обёртываем TCP поток в TLS для wss://
-        let connector = TlsConnector::new()?;
-        let connector = TokioTlsConnector::from(connector);
-        let host = Url::parse(url)?
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("No host in URL"))?
-            .to_string();
-        let tls_stream = connector.connect(&host, tcp_stream).await
-            .context("TLS handshake failed for Private WS")?;
-
-        // Используем client_async для WebSocket поверх TLS
-        let (ws_stream, _) = client_async(url, tls_stream).await
+        // Используем connect_async для WebSocket. SChannel (TLS) в Windows обработается автоматически.
+        let (ws_stream, _) = connect_async(url).await
             .context("Failed to connect to Bybit Private WS")?;
 
         info!("Connected to Bybit Private WS");
@@ -478,36 +393,18 @@ impl BybitWsClient {
     async fn connect_and_subscribe(&self, tx: &Sender<WsData>, token: CancellationToken) -> Result<()> {
         let url = &self.config.websocket.public_url;
         
-        // Создаём оптимизированный сокет с настройками TCP_NODELAY и буферов
-        let tcp_stream = create_optimized_socket(
-            url,
-            self.config.websocket.tcp_nodelay,
-            self.config.websocket.socket_recv_buffer_size,
-            self.config.websocket.socket_send_buffer_size,
-        ).await?;
-
-        // Обёртываем TCP поток в TLS для wss://
-        let connector = TlsConnector::new()?;
-        let connector = TokioTlsConnector::from(connector);
-        let host = Url::parse(url)?
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("No host in URL"))?
-            .to_string();
-        let tls_stream = connector.connect(&host, tcp_stream).await
-            .context("TLS handshake failed for Public WS")?;
-
-        // Используем client_async для WebSocket поверх TLS
-        let (ws_stream, _) = client_async(url, tls_stream).await
-            .context("Failed to connect to Bybit WS")?;
+        // Используем connect_async для WebSocket. SChannel (TLS) в Windows обработается автоматически.
+        let (ws_stream, _) = connect_async(url).await
+            .context("Failed to connect to Bybit Public WS")?;
 
         info!("[{}] Connected to Bybit WS", self.symbol);
 
         let (mut ws_sink, mut ws_read) = ws_stream.split();
 
-        // Подписка на стакан (глубина 50 уровней), публичные сделки, тикеры и маркированную цену
+        // Подписка на стакан (глубина 50 уровней), публичные сделки и тикеры (включают markPrice в V5)
         let sub_msg = format!(
-            r#"{{"op": "subscribe", "args": ["orderbook.50.{}", "publicTrade.{}", "tickers.{}", "markPrice.{}"]}}"#, 
-            self.symbol, self.symbol, self.symbol, self.symbol
+            r#"{{"op": "subscribe", "args": ["orderbook.50.{}", "publicTrade.{}", "tickers.{}"]}}"#, 
+            self.symbol, self.symbol, self.symbol
         );
         ws_sink.send(Message::Text(sub_msg.into())).await?;
         
@@ -601,6 +498,9 @@ impl BybitWsClient {
                                     
                                     // Сначала проверяем на Pong
                                     if text.contains(r#""op":"pong""#) || text.contains(r#""op": "pong""#) {
+                                        // Обновляем время активности при получении Pong (Задача 303)
+                                        self.last_activity.store(now_secs(), Ordering::Relaxed);
+                                        
                                         if let Ok(pong) = serde_json::from_str::<BybitPong>(&text) {
                                             let mut rtt = None;
                                             if let Ok(mut lock) = self.last_ping_sent_at.lock() {
@@ -721,7 +621,16 @@ impl BybitWsClient {
                                     // Обработка тикеров (задача 170: Funding Rate Filter)
                                     match parse_ticker_msg(&text) {
                                         Ok(Some(ticker)) => {
-                                            // Конвертируем borrowed в Arc версию (zero-copy для symbol)
+                                            let symbol: Arc<str> = Arc::from(ticker.symbol);
+                                            
+                                            // Если есть маркированная цена, отправляем её отдельно (Задача 233)
+                                            if let Some(mp) = ticker.mark_price {
+                                                if let Err(e) = tx.try_send(crate::data::types::WsData::MarkPrice(symbol.clone(), mp)) {
+                                                    error!("[{}] Failed to send mark price from ticker: {}", self.symbol, e);
+                                                }
+                                            }
+
+                                            // Отправляем сам тикер
                                             if let Err(e) = tx.try_send(crate::data::types::WsData::Ticker(ticker.to_arc())) {
                                                 error!("[{}] Failed to send ticker to channel: {}", self.symbol, e);
                                                 return Err(anyhow::anyhow!("Channel overflow or closed"));
@@ -731,17 +640,7 @@ impl BybitWsClient {
                                         Err(e) => warn!("[{}] Ticker parser error: {}", self.symbol, e),
                                     }
 
-                                    // Обработка маркированной цены (задача 233: Price Band Violation)
-                                    match parse_mark_price_msg(&text) {
-                                        Ok(Some((symbol, mark_price))) => {
-                                            if let Err(e) = tx.try_send(crate::data::types::WsData::MarkPrice(Arc::from(symbol), mark_price)) {
-                                                error!("[{}] Failed to send mark price to channel: {}", self.symbol, e);
-                                                return Err(anyhow::anyhow!("Channel overflow or closed"));
-                                            }
-                                        }
-                                        Ok(None) => {} 
-                                        Err(e) => warn!("[{}] MarkPrice parser error: {}", self.symbol, e),
-                                    }
+                                    // Задача 303: Удалено ручное парсинг mark_price, так как он идет в тикерах
                                 }
                                 Message::Pong(_) => {}
                                 Message::Close(_) => return Err(anyhow::anyhow!("WS connection closed by server")),

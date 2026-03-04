@@ -1,0 +1,51 @@
+(venv) E:\MAX\PYTHON\NEURAL-BOTS\neirobot-lit\python_lab>python E:\MAX\PYTHON\NEURAL-BOTS\neirobot-l
+it\python_lab\scripts\analyze_labels.py --data_path bots/FARTCOINUSDT/data/raw
+============================================================
+=== Анализ распределения меток ===
+============================================================
+Путь к данным: bots\FARTCOINUSDT\data\raw
+Путь для сохранения: bots\FARTCOINUSDT\data\raw
+============================================================
+[INFO] Загружаем train.parquet из bots\FARTCOINUSDT\data\raw\train.parquet
+  [WARN] Колонка 'label' не найдена в train.parquet. Генерируем на лету (h=100, t=0.0005)...
+
+[Labeler] Labels distribution:
+  Horizons: [100], Threshold: 0.0005
+  single: {'label': [0, 1, 2], 'count': [3719, 690, 491]} | Masked: 0
+  [INFO] Метки для train.parquet сгенерированы. Размер после разметки: 4900
+[WARN] val.parquet не найден: bots\FARTCOINUSDT\data\raw\val.parquet
+
+============================================================
+=== Анализ TRAIN ===
+============================================================
+
+=== Распределение меток ===
+shape: (3, 3)
+┌───────┬──────┬────────────┐
+│ label ┆ len  ┆ percentage │
+│ ---   ┆ ---  ┆ ---        │
+│ i8    ┆ u32  ┆ f64        │
+╞═══════╪══════╪════════════╡
+│ 0     ┆ 3719 ┆ 75.897959  │
+│ 1     ┆ 690  ┆ 14.081633  │
+│ 2     ┆ 491  ┆ 10.020408  │
+└───────┴──────┴────────────┘
+
+Imbalance Ratio (Max/Min): 7.57
+
+=== Матрица переходов (вероятности) ===
+label         0         1         2
+label
+0.0    0.989510  0.005379  0.005110
+1.0    0.027536  0.971014  0.001449
+2.0    0.042770  0.000000  0.957230
+NaN    0.000000  0.000000  1.000000
+
+✓ Гистограмма сохранена: bots\FARTCOINUSDT\data\raw\train\label_distribution.png
+✓ Тепловая карта сохранена: bots\FARTCOINUSDT\data\raw\train\transition_matrix.png
+
+[OK] Метаданные сохранены: bots\FARTCOINUSDT\data\raw\label_analysis_metadata.json
+
+============================================================
+[OK] Анализ завершен успешно!
+============================================================

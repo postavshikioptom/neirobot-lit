@@ -480,11 +480,12 @@ def validate_lob_sequence(sequence):
         
     return True
 
-def balance_dataset(features, labels, method='bgmm', ratio=0.5):
+def balance_dataset(features, labels, method='bgmm', ratio=0.5, sampling_strategy=None):
     """
     features: (N, Seq_Len, Feats) - numpy array
     labels: (N,) - numpy array
     ratio: целевая доля миноритарных классов относительно мажоритарного
+    sampling_strategy: внешняя стратегия балансировки (для батчевой обработки)
     """
     from smote_variants import BGMM_SMOTE
     
@@ -495,13 +496,19 @@ def balance_dataset(features, labels, method='bgmm', ratio=0.5):
     features_2d = features.reshape(n_samples, -1)
     
     # 2. Определение стратегии
-    counts = np.bincount(labels)
-    maj_class = np.argmax(counts)
-    target_count = int(counts[maj_class] * ratio)
-    
-    # Стратегия: балансируем только Up (1) и Down (2) до target_count
-    # Классы в LiT: 0=Flat, 1=Up, 2=Down
-    sampling_strategy = {1: max(counts[1], target_count), 2: max(counts[2], target_count)}
+    if sampling_strategy is None:
+        counts = np.bincount(labels)
+        # Обеспечиваем наличие всех 3 классов (0, 1, 2)
+        if len(counts) < 3:
+            full_counts = np.zeros(3, dtype=int)
+            full_counts[:len(counts)] = counts
+            counts = full_counts
+            
+        maj_class = np.argmax(counts)
+        target_count = int(counts[maj_class] * ratio)
+        
+        # Стратегия: балансируем только Up (1) и Down (2) до target_count
+        sampling_strategy = {1: max(counts[1], target_count), 2: max(counts[2], target_count)}
     
     if method == 'bgmm':
         sampler = BGMM_SMOTE(sampling_strategy=sampling_strategy, random_state=42)
@@ -600,7 +607,7 @@ class LOBDataLoader:
         Returns:
             DataFrame или LazyFrame с данными trades (timestamp, price, size, side)
         """
-        raw_dir = self.data_path / "raw"
+        raw_dir = self.data_path
         if not raw_dir.exists():
             raise FileNotFoundError(f"Raw data directory not found: {raw_dir}")
 

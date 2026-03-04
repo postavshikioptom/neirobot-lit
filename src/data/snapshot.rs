@@ -39,6 +39,7 @@ pub async fn run_snapshot_pipeline(config: FullConfig) -> Result<()> {
 
     // 2. Настройка таймера для фиксации снапшотов с равным шагом
     let mut timer = interval(Duration::from_millis(interval_ms));
+    let mut snap_count = 0;
     info!("Starting snapshot pipeline for {}. Interval: {}ms", symbol, interval_ms);
 
     loop {
@@ -67,6 +68,11 @@ pub async fn run_snapshot_pipeline(config: FullConfig) -> Result<()> {
                     // Сохраняем exchange timestamp и last_update_id для точности
                     if let Err(e) = dumper.push_snapshot(ob.timestamp_ms, ob.last_update_id, flat_lob) {
                         error!("[{}] Dumper error: {}", symbol, e);
+                    } else {
+                        snap_count += 1;
+                        if snap_count % 1000 == 0 {
+                            info!("[{}] Recorded {} snapshots so far...", symbol, snap_count);
+                        }
                     }
                 }
             }

@@ -60,9 +60,9 @@ class FeatureEngineer:
         # Выполняем все трансформации разом
         df = df.with_columns(price_exprs + vol_exprs)
 
-        # 4. Выборка колонок: сохраняем timestamp и сырой mid_price для будущих лейблов
-        feat_cols = [c for c in df.columns if c.startswith("feat_")]
-        return df.select(["timestamp_ms", "mid_price"] + feat_cols)
+        # 4. Выполняем все трансформации и возвращаем полный DataFrame
+        # ВАЖНО: Мы НЕ делаем select, чтобы сохранить все оригинальные колонки для последующих задач
+        return df.with_columns(price_exprs + vol_exprs)
 
 if __name__ == "__main__":
     # Тестовый пример с искусственными данными

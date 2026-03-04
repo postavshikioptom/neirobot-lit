@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::time::Instant;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
-use tracing::warn;
+use tracing::{warn, info};
 use crate::data::types::OrderBookUpdateArc;
 use crate::monitoring::latency::PROC_LATENCY;
 use serde::{Serialize, Deserialize};
@@ -367,15 +367,21 @@ impl OrderBook {
     /// Сбрасывает состояние и записывает новые данные из снапшота
     pub fn reset_with_snapshot(&mut self, update: &OrderBookUpdateArc) {
         self.bids.clear();
+        self.bids.clear();
         self.asks.clear();
-        self.last_update_id = update.last_update_id;
-        self.timestamp_ms = update.timestamp_ms;
+
+        let mut bid_count = 0;
+        let mut ask_count = 0;
 
         for level in &update.bids {
             let p = Decimal::from_f64(level.price).unwrap_or(Decimal::ZERO);
             let v = Decimal::from_f64(level.size).unwrap_or(Decimal::ZERO);
+            if p == Decimal::ZERO && level.price != 0.0 {
+                warn!("[{}] Decimal conversion failed for price: {}", self.symbol, level.price);
+            }
             if v > Decimal::ZERO {
                 self.bids.push((p, v));
+                bid_count += 1;
             }
         }
         self.bids.sort_by(|a, b| b.0.cmp(&a.0));
@@ -383,11 +389,22 @@ impl OrderBook {
         for level in &update.asks {
             let p = Decimal::from_f64(level.price).unwrap_or(Decimal::ZERO);
             let v = Decimal::from_f64(level.size).unwrap_or(Decimal::ZERO);
+            if p == Decimal::ZERO && level.price != 0.0 {
+                warn!("[{}] Decimal conversion failed for price: {}", self.symbol, level.price);
+            }
             if v > Decimal::ZERO {
                 self.asks.push((p, v));
+                ask_count += 1;
             }
         }
         self.asks.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Откладываем обновление ID до завершения обработки данных
+        self.last_update_id = update.last_update_id;
+        self.timestamp_ms = update.timestamp_ms;
+        
+        info!("[{}] Received Snapshot (u={}). Levels: {} bids, {} asks.", 
+              self.symbol, update.last_update_id, bid_count, ask_count);
         
         self.bids.truncate(LOB_DEPTH);
         self.asks.truncate(LOB_DEPTH);
@@ -431,6 +448,9 @@ impl OrderBook {
         for level in &update.bids {
             let p = Decimal::from_f64(level.price).unwrap_or(Decimal::ZERO);
             let v = Decimal::from_f64(level.size).unwrap_or(Decimal::ZERO);
+            if p == Decimal::ZERO && level.price != 0.0 {
+                warn!("[{}] Decimal conversion failed for price in delta: {}", self.symbol, level.price);
+            }
             
             match self.bids.binary_search_by(|&(price, _)| p.cmp(&price).reverse()) {
                 Ok(idx) => {
@@ -452,6 +472,9 @@ impl OrderBook {
         for level in &update.asks {
             let p = Decimal::from_f64(level.price).unwrap_or(Decimal::ZERO);
             let v = Decimal::from_f64(level.size).unwrap_or(Decimal::ZERO);
+            if p == Decimal::ZERO && level.price != 0.0 {
+                warn!("[{}] Decimal conversion failed for price in delta: {}", self.symbol, level.price);
+            }
 
             match self.asks.binary_search_by(|&(price, _)| price.cmp(&p)) {
                 Ok(idx) => {
@@ -492,42 +515,29 @@ impl OrderBook {
     /// Если на текущем Arc только одна ссылка, переиспользуем его через Arc::make_mut
     /// Иначе создаем новый Arc
     fn update_snapshot_optimized(&mut self) {
-        // Загружаем текущий Arc и пытаемся получить мутабельный доступ
-        let mut current_arc = self.current_snapshot.load_full();
+        // Создаем новый снапшот на базе текущих данных
+        // Прямое клонирование Arc и Arc::make_mut здесь неэффективно из-за ArcSwap
+        let snapshot = OrderBookSnapshot {
+            timestamp_ms: self.timestamp_ms as i64,
+            last_update_id: self.last_update_id,
+            
+            bids: self.bids.iter()
+                .take(LOB_DEPTH)
+                .map(|(p, v)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0)))
+                .collect(),
+            asks: self.asks.iter()
+                .take(LOB_DEPTH)
+                .map(|(p, v)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0)))
+                .collect(),
+            symbol: self.symbol.clone(),
+            checksum: self.calculate_checksum(),
+            mark_price: self.mark_price,
+            volatility_bps: self.get_volatility_bps(),
+            spread_bps: self.get_spread_bps(),
+        };
         
-        // Если на Arc только одна ссылка (Arc::strong_count == 1), можем переиспользовать
-        if Arc::strong_count(&current_arc) == 1 {
-            // Переиспользуем существующий Arc через Arc::make_mut
-            let snapshot_mut = Arc::make_mut(&mut current_arc);
-            
-            // Обновляем поля существующего снапшота
-            snapshot_mut.timestamp_ms = self.timestamp_ms as i64;
-            snapshot_mut.last_update_id = self.last_update_id;
-            
-            // Обновляем bids и asks
-            snapshot_mut.bids = self.bids.iter()
-                .take(LOB_DEPTH)
-                .map(|(p, v)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0)))
-                .collect();
-            snapshot_mut.asks = self.asks.iter()
-                .take(LOB_DEPTH)
-                .map(|(p, v)| (p.to_f64().unwrap_or(0.0), v.to_f64().unwrap_or(0.0)))
-                .collect();
-            
-            // Обновляем контрольную сумму
-            snapshot_mut.checksum = self.calculate_checksum();
-            
-            // Задача 191: обновляем метрики волатильности и спреда
-            snapshot_mut.volatility_bps = self.get_volatility_bps();
-            snapshot_mut.spread_bps = self.get_spread_bps();
-            
-            // Сохраняем переиспользованный Arc обратно
-            self.current_snapshot.store(current_arc);
-        } else {
-            // На Arc есть другие ссылки, создаем новый
-            let new_snapshot = self.take_snapshot();
-            self.current_snapshot.store(Arc::new(new_snapshot));
-        }
+        // Атомарно обновляем снапшот в ArcSwap
+        self.current_snapshot.store(Arc::new(snapshot));
     }
 
     #[inline(always)]

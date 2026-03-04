@@ -3,7 +3,7 @@ use polars::prelude::*;
 use std::fs::{File, create_dir_all};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use crate::data::orderbook::{OrderBookSnapshot, LOB_DEPTH};
 use crate::data::types::PublicTradeArc;
 
@@ -173,6 +173,11 @@ impl ParquetDumper {
     pub fn push_snapshot(&mut self, ts: u64, id: u64, flat_lob: Vec<f32>) -> Result<()> {
         if flat_lob.len() != LOB_DEPTH * 4 {
             anyhow::bail!("Invalid flat_lob length: expected {}, got {}", LOB_DEPTH * 4, flat_lob.len());
+        }
+
+        // Санити-чек: если ID > 0, но лучшие цены нулевые — это повод для паники/варнинга
+        if id > 0 && flat_lob[0] == 0.0 && flat_lob[LOB_DEPTH * 2] == 0.0 {
+            warn!("Sanity Check failed: last_update_id={} but best prices (ask/bid) are 0.0!", id);
         }
 
         self.timestamps.push(ts);

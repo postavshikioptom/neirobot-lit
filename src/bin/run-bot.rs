@@ -260,8 +260,8 @@ async fn async_main(args: Args, bg_handle: tokio::runtime::Handle) -> Result<()>
     // Собираем список секретов для маскирования в логах
     let secrets = vec![api_key.clone(), api_secret.clone()];
     
-    // Инициализируем логгер с маскированием секретов и сохраняем guard
-    let _log_guard = init_logger(&full_config.logging, &bot_path, secrets)
+    // Инициализируем логгер с маскированием секретов и сохраняем guards
+    let _log_guards = init_logger(&full_config.logging, &bot_path, secrets)
         .context("Failed to initialize logger")?;
 
     // Задача 219: Инициализация Liveness Heartbeat

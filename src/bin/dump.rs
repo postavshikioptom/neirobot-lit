@@ -11,7 +11,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 // Импорты из библиотеки проекта
-use neirobot_lit::config::loader::{load_full_config, load_full_config_with_validation};
+use neirobot_lit::config::loader::load_full_config_with_validation;
 use neirobot_lit::utils::logger::init_logger;
 
 #[derive(Parser, Debug)]
@@ -79,6 +79,8 @@ async fn main() -> Result<()> {
     let first_config_path = args.config.clone().unwrap_or_else(|| {
         PathBuf::from("bots").join(first_symbol).join("config.toml")
     });
+    // Загружаем конфиг для первой монеты (чтобы прочитать интервалы и т.д.)
+    // Выключаем торговые проверки (модель, пороги), так как для дампа они не нужна
     let first_full_config = load_full_config_with_validation(Path::new("."), &first_config_path, false)?;
 
     // Путь для логов: если один символ - в его папку, если много - в общую logs/dump
@@ -93,7 +95,7 @@ async fn main() -> Result<()> {
         std::env::var("BYBIT_API_SECRET").unwrap_or_default(),
     ];
 
-    let _log_guard = init_logger(&first_full_config.logging, &log_path, secrets)?;
+    let _log_guards = init_logger(&first_full_config.logging, &log_path, secrets)?;
 
     info!(
         "Starting dumper for {} symbols. Duration: {} hours.", 
@@ -110,7 +112,7 @@ async fn main() -> Result<()> {
         });
 
         // Загружаем конфиг для каждой монеты (могут быть разные интервалы и т.д.)
-        // Выключаем проверку модели, так как для дампа она не нужна
+        // Выключаем торговые проверки (модель, пороги), так как для дампа они не нужны
         let full_config = match load_full_config_with_validation(Path::new("."), &config_path, false) {
             Ok(cfg) => cfg,
             Err(e) => {

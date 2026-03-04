@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use tracing::debug;
 use crate::data::types::PriceLevel;
 use crate::trading::types::{OrderUpdate, OrderStatus};
 use anyhow::{Result, Context};
@@ -145,6 +146,8 @@ pub fn parse_orderbook_msg<'a>(json_str: &'a str) -> Result<Option<crate::data::
             .collect()
     };
 
+    debug!("[{}] Parsing LOB message: ts={}, u={}, type={}", msg.data.s, msg.ts, msg.data.u, msg.msg_type);
+    
     Ok(Some(crate::data::types::OrderBookUpdate {
         symbol: msg.data.s,
         timestamp_ms: msg.ts,
@@ -228,29 +231,22 @@ pub struct BybitTickerMsg<'a> {
     pub data: BybitTickerData<'a>,
 }
 
-/// Данные тикера от Bybit
+/// Данные тикера от Bybit (V5)
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BybitTickerData<'a> {
-    #[serde(rename = "s", borrow)]
+    #[serde(borrow)]
     pub symbol: &'a str,
-    #[serde(rename = "lp", borrow)]
-    pub last_price: &'a str,
-    #[serde(rename = "bp", borrow)]
-    pub bid_price: &'a str,
-    #[serde(rename = "bv", borrow)]
-    pub bid_size: &'a str,
-    #[serde(rename = "ap", borrow)]
-    pub ask_price: &'a str,
-    #[serde(rename = "av", borrow)]
-    pub ask_size: &'a str,
-    #[serde(rename = "v24h", borrow)]
-    pub volume_24h: &'a str,
-    #[serde(rename = "t24h", borrow)]
-    pub turnover_24h: &'a str,
-    #[serde(rename = "fr", borrow)]
-    pub funding_rate: &'a str,
-    #[serde(rename = "nft")]
-    pub next_funding_time: u64,
+    pub last_price: Option<&'a str>,
+    pub bid1_price: Option<&'a str>,
+    pub bid1_size: Option<&'a str>,
+    pub ask1_price: Option<&'a str>,
+    pub ask1_size: Option<&'a str>,
+    pub volume24h: Option<&'a str>,
+    pub turnover24h: Option<&'a str>,
+    pub funding_rate: Option<&'a str>,
+    pub next_funding_time: Option<&'a str>, // В V5 может приходить строкой
+    pub mark_price: Option<&'a str>, // Задача 233: Маркированная цена внутри тикера
 }
 
 /// Структура для парсинга сообщения о маркированной цене от Bybit (Задача 233)
@@ -267,10 +263,10 @@ pub struct BybitMarkPriceMsg<'a> {
 
 /// Данные маркированной цены от Bybit (Задача 233)
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BybitMarkPriceData<'a> {
-    #[serde(rename = "s", borrow)]
+    #[serde(borrow)]
     pub symbol: &'a str,
-    #[serde(rename = "p", borrow)]
     pub mark_price: &'a str,
 }
 
@@ -288,16 +284,17 @@ pub fn parse_ticker_msg<'a>(json_str: &'a str) -> Result<Option<crate::data::typ
 
     let ticker = crate::data::types::Ticker {
         symbol: msg.data.symbol,
-        last_price: parse_f64_fast(msg.data.last_price)?,
-        bid: parse_f64_fast(msg.data.bid_price)?,
-        ask: parse_f64_fast(msg.data.ask_price)?,
-        bid_size: parse_f64_fast(msg.data.bid_size)?,
-        ask_size: parse_f64_fast(msg.data.ask_size)?,
-        volume_24h: parse_f64_fast(msg.data.volume_24h)?,
-        turnover_24h: parse_f64_fast(msg.data.turnover_24h)?,
-        funding_rate: parse_f64_fast(msg.data.funding_rate)?,
-        next_funding_time: msg.data.next_funding_time,
+        last_price: msg.data.last_price.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        bid: msg.data.bid1_price.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        ask: msg.data.ask1_price.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        bid_size: msg.data.bid1_size.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        ask_size: msg.data.ask1_size.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        volume_24h: msg.data.volume24h.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        turnover_24h: msg.data.turnover24h.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        funding_rate: msg.data.funding_rate.and_then(|p| parse_f64_fast(p).ok()).unwrap_or(0.0),
+        next_funding_time: msg.data.next_funding_time.and_then(|t| t.parse::<u64>().ok()).unwrap_or(0),
         timestamp_ms: msg.ts,
+        mark_price: msg.data.mark_price.and_then(|p| parse_f64_fast(p).ok()),
     };
 
     Ok(Some(ticker))

@@ -6,11 +6,13 @@ import numpy as np
 import argparse
 import psutil
 import json
+import os
+import datetime
 from tqdm import tqdm
 from sklearn.metrics import classification_report, matthews_corrcoef
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torchmetrics.classification import (
     MulticlassAccuracy, 
     MulticlassF1Score,
@@ -30,6 +32,22 @@ from .features import FeatureEngineer
 from .labels import Labeler
 from .normalization import Normalizer
 from .utils import compute_metrics, FocalLoss, save_confusion_matrices, CalibrationMetrics, plot_reliability_diagram
+
+
+class TrainSubset(torch.utils.data.Subset):
+    """
+    Subset для тренировочных данных с безопасной аугментацией.
+    Включает is_train только во время вызова __getitem__, не затрагивая val/test.
+    """
+    def __getitem__(self, idx):
+        original_is_train = self.dataset.is_train
+        self.dataset.is_train = True
+        try:
+            result = super().__getitem__(idx)
+        finally:
+            self.dataset.is_train = original_is_train
+        return result
+
 
 
 def _streaming_worker_init_fn(worker_id: int):
@@ -1302,7 +1320,10 @@ def train():
         # Для memory и memmap загружаем в память
         df = loader.load_data(lazy=False)
 
-    # Задача 236: Загрузка публичных сделок и расчет trade imbalance
+    # Задача 236: Загрузка публичных сделок и расчет trade imbalance — ОТЛОЖЕНО
+    # Пока Trades не используем, всё обучение проходит только на Orderbook. 
+    # В будущем, если нужно будет Trades, раскомментируем.
+    """
     print("Loading trades data...")
     df_trades = loader.load_trades(lazy=False)
     
@@ -1337,6 +1358,7 @@ def train():
         print(f"Added {len(trade_imb_windows)} trade imbalance features")
     else:
         print("No trades data found, skipping trade imbalance features")
+    """
 
     # Генерация признаков
     print("Engineering features...")
@@ -1392,51 +1414,52 @@ def train():
     regime_weights = None
     num_regimes = 0
     
-    if args.data_mode != "streaming":  # Regime detection требует полных данных в памяти
-        print("\n[Regime Detection] Training HMM for market regime identification...")
-        from .regime import RegimeDetector, optimize_n_components_optuna
-        from .dataset import compute_regime_features
-        
-        # Вычисляем признаки режима
-        regime_features = compute_regime_features(df, window=1000)
-        
-        # Оптимизируем количество состояний через Optuna (опционально)
-        # Можно закомментировать для ускорения и использовать фиксированное значение
-        try:
-            best_n_components, best_score = optimize_n_components_optuna(
-                regime_features, 
-                min_components=2, 
-                max_components=6, 
-                n_trials=10
-            )
-            print(f"[Regime Detection] Optimal number of regimes: {best_n_components} (Silhouette Score: {best_score:.4f})")
-        except Exception as e:
-            print(f"[Regime Detection] Optuna optimization failed: {e}. Using default n_components=3")
-            best_n_components = 3
-        
-        # Обучаем RegimeDetector
-        regime_detector = RegimeDetector(n_components=best_n_components)
-        regime_detector.fit(regime_features)
-        
-        # Получаем распределение режимов
-        regime_distribution = regime_detector.get_regime_distribution(regime_features)
-        print(f"[Regime Detection] Regime distribution: {regime_distribution}")
-        
-        # Вычисляем веса режимов (обратно пропорционально частоте)
-        # Редкие режимы получают больший вес
-        total_samples = len(regime_features)
-        regime_weights = total_samples / (regime_distribution + 1e-8)
-        regime_weights = regime_weights / regime_weights.sum() * best_n_components  # Нормализуем
-        print(f"[Regime Detection] Regime weights: {regime_weights}")
-        
-        num_regimes = best_n_components
-        
-        # Сохраняем параметры HMM
-        regime_config_path = base_path / "bots" / args.symbol / "model" / "regime_config.json"
-        regime_detector.save(str(regime_config_path))
-        print(f"[Regime Detection] Saved regime config to {regime_config_path}")
-    else:
-        print("[Regime Detection] Skipped for streaming mode (requires full data in memory)")
+    # --- ВРЕМЕННО ОТКЛЮЧЕНО (ЗАДАЧА 155 ПРИОСТАНОВЛЕНА) ---
+    # if args.data_mode != "streaming":  # Regime detection требует полных данных в памяти
+    #     print("\n[Regime Detection] Training HMM for market regime identification...")
+    #     from .regime import RegimeDetector, optimize_n_components_optuna
+    #     from .dataset import compute_regime_features
+    #     
+    #     # Вычисляем признаки режима
+    #     regime_features = compute_regime_features(df, window=1000)
+    #     
+    #     # Оптимизируем количество состояний через Optuna (опционально)
+    #     try:
+    #         best_n_components, best_score = optimize_n_components_optuna(
+    #             regime_features, 
+    #             min_components=2, 
+    #             max_components=6, 
+    #             n_trials=10
+    #         )
+    #         print(f"[Regime Detection] Optimal number of regimes: {best_n_components} (Silhouette Score: {best_score:.4f})")
+    #     except Exception as e:
+    #         print(f"[Regime Detection] Optuna optimization failed: {e}. Using default n_components=3")
+    #         best_n_components = 3
+    #     
+    #     # Обучаем RegimeDetector
+    #     regime_detector = RegimeDetector(n_components=best_n_components)
+    #     regime_detector.fit(regime_features)
+    #     
+    #     # Получаем распределение режимов
+    #     regime_distribution = regime_detector.get_regime_distribution(regime_features)
+    #     print(f"[Regime Detection] Regime distribution: {regime_distribution}")
+    #     
+    #     # Вычисляем веса режимов (обратно пропорционально частоте)
+    #     total_samples = len(regime_features)
+    #     regime_weights = total_samples / (regime_distribution + 1e-8)
+    #     regime_weights = regime_weights / regime_weights.sum() * best_n_components
+    #     print(f"[Regime Detection] Regime weights: {regime_weights}")
+    #     
+    #     num_regimes = best_n_components
+    #     
+    #     # Сохраняем параметры HMM
+    #     regime_config_path = base_path / "bots" / args.symbol / "model" / "regime_config.json"
+    #     regime_detector.save(str(regime_config_path))
+    #     print(f"[Regime Detection] Saved regime config to {regime_config_path}")
+    # else:
+    #     print("[Regime Detection] Skipped for streaming mode (requires full data in memory)")
+    # ---------------------------------------------------
+
     
     # 6. Создание Dataset и хронологическое разделение (70/15/15)
     print(f"Creating dataset in '{args.data_mode}' mode (raw features)...")
@@ -1517,19 +1540,31 @@ def train():
             **time_weighting_params
         )
     
+    # Хронологическое разделение 70/15/15 (Train/Val/Test)
     total_len = len(full_dataset)
-    train_size = int(0.8 * total_len)
-    val_size = total_len - train_size
+    train_size = int(0.70 * total_len)
+    val_size = int(0.15 * total_len)
+    test_size = total_len - train_size - val_size
+
+    # Хронологические индексы (0-70%, 70-85%, 85-100%)
+    train_indices = list(range(0, train_size))
+    val_indices = list(range(train_size, train_size + val_size))
+    test_indices = list(range(train_size + val_size, total_len))
+
+    from torch.utils.data import Subset
+
+    # Используем TrainSubset для безопасной аугментации в обучении
+    train_ds = TrainSubset(full_dataset, train_indices)
+    val_ds = Subset(full_dataset, val_indices)
+    test_ds = Subset(full_dataset, test_indices)
+
+    # Верификация разделения
+    print(f"\nChronological split verification:")
+    print(f"  Train: indices {train_indices[0]}-{train_indices[-1]} ({len(train_ds)} samples, {len(train_ds)/total_len*100:.1f}%)")
+    print(f"  Val:   indices {val_indices[0]}-{val_indices[-1]} ({len(val_ds)} samples, {len(val_ds)/total_len*100:.1f}%)")
+    print(f"  Test:  indices {test_indices[0]}-{test_indices[-1]} ({len(test_ds)} samples, {len(test_ds)/total_len*100:.1f}%)")
     
-    from torch.utils.data import Subset, random_split
-    
-    # Строго 80% train / 20% validation через random_split
-    train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
-    
-    # Включаем аугментацию для тренировочного набора
-    full_dataset.is_train = True
-    
-    # 7. Оверсэмплинг и нормализация тренировочного набора (Задача 127)
+    # 7. Оверсэмплинг и нормализация тренировочного набора (Задача 127, оптимизация 303)
     if args.balance_method != "none":
         if args.data_mode == "streaming":
             print("\n⚠️  WARNING: Oversampling is not supported in 'streaming' mode. Skipping balancing.")
@@ -1540,46 +1575,98 @@ def train():
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
         else:
             print(f"\nApplying oversampling to training set ({args.balance_method}, ratio={args.balance_ratio})...")
-            # Извлекаем "сырые" тренировочные данные
-            # Для каждого индекса в train_ds нужно получить окно [idx : idx + seq_len]
+            print("Using batch processing to optimize memory usage...")
+            
             train_indices = train_ds.indices
-            train_features_list = []
-            for idx in train_indices:
-                window = full_dataset.features[idx : idx + full_dataset.seq_len]
-                train_features_list.append(window)
-            train_features = np.stack(train_features_list, axis=0)
+            seq_len = full_dataset.seq_len
             
-            train_labels = full_dataset.labels[train_indices + full_dataset.seq_len - 1]
+            # Шаг 1: Глобальный расчет sampling_strategy
+            print("Step 1/4: Computing global sampling strategy...")
+            train_labels_all = full_dataset.labels[train_indices + seq_len - 1]
+            global_counts = np.bincount(train_labels_all)
+            if len(global_counts) < 3:
+                full_counts = np.zeros(3, dtype=int)
+                full_counts[:len(global_counts)] = global_counts
+                global_counts = full_counts
             
-            # Балансируем ДО нормализации
-            train_features_res, train_labels_res = balance_dataset(
-                train_features, 
-                train_labels, 
-                method=args.balance_method, 
-                ratio=args.balance_ratio
-            )
+            maj_class = np.argmax(global_counts)
+            target_count = int(global_counts[maj_class] * args.balance_ratio)
+            sampling_strategy = {
+                1: max(global_counts[1], target_count), 
+                2: max(global_counts[2], target_count)
+            }
+            print(f"Global class distribution: {global_counts}, Target strategy: {sampling_strategy}")
             
-            # Обучаем нормализатор на сбалансированных тренировочных данных (Error B)
-            print("Fitting normalizer on balanced training set...")
-            # Normalizer ожидает 2D (N, F) или DataFrame. 
-            # Сплющиваем (N*S, F) для корректного расчета статистик по фичам.
-            n_samples_res, s_len, n_feats = train_features_res.shape
-            train_features_flat = train_features_res.reshape(-1, n_feats)
-            
-            # Извлекаем имена признаков из оригинального DataFrame
+            # Шаг 2: Fit нормализатора на 2D сырых данных
+            print("Step 2/4: Fitting normalizer on raw 2D training data...")
+            train_features_2d = full_dataset.features[train_indices]
             feat_cols = [c for c in df.columns if c.startswith("feat_")]
-            normalizer.fit(train_features_flat, feature_names=feat_cols, winsor_limits=winsor_limits)
+            
+            # Добавляем имена для past_returns если они есть (Задача 303-2)
+            if n_past_returns > 0:
+                past_return_names = [f"past_return_{lag}" for lag in past_returns_lags]
+                feat_cols.extend(past_return_names)
+                
+            print(f"Features dimension check: {train_features_2d.shape[1]} vs {len(feat_cols)}")
+            normalizer.fit(train_features_2d, feature_names=feat_cols, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
+            print(f"✓ Normalizer fitted on {len(train_features_2d)} samples")
             
-            # Нормализуем тренировочные данные
-            train_features_res = normalizer.transform(train_features_res)
+            # Шаг 3: Батчевая обработка с записью в файл
+            print("Step 3/4: Batch processing (normalize -> balance -> write to disk)...")
+            BATCH_SIZE = 50000
+            n_features = train_features_2d.shape[1]
             
-            # Создаем новый тренировочный датасет (Error A)
+            # Создаем временные файлы для записи
+            feat_bin_path = os.path.join(base_path, args.symbol, "model", "balanced_features.bin")
+            lab_bin_path = os.path.join(base_path, args.symbol, "model", "balanced_labels.bin")
+            
+            total_balanced_samples = 0
+            with open(feat_bin_path, 'wb') as f_feat, open(lab_bin_path, 'wb') as f_lab:
+                for i in range(0, len(train_indices), BATCH_SIZE):
+                    batch_indices = train_indices[i : i + BATCH_SIZE]
+                    
+                    # А) Сборка 3D батча + метки батча
+                    batch_3d_list = []
+                    for idx in batch_indices:
+                        window = full_dataset.features[idx : idx + seq_len]
+                        batch_3d_list.append(window)
+                    batch_3d = np.stack(batch_3d_list, axis=0)
+                    batch_labels = full_dataset.labels[batch_indices + seq_len - 1]
+                    
+                    # Б) Нормализация батча
+                    batch_3d_norm = normalizer.transform(batch_3d)
+                    
+                    # В) Балансировка батча с глобальной стратегией
+                    b_feat, b_lab = balance_dataset(
+                        batch_3d_norm, 
+                        batch_labels, 
+                        method=args.balance_method, 
+                        sampling_strategy=sampling_strategy
+                    )
+                    
+                    # Г) Запись в файл (append)
+                    f_feat.write(b_feat.astype('float32').tobytes())
+                    f_lab.write(b_lab.astype('int64').tobytes())
+                    total_balanced_samples += len(b_lab)
+                    
+                    print(f"  Processed batch {i//BATCH_SIZE + 1}: {len(batch_indices)} -> {len(b_lab)} samples (total: {total_balanced_samples})")
+            
+            print(f"✓ Batch processing complete: {len(train_indices)} -> {total_balanced_samples} samples")
+            
+            # Шаг 4: Подключаем memmap к результату
+            print("Step 4/4: Creating memmap dataset...")
+            features_res = np.memmap(feat_bin_path, dtype='float32', mode='r', 
+                                     shape=(total_balanced_samples, seq_len, n_features))
+            labels_res = np.memmap(lab_bin_path, dtype='int64', mode='r', 
+                                   shape=(total_balanced_samples,))
+            
+            # Создаем новый тренировочный датасет
             class BalancedTrainDataset(Dataset):
                 def __init__(self, features, labels, original_ds):
-                    self.features = torch.from_numpy(features).float()
-                    self.labels = torch.from_numpy(labels).long()
+                    self.features = features  # memmap array
+                    self.labels = labels      # memmap array
                     self.original_ds = original_ds
                     self.is_train = True 
                     
@@ -1587,9 +1674,9 @@ def train():
                     return len(self.labels)
                     
                 def __getitem__(self, idx):
-                    # Признаки уже нормализованы в features
-                    x = self.features[idx]
-                    y = self.labels[idx]
+                    # Признаки уже нормализованы в features (memmap)
+                    x = torch.from_numpy(self.features[idx].copy()).float()
+                    y = torch.from_numpy(np.array(self.labels[idx])).long()
                     
                     # Применяем аугментацию если нужно
                     if self.is_train and torch.rand(1).item() < self.original_ds.augment_prob:
@@ -1649,28 +1736,29 @@ def train():
                     return x_final, y, torch.tensor(0.0).float(), torch.tensor(1.0).float(), torch.tensor(0).long()
             
             # Заменяем train_ds
-            train_ds = BalancedTrainDataset(train_features_res, train_labels_res, full_dataset)
-            print(f"✓ Training set balanced and normalized: {len(train_labels)} -> {len(train_ds)} samples")
+            train_ds = BalancedTrainDataset(features_res, labels_res, full_dataset)
+            print(f"✓ Training set balanced and normalized: {len(train_labels_all)} -> {len(train_ds)} samples")
 
     else:
         # Если балансировка не используется, обучаем нормализатор на обычном тренировочном наборе
         if args.data_mode != "streaming":
             print("\nFitting normalizer on original training set...")
-            # Для каждого индекса в train_ds нужно получить окно [idx : idx + seq_len]
             train_indices = train_ds.indices
-            train_features_list = []
-            for idx in train_indices:
-                window = full_dataset.features[idx : idx + full_dataset.seq_len]
-                train_features_list.append(window)
-            train_features = np.stack(train_features_list, axis=0)
             
-            n_samples, s_len, n_feats = train_features.shape
+            # Оптимизация памяти: обучаем на 2D данных вместо 3D окон
+            train_features_2d = full_dataset.features[train_indices]
             
-            # Извлекаем имена признаков из оригинального DataFrame
+            # Извлекаем имена признаков и добавляем past_returns (Задача 303-2)
             feat_cols = [c for c in df.columns if c.startswith("feat_")]
-            normalizer.fit(train_features.reshape(-1, n_feats), feature_names=feat_cols, winsor_limits=winsor_limits)
+            if n_past_returns > 0:
+                past_return_names = [f"past_return_{lag}" for lag in past_returns_lags]
+                feat_cols.extend(past_return_names)
+            
+            print(f"Features dimension check: {train_features_2d.shape[1]} vs {len(feat_cols)}")
+            normalizer.fit(train_features_2d, feature_names=feat_cols, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
+            print(f"✓ Normalizer fitted on {len(train_features_2d)} samples")
         else:
             # Для streaming обучаем на сэмпе
             sample_df = df.head(100000).collect(streaming=True)

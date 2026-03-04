@@ -167,6 +167,7 @@ pub struct TickerArc {
     pub funding_rate: f64,
     pub next_funding_time: u64,
     pub timestamp_ms: u64,
+    pub mark_price: Option<f64>, // Задача 233
 }
 
 impl OrderBookUpdate<'_> {
@@ -209,6 +210,7 @@ impl Ticker<'_> {
             funding_rate: self.funding_rate,
             next_funding_time: self.next_funding_time,
             timestamp_ms: self.timestamp_ms,
+            mark_price: self.mark_price,
         }
     }
 }
@@ -238,6 +240,7 @@ pub struct Ticker<'a> {
     pub funding_rate: f64,         // Текущая ставка финансирования (например, 0.0005 = 0.05%)
     pub next_funding_time: u64,    // Время следующего клиринга фандинга (Unix MS)
     pub timestamp_ms: u64,         // Время получения данных
+    pub mark_price: Option<f64>,   // Задача 233
 }
 
 impl<'a> Ticker<'a> {
@@ -255,6 +258,7 @@ impl<'a> Ticker<'a> {
             funding_rate: self.funding_rate,
             next_funding_time: self.next_funding_time,
             timestamp_ms: self.timestamp_ms,
+            mark_price: self.mark_price,
         }
     }
 }
@@ -273,4 +277,5 @@ pub struct TickerOwned {
     pub funding_rate: f64,
     pub next_funding_time: u64,
     pub timestamp_ms: u64,
+    pub mark_price: Option<f64>,
 }
