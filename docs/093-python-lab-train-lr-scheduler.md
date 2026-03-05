@@ -30,4 +30,11 @@
 *   **Ablation**: Сравнение `Constant LR` vs `OneCycle`. Ожидается более высокая точность при меньшем количестве эпох.
 
 ---
+
+> [!IMPORTANT]
+> **Hotfix (Задача 303-6)**: 
+> При интеграции `scheduler` в `LiTModule` возникла ошибка `TypeError: LiTModel.__init__() got an unexpected keyword argument 'scheduler'`.
+> **Решение**: Параметр `scheduler` должен быть явно указан в сигнатуре `LiTModule.__init__`, чтобы он не пробрасывался во внутреннюю модель `LiTModel` через `**model_params`.
+
+---
 **Напиши следующую задачу: 094-python-lab-cross-validation-logic.md**

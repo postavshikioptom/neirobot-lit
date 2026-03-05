@@ -195,6 +195,18 @@ def compute_metrics(y_true, y_pred, class_weights=None):
     y_pred: numpy array предсказанных меток
     class_weights: опционально, веса классов для логирования
     """
+    # Задача 303-9: Безопасная обработка NaN
+    if np.isnan(y_pred).any() or (isinstance(y_true, np.ndarray) and np.isnan(y_true).any()):
+        print("\n" + "!" * 60)
+        print("⚠️  WARNING: NaN detected in y_true or y_pred! Metrics may be corrupted.")
+        print("!" * 60 + "\n")
+        
+        # Возвращаем дефолтные значения, чтобы код не падал ниже
+        return {
+            "mcc": 0.0, "balanced_acc": 0.0,
+            "f1_flat": 0.0, "f1_up": 0.0, "f1_down": 0.0, "f1_macro": 0.0
+        }
+
     # 1. Основные агрегированные метрики
     mcc = matthews_corrcoef(y_true, y_pred)
     balanced_acc = balanced_accuracy_score(y_true, y_pred)
@@ -254,6 +266,11 @@ class CalibrationMetrics:
                 - mce: Maximum Calibration Error
                 - bin_data: список словарей с данными по каждой корзине
         """
+        # Задача 303-9: Безопасная обработка NaN
+        if not torch.isfinite(logits).all():
+            print("\nWARNING: CalibrationMetrics.calculate: logits contain NaN or Inf. Skipping calculation.")
+            return 0.0, 0.0, [{"acc": 0, "conf": 0.5, "count": 0}] * self.n_bins
+
         softmaxes = torch.softmax(logits, dim=1)
         confidences, predictions = torch.max(softmaxes, 1)
         accuracies = predictions.eq(labels)
@@ -1219,7 +1236,11 @@ def setup_activation_hooks(model, writer, epoch, hist_freq=10):
                 
                 # Полные гистограммы (редко, для экономии ресурсов)
                 if epoch % hist_freq == 0:
-                    writer.add_histogram(f'activations/{layer_name}/histogram', act, epoch)
+                    if torch.isfinite(act).any():
+                        writer.add_histogram(f'activations/{layer_name}/histogram', act, epoch)
+                    else:
+                        # Если тензор пустой или содержит только NaN/Inf, add_histogram упадет
+                        pass
         
         return hook
     
@@ -1283,6 +1304,11 @@ def plot_confusion_matrix_tensorboard(y_true, y_pred, class_names, writer, epoch
     import matplotlib.pyplot as plt
     import seaborn as sns
     
+    # Задача 303-9: Безопасная обработка NaN
+    if np.isnan(y_pred).any():
+        print(f"\nWARNING: plot_confusion_matrix_tensorboard: NaN in y_pred. Skipping plot {tag}.")
+        return
+
     # Вычисляем confusion matrix
     cm = confusion_matrix(y_true, y_pred)
     
@@ -1331,6 +1357,11 @@ def plot_pr_curves_tensorboard(y_true, y_pred_probs, class_names, writer, epoch,
     from sklearn.preprocessing import label_binarize
     import matplotlib.pyplot as plt
     
+    # Задача 303-9: Безопасная обработка NaN
+    if np.isnan(y_pred_probs).any():
+        print(f"\nWARNING: plot_pr_curves_tensorboard: NaN in y_pred_probs. Skipping plot {tag}.")
+        return
+
     num_classes = len(class_names)
     
     # Бинаризуем метки для multi-class PR-кривых
@@ -1399,7 +1430,8 @@ def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embe
             handle = model.patching.register_forward_hook(hook)
             
             # Forward pass
-            _ = model(x.to(model.device), regime_id=regime_id.to(model.device) if regime_id is not None else None)
+            device = next(model.parameters()).device
+            _ = model(x.to(device), regime_id=regime_id.to(device) if regime_id is not None else None)
             
             # Удаляем hook
             handle.remove()

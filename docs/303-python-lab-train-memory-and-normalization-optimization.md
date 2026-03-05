@@ -200,3 +200,55 @@ print(f"  Test:  indices {test_indices[0]}-{test_indices[-1]} ({len(test_ds)} sa
 - Устранение `NameError` по `test_ds`.
 - Корректная и безопасная аугментация (только для Train).
 - Точное хронологическое разделение 70/15/15.
+
+
+---
+
+## 8. Задача 303-4: Исправление коллизии имен 'pl' и DeprecationWarnings
+
+В ходе реализации Task 303 были допущены ошибки в именовании алиасов (коллизия `pl` между Lightning и Polars) и использованы устаревшие методы.
+
+### План исправления:
+
+**ШАГ 1: Исправление коллизии `pl.col`**
+
+В строке 1837 (и других местах, если есть) заменить `pl.col` на `pl_pol.col`, так как в начале файла Polars импортирован как `pl_pol`.
+
+**ШАГ 2: Устранение DeprecationWarnings**
+
+1.  Заменить `collect(streaming=True)` на `collect(engine="streaming")` во всех вызовах.
+2.  Заменить `datetime.utcnow()` на `datetime.now(datetime.UTC)` (потребуется `from datetime import UTC`).
+
+### Ожидаемый результат:
+- Устранение `AttributeError`.
+- Чистые логи без Deprecation предупреждений.
+
+---
+
+## 9. Задача 303-5: Исправлен TypeError `past_returns_lags` в `train.py`
+
+При инициализации `LiTModule` возникла ошибка: `past_returns_lags` передавался во внутреннюю модель `LiTModel`, которая не ожидает этот параметр в `__init__`.
+
+### План исправления:
+
+**ШАГ 1: Обновление сигнатуры `LiTModule.__init__`**
+
+Добавить явный перехват аргумента `past_returns_lags` в конструкторе `LiTModule` в `train.py`. Это исключит его попадание в `**model_params`, которые пробрасываются в `LiTModel`.
+
+```python
+# train.py
+class LiTModule(pl.LightningModule):
+    def __init__(self, ..., past_returns_lags=None, **model_params):
+        super().__init__()
+        # past_returns_lags теперь перехвачен и не попадет в LiTModel(**model_params)
+        self.save_hyperparameters(...)
+        self.model = LiTModel(..., **model_params)
+```
+
+**ШАГ 2: Сохранение функционала**
+
+Все индикаторы (доходности за лаги 10, 50, 100) **сохраняются**. Исправление касается только корректности передачи технических параметров при инициализации нейросети.
+
+### Ожидаемый результат:
+- Устранение `TypeError`.
+- Модель успешно инициализируется с 6-ю входными каналами (3 базовых + 3 Momentum-канала).

@@ -8,6 +8,7 @@ import psutil
 import json
 import os
 import datetime
+from datetime import UTC
 from tqdm import tqdm
 from sklearn.metrics import classification_report, matthews_corrcoef
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
@@ -72,7 +73,7 @@ def _streaming_worker_init_fn(worker_id: int):
             dataset.lazy_df = pl.scan_parquet(dataset.file_path, low_memory=True)
             # Переинициализируем row_offsets для нового LazyFrame
             if hasattr(dataset, '_build_row_offsets'):
-                total_rows = dataset.lazy_df.select(pl.len()).collect(streaming=True).item()
+                total_rows = dataset.lazy_df.select(pl_pol.len()).collect(engine="streaming").item()
                 dataset.row_offsets = dataset._build_row_offsets(dataset.file_path, total_rows)
             print(f"[Worker {worker_id}] Initialized private LazyFrame for streaming mode")
 
@@ -112,7 +113,7 @@ class LiTModule(pl.LightningModule):
     LightningModule для обучения модели LiT.
     Обертка над nn.Module, добавляющая логику обучения, валидации и оптимизации.
     """
-    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=True, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="zscore", winsor_limits=None, **model_params):
+    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=True, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="zscore", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, **model_params):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
         self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, **model_params)
@@ -388,15 +389,15 @@ class LiTModule(pl.LightningModule):
         self.val_vol_pred.append(vol_pred.detach().cpu().numpy())
         
         # Логируем основные метрики
-        self.log("val_loss", loss_cls, prog_bar=True)
-        self.log("val_mse_vol", loss_vol, prog_bar=True)
-        self.log("val_mae_vol", mae_vol)
+        self.log("val_loss", loss_cls, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_mse_vol", loss_vol, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_mae_vol", mae_vol, on_step=False, on_epoch=True)
         
         # Обновляем метрики (только для single horizon)
         if not self.is_multi_horizon:
             # Логируем основные метрики на каждой эпохе (автоматически обновляют объекты)
-            self.log("val_mcc", self.mcc(logits, y), prog_bar=True, on_epoch=True)
-            self.log("val_f1_macro", self.f1_macro(logits, y), on_epoch=True)
+            self.log("val_mcc", self.mcc(logits, y), prog_bar=True, on_step=False, on_epoch=True)
+            self.log("val_f1_macro", self.f1_macro(logits, y), on_step=False, on_epoch=True)
             
             # Обновляем матрицу ошибок и метрики по классам (без логирования на каждом шаге)
             self.conf_matrix.update(logits, y)
@@ -446,6 +447,15 @@ class LiTModule(pl.LightningModule):
             
             # Вычисляем метрики калибровки (ECE и MCE)
             y_true_tensor = torch.from_numpy(y_true).long()
+            
+            # Задача 303-9: Проверка на NaN перед расчетами
+            if not torch.isfinite(logits).all():
+                print("\n" + "!" * 80)
+                print("⚠️  CRITICAL WARNING: NaN or Inf detected in model logits during validation!")
+                print("   This indicates extreme numerical instability (exploding gradients).")
+                print("   Metrics and visualizations for this epoch will be unreliable.")
+                print("!" * 80 + "\n")
+
             ece, mce, bin_data = self.calibration_metrics.calculate(logits, y_true_tensor)
             
             # Логируем все метрики
@@ -991,6 +1001,7 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         devices=1,
         precision="16-mixed" if torch.cuda.is_available() else 32,
         enable_progress_bar=False,  # Отключаем прогресс-бар для чистоты вывода
+        log_every_n_steps=10000  # Логировать только в конце эпохи
     )
     
     # Обучаем модель
@@ -1095,7 +1106,7 @@ def update_model_metadata(base_path, symbol, args, winsor_limits, norm_params_pa
         metadata = {
             "metadata_version": "1.1.0",
             "model_name": "LiT",
-            "export_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "export_timestamp": datetime.datetime.now(UTC).isoformat() + "Z",
         }
     
     # Загружаем сохраненные параметры нормализации
@@ -1540,6 +1551,41 @@ def train():
             **time_weighting_params
         )
     
+    # Проверка данных на NaN перед обучением
+    print("\nПроверка данных на NaN...")
+    nan_check_samples = min(100, len(full_dataset))
+    nan_found = False
+    
+    for i in range(0, nan_check_samples, 10):
+        try:
+            sample = full_dataset[i]
+            x, y, vol_target, weight = sample[:4]  # Первые 4 элемента
+            
+            if torch.isnan(x).any():
+                print(f"⚠️  WARNING: NaN обнаружен в признаках (x) на индексе {i}")
+                nan_found = True
+            if torch.isnan(torch.tensor(y)).any():
+                print(f"⚠️  WARNING: NaN обнаружен в метках (y) на индексе {i}")
+                nan_found = True
+            if torch.isnan(torch.tensor(vol_target)).any():
+                print(f"⚠️  WARNING: NaN обнаружен в целевой волатильности (vol_target) на индексе {i}")
+                nan_found = True
+        except Exception as e:
+            print(f"⚠️  WARNING: Ошибка при проверке индекса {i}: {e}")
+            nan_found = True
+    
+    if nan_found:
+        print("\n" + "!" * 80)
+        print("⚠️  CRITICAL WARNING: Обнаружены NaN значения в данных!")
+        print("   Это может привести к нестабильности обучения и NaN в метриках.")
+        print("   Рекомендации:")
+        print("   1. Проверьте качество исходных Parquet файлов")
+        print("   2. Проверьте параметры нормализации (scaler_type, winsor_limits)")
+        print("   3. Проверьте параметры feature engineering")
+        print("!" * 80 + "\n")
+    else:
+        print(f"✓ Проверка завершена: NaN не обнаружены в {nan_check_samples} проверенных примерах")
+    
     # Хронологическое разделение 70/15/15 (Train/Val/Test)
     total_len = len(full_dataset)
     train_size = int(0.70 * total_len)
@@ -1569,7 +1615,7 @@ def train():
         if args.data_mode == "streaming":
             print("\n⚠️  WARNING: Oversampling is not supported in 'streaming' mode. Skipping balancing.")
             # Для streaming режима все равно нужен fit
-            sample_df = df.head(100000).collect(streaming=True)
+            sample_df = df.head(100000).collect(engine="streaming")
             normalizer.fit(sample_df, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
@@ -1761,7 +1807,7 @@ def train():
             print(f"✓ Normalizer fitted on {len(train_features_2d)} samples")
         else:
             # Для streaming обучаем на сэмпе
-            sample_df = df.head(100000).collect(streaming=True)
+            sample_df = df.head(100000).collect(engine="streaming")
             normalizer.fit(sample_df, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
@@ -1834,11 +1880,11 @@ def train():
         # Считаем распределение классов через Polars
         label_counts = (
             train_lazy_df
-            .select(pl.col("label"))
+            .select(pl_pol.col("label"))
             .slice(full_dataset.seq_len - 1, train_size)
             .group_by("label")
-            .agg(pl.len().alias("count"))
-            .collect(streaming=True)
+            .agg(pl_pol.len().alias("count"))
+            .collect(engine="streaming")
         )
         
         counts = np.zeros(3, dtype=np.int64)
@@ -2095,7 +2141,8 @@ def train():
         logger=logger,
         accelerator="auto",
         devices=1,
-        precision="16-mixed" if torch.cuda.is_available() else 32
+        precision="16-mixed" if torch.cuda.is_available() else 32,
+        log_every_n_steps=10000  # Логировать только в конце эпохи, а не каждые 50 батчей
     )
     
     # Добавляем symbol в trainer для доступа из LiTModule
@@ -2316,7 +2363,7 @@ def train():
             cv_labels = full_dataset.labels[:cv_size]
         else:
             # Для streaming загружаем метки
-            cv_labels_df = full_dataset.lazy_df.select(pl.col("label")).slice(full_dataset.seq_len - 1, cv_size).collect(streaming=True)
+            cv_labels_df = full_dataset.lazy_df.select(pl_pol.col("label")).slice(full_dataset.seq_len - 1, cv_size).collect(engine="streaming")
             cv_labels = cv_labels_df.to_series().to_numpy()
         
         # Список для сбора MCC по фолдам
@@ -2449,7 +2496,8 @@ def train():
                 accelerator="auto",
                 devices=1,
                 precision="16-mixed" if torch.cuda.is_available() else 32,
-                enable_progress_bar=True
+                enable_progress_bar=True,
+                log_every_n_steps=10000  # Логировать только в конце эпохи
             )
             
             fold_trainer.symbol = args.symbol
@@ -2805,7 +2853,8 @@ def train():
                     callbacks=[checkpoint_callback],
                     enable_progress_bar=True,
                     gradient_clip_val=None,  # AGC уже в модели
-                    deterministic=False
+                    deterministic=False,
+                    log_every_n_steps=10000  # Логировать только в конце эпохи
                 )
                 
                 finetune_trainer.fit(model, train_loader, val_loader)
