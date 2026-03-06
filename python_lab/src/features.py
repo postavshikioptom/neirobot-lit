@@ -35,34 +35,52 @@ class FeatureEngineer:
             mid_price=pl.when(pl.col("mid_price") == 0).then(1.0).otherwise(pl.col("mid_price"))
         )
 
-        # 2. Обработка цен: (price - mid) / mid
+        # 2. Подготовка списков столбцов по типам
+        ask_p_cols = [f"ask_p_{i}" for i in range(self.n_levels)]
+        ask_v_cols = [f"ask_v_{i}" for i in range(self.n_levels)]
+        bid_p_cols = [f"bid_p_{i}" for i in range(self.n_levels)]
+        bid_v_cols = [f"bid_v_{i}" for i in range(self.n_levels)]
+
+        # 3. Обработка цен: (price - mid) / mid
         # Важно: если цена 0.0 (padding), заменяем её на mid, чтобы отклонение стало 0.0
-        price_cols = [f"ask_p_{i}" for i in range(self.n_levels)] + \
-                     [f"bid_p_{i}" for i in range(self.n_levels)]
-        
         price_exprs = [
             (
                 (pl.when(pl.col(c) == 0).then(pl.col("mid_price")).otherwise(pl.col(c)) - pl.col("mid_price")) 
                 / pl.col("mid_price")
             ).cast(pl.Float32).alias(f"feat_{c}")
-            for c in price_cols
+            for c in ask_p_cols + bid_p_cols
         ]
 
-        # 3. Обработка объемов: log(1 + volume)
-        vol_cols = [f"ask_v_{i}" for i in range(self.n_levels)] + \
-                   [f"bid_v_{i}" for i in range(self.n_levels)]
-        
+        # 4. Обработка объемов: log(1 + volume)
         vol_exprs = [
             (pl.col(c) + 1).log().cast(pl.Float32).alias(f"feat_{c}")
-            for c in vol_cols
+            for c in ask_v_cols + bid_v_cols
         ]
 
-        # Выполняем все трансформации разом
+        # 5. Выполняем все трансформации разом
         df = df.with_columns(price_exprs + vol_exprs)
 
-        # 4. Выполняем все трансформации и возвращаем полный DataFrame
-        # ВАЖНО: Мы НЕ делаем select, чтобы сохранить все оригинальные колонки для последующих задач
-        return df.with_columns(price_exprs + vol_exprs)
+        # 6. Формируем итоговый DF с СТРОГИМ ПОРЯДКОМ столбцов (Interleaved по стороне)
+        # Это критически важно для Dataset.py (задача 304)
+        ordered_feat_cols = []
+        # Блок ASK (индексы 0-99)
+        ordered_feat_cols.extend([f"feat_ask_p_{i}" for i in range(self.n_levels)]) # 0-49: только цены
+        ordered_feat_cols.extend([f"feat_ask_v_{i}" for i in range(self.n_levels)]) # 50-99: только объемы
+
+        # Блок BID (индексы 100-199)
+        ordered_feat_cols.extend([f"feat_bid_p_{i}" for i in range(self.n_levels)]) # 100-149: только цены
+        ordered_feat_cols.extend([f"feat_bid_v_{i}" for i in range(self.n_levels)]) # 150-199: только объемы
+
+        # Все остальное (метаданные и дополнительные признаки)
+        meta_cols = ["timestamp_ms", "mid_price", "last_update_id"]
+        other_cols = [c for c in df.columns if c.startswith("feat_past_ret_")]
+
+        # Возвращаем DF, где ПРИЗНАКИ LOB ПЕРВЫМИ 200 КОЛОНКАМИ
+        return df.select(
+            [pl.col(c) for c in ordered_feat_cols] + 
+            [pl.col(c) for c in meta_cols if c in df.columns] +
+            [pl.col(c) for c in other_cols]
+        )
 
 if __name__ == "__main__":
     # Тестовый пример с искусственными данными

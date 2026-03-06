@@ -214,6 +214,10 @@ class LiTModule(pl.LightningModule):
         Вызывается в начале каждой эпохи обучения.
         Настраиваем activation hooks для мониторинга (Задача 158).
         """
+        # Засекаем время начала эпохи
+        import time
+        self.epoch_start_time = time.time()
+        
         # Получаем параметры из hparams или используем значения по умолчанию
         tb_hist_freq = self.hparams.get("tb_hist_freq", 10)
         
@@ -424,8 +428,13 @@ class LiTModule(pl.LightningModule):
             for name, value in metrics.items():
                 self.log(f"val_{name}", value, logger=True)
             
+            # Вычисляем время эпохи
+            import time
+            epoch_time = time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
+            epoch_time_str = f"{int(epoch_time // 60)}m {int(epoch_time % 60)}s"
+            
             # Выводим в консоль
-            print(f"\nEpoch {self.current_epoch} Multi-Horizon Validation:")
+            print(f"\nEpoch {self.current_epoch} ({epoch_time_str}) Multi-Horizon Validation:")
             for h in range(self.num_horizons):
                 mcc_h = metrics.get(f"mcc_h{h}", 0.0)
                 f1_h = metrics.get(f"f1_h{h}", 0.0)
@@ -466,9 +475,14 @@ class LiTModule(pl.LightningModule):
             # Логируем метрики калибровки
             self.log("val_ece", ece, logger=True)
             self.log("val_mce", mce, logger=True)
+            
+            # Вычисляем время эпохи
+            import time
+            epoch_time = time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
+            epoch_time_str = f"{int(epoch_time // 60)}m {int(epoch_time % 60)}s"
                 
             # Отдельно выводим в консоль ключевые показатели
-            print(f"\nEpoch {self.current_epoch} Validation: MCC={metrics['mcc']:.4f}, "
+            print(f"\nEpoch {self.current_epoch} ({epoch_time_str}) Validation: MCC={metrics['mcc']:.4f}, "
                   f"Macro-F1={metrics['f1_macro']:.4f}, "
                   f"ECE={ece:.4f}, MCE={mce:.4f}")
             
@@ -1001,7 +1015,8 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         devices=1,
         precision="16-mixed" if torch.cuda.is_available() else 32,
         enable_progress_bar=False,  # Отключаем прогресс-бар для чистоты вывода
-        log_every_n_steps=10000  # Логировать только в конце эпохи
+        log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
+        gradient_clip_val=0.5       # Задача 304: Защита от NaN
     )
     
     # Обучаем модель
@@ -2142,7 +2157,9 @@ def train():
         accelerator="auto",
         devices=1,
         precision="16-mixed" if torch.cuda.is_available() else 32,
-        log_every_n_steps=10000  # Логировать только в конце эпохи, а не каждые 50 батчей
+        log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
+        gradient_clip_val=0.5,      # Задача 304: Защита от NaN
+        enable_progress_bar=False   # Отключаем прогресс-бар, чтобы не было повторяющихся логов
     )
     
     # Добавляем symbol в trainer для доступа из LiTModule
@@ -2496,8 +2513,9 @@ def train():
                 accelerator="auto",
                 devices=1,
                 precision="16-mixed" if torch.cuda.is_available() else 32,
-                enable_progress_bar=True,
-                log_every_n_steps=10000  # Логировать только в конце эпохи
+                enable_progress_bar=False,  # Отключаем прогресс-бар
+                log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
+                gradient_clip_val=0.5       # Задача 304: Защита от NaN
             )
             
             fold_trainer.symbol = args.symbol
@@ -2670,6 +2688,20 @@ def train():
         if args.loss_type == "focal":
             print(f"  - Note: Label smoothing disabled because Focal Loss is used (they are alternatives)")
         print()
+        
+        # --- Sanity Check (Задача 304) ---
+        print("Performing sanity check on data...")
+        try:
+            batch = next(iter(train_loader))
+            x_check = batch[0] # [B, 3, 50] или [B, C, S, 50] в зависимости от реализации LOBPatching
+            if not torch.isfinite(x_check).all():
+                raise ValueError("NaN or Inf detected in input features before training! Check feature engineering and normalization.")
+            print(f"Sanity check passed. Input shape: {x_check.shape}, range: [{x_check.min():.4f}, {x_check.max():.4f}]")
+        except Exception as e:
+            print(f"Sanity check failed: {e}")
+            if not args.optuna_seq_len_search: # Не падаем в Optuna, если это временная ошибка
+                raise e
+        # -------------------------------
         
         trainer.fit(model, train_loader, val_loader)
         
@@ -2851,10 +2883,10 @@ def train():
                     devices=1,
                     logger=logger,
                     callbacks=[checkpoint_callback],
-                    enable_progress_bar=True,
-                    gradient_clip_val=None,  # AGC уже в модели
+                    enable_progress_bar=False,  # Отключаем прогресс-бар
+                    gradient_clip_val=0.5,      # Задача 304: Защита от NaN
                     deterministic=False,
-                    log_every_n_steps=10000  # Логировать только в конце эпохи
+                    log_every_n_steps=100       # Задача 304: Уменьшаем шаг логирования
                 )
                 
                 finetune_trainer.fit(model, train_loader, val_loader)
