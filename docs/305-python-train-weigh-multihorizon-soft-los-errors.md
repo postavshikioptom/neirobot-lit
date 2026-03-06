@@ -1,6 +1,6 @@
 # Задача 305: Исправление ошибок: Неправильная логика взвешивания режимов (Regime Weighting) в multi-horizon. Compute_curvature_penalty не использует regime_id для инференса. DistillationLoss не поддерживает label_smoothing в soft loss.Отсутствие инициализации bias для bottleneck слоёв
 
-# ПЛАН РЕАЛИЗАЦИИ 
+# ПЛАН РЕАЛИЗАЦИИ ЗАДАчИ 305 - ЗАВЕРШЕНО
 Grok прав в обнаружении некоторых критических багов, но в ряде моментов его аргументация слаба или не учитывает специфику нашей архитектуры. Ниже мой детальный разбор и **КОНТР-ПЛАН**.
 
 ---
@@ -57,7 +57,6 @@ Grok прав в обнаружении некоторых критически�
 
 ---
 
-
 =============================
 # ВЫПОЛНЕНО В КОДЕ:
 Список выполненных изменений:
@@ -100,6 +99,68 @@ Horizon Weighting: В методе forward добавлено применени
 
 
 ======================
+# ПЛАН РЕАЛИЗАЦИИ ЗАДАЧИ 305-2 - ЗАВЕРШЕНО
+
+### 1. Файл: `python_lab/src/lit_model.py` — Стабилизация Transformer
+*   **QK Normalization**: 
+    *   В `__init__` класса `CustomTransformerEncoderLayer` добавить:
+        ```python
+        self.q_norm = nn.LayerNorm(self.head_dim)
+        self.k_norm = nn.LayerNorm(self.head_dim)
+        ```
+    *   В методе `_sa_block` после проекций Q/K/V применить:
+        ```python
+        q = self.q_norm(q) / math.sqrt(self.head_dim)
+        k = self.k_norm(k) / math.sqrt(self.head_dim)
+        ```
+*   **Инициализация весов**:
+    *   **ОТМЕНИТЬ** `nn.init.zeros_` для `class_bottleneck` и `classifier`. Оставить их на стандартной инициализации Xavier/Kaiming для лучшего разрыва симметрии.
+    *   Оставить `nn.init.zeros_(self.vol_regressor.bias)`, так как для задачи регрессии волатильности начальный нулевой сдвиг безопасен и логичен.
+*   **Защита Curvature Penalty**:
+    *   В `compute_curvature_penalty` добавить `diff = torch.clamp(diff, min=-10.0, max=10.0)` для предотвращения взрывных градиентов при случайных возмущениях.
+
+### 2. Файл: `python_lab/src/dataset.py` — Масштабирование данных
+*   **Масштаб Past Returns**:
+    *   В методе `_process_sample`, если `n_past_returns > 0`, умножить `past_ret` на **100.0**. Это выровняет дисперсию доходностей с признаками LOB (которые уже нормализованы).
+
+### 3. Файл: `python_lab/src/train.py` — Защита процесса обучения
+*   **Конфигурация Trainer**:
+    *   Установить `precision="32"` (временная мера для диагностики, исключающая ошибки округления float16).
+    *   Установить `gradient_clip_val=0.5` и `gradient_clip_algorithm="norm"`.
+*   **Проверка на NaN в `training_step`**:
+    *   После расчета `loss` добавить блок:
+        ```python
+        if not torch.isfinite(loss):
+            self.zero_grad()
+            return torch.tensor(0.0, device=loss.device, requires_grad=True)
+        ```
+
+---
+
+### Резюме спора:
+Мы пришли к консенсусу. **Q/K LayerNorm + Manual Scaling** решают проблему взрыва внимания, а **отказ от обнуления bias** сохраняет гибкость модели на несбалансированных данных.
+
+==========
+# РЕАЛИЗОВАНО В КОДЕ ЗАДАЧА 305-2:
+Я реализовал задачу 305-2 в полном соответствии с планом:
+
+В lit_model.py:
+
+QK Normalization: Внедрена в CustomTransformerEncoderLayer. Теперь головы внимания нормализуются через LayerNorm и масштабируются вручную (1/sqrt(head_dim)), что стабилизирует обучение.
+Инициализация: Отменено принудительное обнуление bias для class_bottleneck и classifier. Оставлена стандартная инициализация для лучшей гибкости. vol_regressor.bias по-прежнему инициализируется нулями.
+Curvature Penalty: Добавлена защита torch.clamp(diff, -10.0, 10.0) для предотвращения экстремальных значений лосса при случайных возмущениях.
+В dataset.py:
+
+Признаки past_returns теперь умножаются на 100.0, что выравнивает их дисперсию с нормализованными признаками стакана (LOB).
+В train.py:
+
+Конфигурация Trainer: Установлена precision="32" и явно задан алгоритм клиппинга градиентов norm с порогом 0.5.
+Защита от NaN: В training_step добавлена проверка torch.isfinite(loss). При обнаружении NaN или Inf градиенты обнуляются, а шаг пропускается.
+
+
+
+
+===============
 # ПРОБЛЕМЫ
 
 
@@ -397,3 +458,112 @@ elif self.reduction == 'none':
 
 ---
 
+=============
+# ОШИБКИ ПОСЛЕ ЗАДАЧИ 304,305:
+
+WARNING: plot_pr_curves_tensorboard: NaN in y_pred_probs. Skipping plot pr_curves.
+  Vol-MSE=nan, Vol-MAE=nan
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0000, F1=0.2723, Samples=103797
+warning: Embedding dir exists, did you set global_step for add_embedding()?
+✓ Logged 1000 embeddings to TensorBoard Projector
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+⚠️  CRITICAL WARNING: NaN or Inf detected in model logits during validation!
+   This indicates extreme numerical instability (exploding gradients).
+   Metrics and visualizations for this epoch will be unreliable.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+WARNING: CalibrationMetrics.calculate: logits contain NaN or Inf. Skipping calculation.
+
+Epoch 1 (4m 28s) Validation: MCC=0.0000, Macro-F1=0.2723, ECE=0.0000, MCE=0.0000
+  Vol-MSE=nan, Vol-MAE=nan
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0000, F1=0.2723, Samples=103797
+
+
+
+
+=========================
+# НОВЫЙ АНАЛИЗ ОШИБОК ДЛЯ ЗАДАЧИ 305-2
+GROK:
+**✅ Анализ + точное решение (после глубокого поиска по GitHub/PyTorch форумам 2024–2026)**
+
+Ты уже исправил порядок колонок (по именам + interleaved) — это **не причина** текущей ошибки.  
+NaN появляется **строго после первого backward** (первая эпоха). Это **exploding gradients** в Transformer.
+
+### Главная причина (найдена в 7+ свежих issue)
+В твоём **CustomTransformerEncoderLayer** (lit_model.py):
+
+```python
+attn_output = F.scaled_dot_product_attention(q, k, v, ...)
+```
+
+**F.scaled_dot_product_attention** при AMP (16-mixed) + маленьком `head_dim=16` (d_model=64 / 4) **не всегда** делает корректный scale внутри. В результате `q@k` взрывается → softmax → NaN уже на втором шаге.
+
+Дополнительные триггеры:
+- AMP 16-mixed + curvature_reg + log_var в multi-task loss
+- Gradient clipping в Lightning применяется **до** unscale → не спасает
+
+### Что делать прямо сейчас (4 правки, 2 файла)
+
+**Файл 1: python_lab/src/lit_model.py** (самое важное)
+
+В классе `CustomTransformerEncoderLayer`, в методе `_sa_block` **сразу после проекций** добавь:
+
+```python
+# === ИСПРАВЛЕНИЕ (добавь эти 2 строки) ===
+q = q / math.sqrt(self.head_dim)
+k = k / math.sqrt(self.head_dim)
+# ==========================================
+
+attn_output = F.scaled_dot_product_attention(
+    q, k, v,
+    attn_mask=attn_mask,
+    dropout_p=self.dropout.p if self.training else 0.0
+)
+```
+
+**Файл 2: python_lab/src/train.py**
+
+В создании `Trainer` замени:
+
+```python
+trainer = pl.Trainer(
+    precision="32",                    # ← временно отключаем 16-mixed (самый быстрый фикс)
+    gradient_clip_val=1.0,
+    gradient_clip_algorithm="norm",
+    log_every_n_steps=50,
+    ...
+)
+```
+
+И в `training_step` добавь защиту (после вычисления `loss`):
+
+```python
+if not torch.isfinite(loss) or torch.isnan(loss):
+    self.zero_grad()
+    return torch.tensor(0.0, device=loss.device)  # пропускаем плохой батч
+```
+
+### Дополнительно (рекомендую сразу)
+
+В `_process_sample` (dataset.py) перед `torch.stack`:
+
+```python
+past_ret = past_ret * 100.0   # приводим масштаб past_returns к LOB
+```
+
+### Что дальше
+
+1. Примени эти 4 правки.
+2. Запусти обучение заново.
+3. Если NaN исчез — сразу возвращаем `precision="16-mixed"` и тестируем.
+
+Эти правки решают 95% случаев "NaN после первой эпохи" в Transformer + Lightning (по данным PyTorch discuss и Lightning issues 2025-2026).
+
+Готов писать **полную задачу 304** с этими правками (чётко по файлам, без воды).  
+Скажи: **«пиши задачу 304»** — и я сразу дам готовый .md файл.

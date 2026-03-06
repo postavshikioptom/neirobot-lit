@@ -351,6 +351,11 @@ class LiTModule(pl.LightningModule):
                precision_vol * loss_vol + 0.5 * self.log_var_vol + \
                reg_loss
         
+        # Задача 305-2: Защита от NaN в градиентах
+        if not torch.isfinite(loss):
+            self.zero_grad()
+            return torch.tensor(0.0, device=loss.device, requires_grad=True)
+        
         # Логирование
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("train_loss_cls", loss_cls, on_step=False, on_epoch=True)
@@ -2173,9 +2178,10 @@ def train():
         logger=logger,
         accelerator="auto",
         devices=1,
-        precision="16-mixed" if torch.cuda.is_available() else 32,
+        precision="32",              # Задача 305-2: Временная мера для диагностики
         log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
         gradient_clip_val=0.5,      # Задача 304: Защита от NaN
+        gradient_clip_algorithm="norm", # Задача 305-2: Явный алгоритм клиппинга
         enable_progress_bar=False   # Отключаем прогресс-бар, чтобы не было повторяющихся логов
     )
     

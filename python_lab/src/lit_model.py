@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from dataclasses import dataclass
 from .layers import LOBPatching
 
@@ -116,6 +117,11 @@ def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3
     
     # Штраф за разницу предсказаний (L2)
     diff = perturbed_outputs - outputs
+    
+    # Задача 305-2: Защита от взрывных градиентов
+    # Ограничиваем разницу предсказаний для предотвращения экстремальных градиентов
+    diff = torch.clamp(diff, min=-10.0, max=10.0)
+    
     return lambda_ * (diff ** 2).mean()
 
 def apply_input_noise(x, std=0.01):
@@ -166,6 +172,11 @@ class CustomTransformerEncoderLayer(nn.Module):
         self.v_proj = nn.Linear(d_model, self.num_kv_heads * self.head_dim)
         self.out_proj = nn.Linear(d_model, d_model)
         
+        # QK Normalization (Задача 305-2)
+        # Стабилизация внимания через LayerNorm перед вычислением softmax
+        self.q_norm = nn.LayerNorm(self.head_dim)
+        self.k_norm = nn.LayerNorm(self.head_dim)
+        
         # Feedforward Network
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
@@ -209,6 +220,11 @@ class CustomTransformerEncoderLayer(nn.Module):
         # K, V: (batch, seq_len, num_kv_heads, head_dim) -> (batch, num_kv_heads, seq_len, head_dim)
         k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        
+        # QK Normalization и масштабирование (Задача 305-2)
+        # Применяем LayerNorm и делим на sqrt(head_dim) для предотвращения взрывных активаций
+        q = self.q_norm(q) / math.sqrt(self.head_dim)
+        k = self.k_norm(k) / math.sqrt(self.head_dim)
         
         # GQA: расширяем KV heads для каждой группы Query heads
         if self.use_gqa and self.num_kv_heads < self.num_heads:
@@ -372,13 +388,11 @@ class LiTModel(nn.Module):
         
         # Инициализация bottleneck слоёв
         nn.init.xavier_uniform_(self.class_bottleneck.weight)
-        nn.init.zeros_(self.class_bottleneck.bias)
         nn.init.xavier_uniform_(self.vol_bottleneck.weight)
         nn.init.zeros_(self.vol_bottleneck.bias)
         
         # Инициализация голов
         nn.init.xavier_uniform_(self.classifier.weight)
-        nn.init.zeros_(self.classifier.bias)
         nn.init.xavier_uniform_(self.vol_regressor.weight)
         nn.init.zeros_(self.vol_regressor.bias)
     

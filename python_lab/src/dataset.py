@@ -915,7 +915,8 @@ class LOBDataset(Dataset):
 
         if self.n_past_returns > 0:
             # Признаки LOB занимают 200 колонок
-            past_ret = torch.from_numpy(x_raw[:, 200:200+self.n_past_returns].copy())
+            # Задача 305-2: Масштабируем доходности (x100), чтобы выровнять дисперсию с LOB признаками
+            past_ret = torch.from_numpy(x_raw[:, 200:200+self.n_past_returns].copy()) * 100.0
             past_broadcast = past_ret.unsqueeze(-1).repeat(1, 1, self.n_levels)
             x_final = torch.cat([x_final, past_broadcast], dim=1)
         
