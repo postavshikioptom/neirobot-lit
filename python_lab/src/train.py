@@ -327,11 +327,12 @@ class LiTModule(pl.LightningModule):
             reg_loss = 0.0
             
         # 3. Комбинированный Multi-Task Loss (с весами неопределенности)
+        # Задача 304 (Fix): Используем формулу Kendall et al. (0.5 * log_var)
         precision_cls = torch.exp(-self.log_var_cls)
         precision_vol = torch.exp(-self.log_var_vol)
         
-        loss = precision_cls * loss_cls + self.log_var_cls + \
-               precision_vol * loss_vol + self.log_var_vol + \
+        loss = precision_cls * loss_cls + 0.5 * self.log_var_cls + \
+               precision_vol * loss_vol + 0.5 * self.log_var_vol + \
                reg_loss
         
         # Логирование

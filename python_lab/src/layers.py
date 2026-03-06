@@ -61,19 +61,25 @@ class LOBPatching(nn.Module):
     def forward(self, x):
         """
         x: (Batch, Seq, in_channels, n_levels) - входные данные из dataset
-        Преобразуем в (Batch, Seq, 1, num_features) для патчинга
-        После патчинга: (Batch, Seq, num_patches, d_model) - токены
-        После агрегации: (Batch, Seq, d_model) - один токен на шаг времени
+        Преобразуем в (Batch, Seq, 1, num_features) для патчинга.
+        
+        ВАЖНО (Задача 304): После перехода на блочный порядок (P, P, V, V) в features.py,
+        нам нужно переставить оси, чтобы свертка по каналам объединяла признаки ОДНОГО уровня.
+        
+        Порядок в x: [channel_0, channel_1, channel_2] где каждый - 50 уровней.
+        Нам нужно: [L0_C0, L0_C1, L0_C2, L1_C0, L1_C1, L1_C2, ...]
         """
         b, s, c, l = x.shape  # c=in_channels, l=n_levels
         
-        # Шаг 0: Преобразуем (B, S, c, l) -> (B, S, 1, c*l)
-        # Flatten каналы и уровни: (B, S, c*l) = (B, S, num_features)
-        x_flat_seq = x.view(b, s, c * l)  # (B, S, num_features)
-        x_flat_seq = x_flat_seq.unsqueeze(2)  # (B, S, 1, num_features)
+        # Шаг 0: Транспонируем (B, S, C, L) -> (B, S, L, C)
+        # Это гарантирует, что признаки одного уровня идут подряд
+        x_permuted = x.transpose(2, 3).contiguous() # (B, S, L, C)
         
-        # Шаг 1: Vertical Patching - объединяем пары (цена, объем)
-        # Reshape в (B*S, 1, num_features) для применения Conv1d с kernel=2, stride=2
+        # Flatten в (B, S, 1, L*C)
+        x_flat_seq = x_permuted.view(b, s, 1, l * c) # (B, S, 1, num_features)
+        
+        # Шаг 1: Vertical Patching - объединяем каналы одного уровня
+        # Reshape в (B*S, 1, num_features) для применения Conv1d
         x_flat = x_flat_seq.view(b * s, 1, self.num_features)  # (B*S, 1, num_features)
         x_patched = self.patch_conv(x_flat)  # (B*S, d_model, num_patches)
         x_patched = self.act(x_patched)  # Применяем активацию

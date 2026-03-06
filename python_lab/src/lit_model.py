@@ -483,7 +483,6 @@ class LiTModel(nn.Module):
         else:
             # Стандартный подход: отдельные головы (через один Linear)
             bottleneck_out = self.bottleneck_act(self.class_bottleneck(pooled))  # (batch, d_model)
-            bottleneck_out = self.bottleneck_act(bottleneck_out)  # Активация перед classifier
             logits_flat = self.classifier(bottleneck_out)  # (batch, 3 * num_horizons)
             
             if self.num_horizons > 1:
