@@ -141,7 +141,7 @@ class MultiHorizonLoss(nn.Module):
             sample_weights: (batch,) - веса примеров (опционально, для time weighting)
         
         Returns:
-            loss: скалярное значение лосса
+            loss: значение лосса (скаляр или тензор в зависимости от reduction)
         """
         batch_size = logits.shape[0]
         device = logits.device
@@ -150,15 +150,15 @@ class MultiHorizonLoss(nn.Module):
         horizon_weights = self.horizon_weights.to(device)
         class_weights = self.class_weights.to(device) if self.class_weights is not None else None
         
-        # Вычисляем лосс для каждого горизонта
-        total_loss = 0.0
+        # Инициализируем лосс для каждого примера в батче
+        per_example_loss = torch.zeros(batch_size, device=device)
         
         for h in range(self.num_horizons):
             # Извлекаем логиты и таргеты для текущего горизонта
             logits_h = logits[:, h, :]  # (batch, 3)
             targets_h = targets[:, h]    # (batch,)
             
-            # CrossEntropyLoss с ignore_index=-100 (автоматически игнорирует маскированные примеры)
+            # CrossEntropyLoss с ignore_index=-100
             loss_h = F.cross_entropy(
                 logits_h,
                 targets_h,
@@ -168,22 +168,20 @@ class MultiHorizonLoss(nn.Module):
                 reduction='none'  # Получаем лосс для каждого примера
             )
             
-            # Применяем временное взвешивание (если передано)
-            if sample_weights is not None:
-                loss_h = loss_h * sample_weights
+            # Суммируем взвешенные лоссы по горизонтам для каждого примера
+            per_example_loss += horizon_weights[h] * loss_h
             
-            # Применяем взвешивание по горизонтам
-            weighted_loss_h = horizon_weights[h] * loss_h.mean()
-            total_loss += weighted_loss_h
+        # Применяем временное/режимное взвешивание (если передано)
+        if sample_weights is not None:
+            per_example_loss = per_example_loss * sample_weights
         
         # Применяем reduction
         if self.reduction == 'mean':
-            return total_loss
+            return per_example_loss.mean()
         elif self.reduction == 'sum':
-            return total_loss * batch_size
+            return per_example_loss.sum()
         elif self.reduction == 'none':
-            # Для 'none' возвращаем лосс по примерам (усредненный по горизонтам)
-            return total_loss
+            return per_example_loss
         else:
             raise ValueError(f"Invalid reduction mode: {self.reduction}")
 
@@ -553,41 +551,81 @@ class DistillationLoss(nn.Module):
         alpha: вес soft loss (обычно 0.7-0.9 для LOB данных)
         temperature: температура для размягчения логитов (обычно 2-5)
         reduction: тип редукции ('mean', 'sum', 'none')
+        label_smoothing: сглаживание меток для hard loss
+        horizon_weights: веса для горизонтов (для Multi-Horizon)
+        ignore_index: индекс для маскирования (по умолчанию -100)
     """
-    def __init__(self, alpha=0.9, temperature=3.0, reduction='mean'):
+    def __init__(self, alpha=0.9, temperature=3.0, reduction='mean', label_smoothing=0.0, horizon_weights=None, ignore_index=-100):
         super().__init__()
         self.alpha = alpha
         self.temperature = temperature
         self.reduction = reduction
-        self.kl_div = nn.KLDivLoss(reduction=reduction)
-        self.ce_loss = nn.CrossEntropyLoss(reduction=reduction)
+        self.label_smoothing = label_smoothing
+        self.ignore_index = ignore_index
+        
+        # Веса горизонтов
+        self.horizon_weights = horizon_weights
+        if horizon_weights is not None and not isinstance(horizon_weights, torch.Tensor):
+            self.horizon_weights = torch.tensor(horizon_weights, dtype=torch.float32)
+            
+        self.kl_div = nn.KLDivLoss(reduction='none')  # Всегда считаем поштучно, потом редуцируем сами
+        self.ce_loss = nn.CrossEntropyLoss(
+            reduction='none', 
+            label_smoothing=label_smoothing,
+            ignore_index=ignore_index
+        )
     
     def forward(self, student_logits, teacher_logits, labels):
         """
         Args:
-            student_logits: логиты student модели (B, C)
-            teacher_logits: логиты teacher модели (B, C)
-            labels: истинные метки (B,)
-        
-        Returns:
-            combined_loss: взвешенная комбинация soft и hard loss
+            student_logits: логиты student модели (B, C) или (B, H, C)
+            teacher_logits: логиты teacher модели (B, C) или (B, H, C)
+            labels: истинные метки (B,) или (B, H)
         """
         T = self.temperature
+        device = student_logits.device
         
-        # Soft Loss: KL Divergence между размягченными распределениями
+        # 1. Soft Loss: KL Divergence
         # KLDivLoss ожидает log_softmax от student и softmax от teacher
-        soft_loss = self.kl_div(
-            F.log_softmax(student_logits / T, dim=1),
-            F.softmax(teacher_logits / T, dim=1)
-        ) * (T * T)  # Масштабирование T^2 (из оригинальной статьи Hinton)
+        soft_loss_all = self.kl_div(
+            F.log_softmax(student_logits / T, dim=-1),
+            F.softmax(teacher_logits / T, dim=-1)
+        ) * (T * T)
         
-        # Hard Loss: обычный Cross Entropy с истинными метками
-        hard_loss = self.ce_loss(student_logits, labels)
+        # Суммируем по классам -> (B,) или (B, H)
+        soft_loss = soft_loss_all.sum(dim=-1)
         
-        # Комбинированный loss
+        # Маскируем soft_loss для игнорируемых индексов
+        mask = (labels != self.ignore_index).float()
+        soft_loss = soft_loss * mask
+        
+        # 2. Hard Loss: Cross Entropy
+        # Выпрямляем для CE если есть горизонты
+        logits_flat = student_logits.view(-1, student_logits.size(-1))
+        labels_flat = labels.view(-1)
+        hard_loss_flat = self.ce_loss(logits_flat, labels_flat)
+        hard_loss = hard_loss_flat.view(labels.shape)
+        
+        # 3. Применяем веса горизонтов если нужно
+        if self.horizon_weights is not None and labels.dim() > 1:
+            h_weights = self.horizon_weights.to(device)
+            # Применяем веса к каждому горизонту (B, H) * (H,)
+            soft_loss = soft_loss * h_weights
+            hard_loss = hard_loss * h_weights
+            
+        # 4. Комбинируем
         loss = self.alpha * soft_loss + (1 - self.alpha) * hard_loss
         
-        return loss
+        # 5. Редукция
+        if self.reduction == 'mean':
+            # Усредняем только по не-маскированным элементам
+            return loss.sum() / (mask.sum() + 1e-9)
+        elif self.reduction == 'sum':
+            return loss.sum()
+        elif self.reduction == 'batchmean':
+            return loss.sum() / student_logits.size(0)
+        else: # reduction='none'
+            return loss
 
 
 def count_parameters(model):

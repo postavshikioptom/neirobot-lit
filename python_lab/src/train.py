@@ -129,13 +129,23 @@ class LiTModule(pl.LightningModule):
         self.curvature_lambda = curvature_lambda
         self.input_noise_std = input_noise_std
         
+        # Логика взаимного исключения: Focal Loss и Label Smoothing - альтернативы
+        # Если используется Focal Loss, отключаем label_smoothing
+        effective_label_smoothing = 0.0 if loss_type == "focal" else label_smoothing
+
         # Если используется distillation, настраиваем teacher
         if self.is_distillation:
             self.teacher_model.eval()
             self.teacher_model.requires_grad_(False)
             # Импортируем DistillationLoss из utils
             from .utils import DistillationLoss
-            self.distillation_criterion = DistillationLoss(alpha=alpha, temperature=temperature, reduction='none' if use_time_weighting else 'batchmean')
+            self.distillation_criterion = DistillationLoss(
+                alpha=alpha, 
+                temperature=temperature, 
+                reduction='none' if (use_time_weighting or use_regime_weighting) else 'batchmean',
+                label_smoothing=effective_label_smoothing,
+                horizon_weights=horizon_weights if self.is_multi_horizon else None
+            )
         
         # Подготовка весов классов
         if class_weights is not None and not isinstance(class_weights, torch.Tensor):
@@ -145,10 +155,6 @@ class LiTModule(pl.LightningModule):
         if regime_weights is not None and not isinstance(regime_weights, torch.Tensor):
             regime_weights = torch.tensor(regime_weights, dtype=torch.float32)
         self.regime_weights = regime_weights
-
-        # Логика взаимного исключения: Focal Loss и Label Smoothing - альтернативы
-        # Если используется Focal Loss, отключаем label_smoothing
-        effective_label_smoothing = 0.0 if loss_type == "focal" else label_smoothing
 
         # Выбор функции потерь для классификации (только если не distillation)
         if not self.is_distillation:
@@ -273,20 +279,30 @@ class LiTModule(pl.LightningModule):
                 if self.use_regime_weighting and self.regime_weights is not None and regime_id is not None:
                     regime_w = self.regime_weights[regime_id].to(weights.device)
                     combined_weights = combined_weights * regime_w
-                loss_cls = (loss_cls_raw * combined_weights).mean()
+                
+                # Если multi-horizon, loss_cls_raw имеет форму (B, H), а combined_weights (B,)
+                # Применяем веса к каждому примеру
+                if self.is_multi_horizon and loss_cls_raw.dim() > 1:
+                    # Приводим веса к форме (B, 1) для корректного broadcasting
+                    loss_cls = (loss_cls_raw * combined_weights.unsqueeze(-1)).mean()
+                else:
+                    loss_cls = (loss_cls_raw * combined_weights).mean()
             else:
-                loss_cls = loss_cls_raw
+                loss_cls = loss_cls_raw.mean() if self.is_multi_horizon else loss_cls_raw
         else:
             # Обычное обучение
             if self.is_multi_horizon:
                 # Multi-Horizon Loss (Задача 160)
                 # logits: (B, H, 3), y: (B, H), weights: (B,)
-                loss_cls = self.criterion(logits, y, sample_weights=weights if (self.use_time_weighting or self.use_regime_weighting) else None)
                 
-                # Применяем regime weighting если нужно
-                if self.use_regime_weighting and self.regime_weights is not None and regime_id is not None:
-                    regime_w = self.regime_weights[regime_id].to(loss_cls.device)
-                    loss_cls = loss_cls * regime_w.mean()  # Усредняем веса режимов по батчу
+                # Комбинируем временные веса и веса режимов для Multi-Horizon
+                combined_weights = weights if (self.use_time_weighting or self.use_regime_weighting) else None
+                if combined_weights is not None and self.use_regime_weighting and self.regime_weights is not None and regime_id is not None:
+                    regime_w = self.regime_weights[regime_id].to(weights.device)
+                    combined_weights = combined_weights * regime_w
+                
+                # Передаем веса внутрь лосса (он теперь корректно взвешивает каждый пример)
+                loss_cls = self.criterion(logits, y, sample_weights=combined_weights)
             else:
                 # Single horizon - обычный loss
                 loss_cls_raw = self.criterion(logits, y)

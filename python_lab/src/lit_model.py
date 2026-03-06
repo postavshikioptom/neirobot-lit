@@ -74,7 +74,7 @@ def get_activation_for_transformer(activation_type: str):
     else:
         raise ValueError(f"Unsupported activation type: {activation_type}")
 
-def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3, **kwargs):
+def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3, regime_id=None, **kwargs):
     """
     Вычисляет штраф за кривизну (Curvature Penalty) через конечные разности.
     
@@ -88,19 +88,23 @@ def compute_curvature_penalty(model, inputs, outputs, lambda_=1e-4, epsilon=1e-3
         outputs: текущие предсказания модели (logits)
         lambda_: коэффициент регуляризации (рекомендуется 1e-4 - 1e-3)
         epsilon: величина возмущения для конечных разностей
+        regime_id: идентификатор режима рынка (опционально)
     
     Returns:
         torch.Tensor: скалярное значение штрафа за кривизну
     
     Задача 238: Регуляризация кривизны и устойчивость к шуму
     """
+    if not model.training:
+        return torch.tensor(0.0, device=inputs.device)
+
     # Генерируем случайное направление шума
     v = torch.randn_like(inputs)
     v = v / (torch.norm(v, p=2) + 1e-6)  # Нормализация вектора
     
     # Инференс с возмущенными входами
     perturbed_inputs = inputs + epsilon * v
-    perturbed_outputs = model(perturbed_inputs, **kwargs)
+    perturbed_outputs = model(perturbed_inputs, regime_id=regime_id, **kwargs)
     
     # Обрабатываем случай когда модель возвращает кортеж (logits, vol)
     if isinstance(perturbed_outputs, tuple):
@@ -365,10 +369,18 @@ class LiTModel(nn.Module):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         if self.regime_embedding is not None:
             nn.init.trunc_normal_(self.regime_embedding.weight, std=0.02)
+        
+        # Инициализация bottleneck слоёв
         nn.init.xavier_uniform_(self.class_bottleneck.weight)
+        nn.init.zeros_(self.class_bottleneck.bias)
         nn.init.xavier_uniform_(self.vol_bottleneck.weight)
+        nn.init.zeros_(self.vol_bottleneck.bias)
+        
+        # Инициализация голов
         nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
         nn.init.xavier_uniform_(self.vol_regressor.weight)
+        nn.init.zeros_(self.vol_regressor.bias)
     
     @classmethod
     def from_config(cls, config: LiTConfig, **kwargs):
