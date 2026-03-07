@@ -45,7 +45,7 @@ fn default_threshold_flat() -> f32 { 0.3 }
 fn default_long_threshold() -> Decimal { Decimal::from_f64(0.6).unwrap() }
 fn default_short_threshold() -> Decimal { Decimal::from_f64(0.6).unwrap() }
 fn default_seq_len() -> usize { 10 }
-fn default_features_dim() -> usize { 200 }
+fn default_features_dim() -> usize { 300 }
 fn default_past_returns_lags() -> Vec<usize> { vec![10, 50, 100] }
 fn default_initial_balance() -> Decimal { Decimal::from_f64(1000.0).unwrap() }
 fn default_close_on_flat() -> bool { false }

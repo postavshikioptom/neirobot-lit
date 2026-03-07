@@ -115,7 +115,7 @@ rest_max_retries = 3
 symbol = "TESTUSDT"
 model_path = "bots/TESTBOT/model/test.onnx"
 seq_len = 10
-features_dim = 200
+features_dim = 300
 initial_balance = 1000.0
 close_on_flat = false
 threshold_buy = 0.6
@@ -748,7 +748,7 @@ threshold_sell = 0.4
 
     // Проверяем значения по умолчанию
     assert_eq!(config.bot.seq_len, 10, "Default seq_len should be 10");
-    assert_eq!(config.bot.features_dim, 200, "Default features_dim should be 200");
+    assert_eq!(config.bot.features_dim, 300, "Default features_dim should be 300");
     assert_eq!(config.bot.leverage, dec(1.0), "Default leverage should be 1.0");
     assert_eq!(config.bot.post_only, true, "Default post_only should be true");
 }

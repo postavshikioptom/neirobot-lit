@@ -1,4 +1,5 @@
 use crate::data::orderbook::OrderBook;
+use crate::data::types::{PublicTradeArc, Side};
 use crate::ml::normalization::Normalizer;
 use crate::ml::types::NormalizationParams;
 use std::collections::VecDeque;
@@ -12,6 +13,12 @@ use aligned_vec::{AVec, ConstAlign};
 
 /// Константа для защиты от деления на 0 при нормализации
 const EPSILON: f32 = 1e-8;
+
+/// Количество каналов признаков в тензоре (Задача 306)
+pub const CHANNELS: usize = 6;
+
+/// Глубина стакана для формирования признаков
+pub const LOB_DEPTH: usize = 50;
 
 /// SIMD-ускоренная нормализация признаков
 /// 
@@ -240,7 +247,7 @@ pub fn apply_normalization(tensor: &mut Array4<f32>, means: &[f32], inv_stds: &[
 }
 
 /// Тип для представления одного снимка данных стакана (Задача 097)
-/// Содержит 150 нормализованных признаков: 3 канала * 50 уровней
+/// Содержит 300 нормализованных признаков: 6 каналов * 50 уровней
 /// Выровнена по 32 байта для поддержки SIMD инструкций (Задача 193)
 pub type Snapshot = AVec<f32, ConstAlign<32>>;
 
@@ -273,6 +280,13 @@ pub struct TensorBuilder {
     normalizer: Normalizer,
     mid_price_history: VecDeque<Decimal>,  // Задача 091: История средних цен для расчета log-returns
     past_returns_lags: Vec<usize>,         // Задача 091: Лаги для расчета Past Returns [10, 50, 100]
+    // Состояние для расчета OFI (Задача 306)
+    prev_best_bid_p: f32,
+    prev_best_bid_v: f32,
+    prev_best_ask_p: f32,
+    prev_best_ask_v: f32,
+    cum_ofi: f32,
+    cum_vib: f32,
 }
 
 impl TensorBuilder {
@@ -280,11 +294,17 @@ impl TensorBuilder {
         Self {
             buffer: VecDeque::with_capacity(seq_len),
             seq_len,
-            channels: 3,  // По умолчанию 3 канала (Price, Vol, Imbalance)
+            channels: 6,  // Задача 306: Теперь 6 каналов (Price, Vol, Imb, OFI, VIB, PastRet)
             levels: 50,   // По умолчанию 50 уровней
             normalizer,
             mid_price_history: VecDeque::with_capacity(seq_len),  // Задача 091
             past_returns_lags: vec![10, 50, 100],  // Задача 091: Лаги по умолчанию
+            prev_best_bid_p: 0.0,
+            prev_best_bid_v: 0.0,
+            prev_best_ask_p: 0.0,
+            prev_best_ask_v: 0.0,
+            cum_ofi: 0.0,
+            cum_vib: 0.0,
         }
     }
 
@@ -462,6 +482,19 @@ impl TensorBuilder {
         0.0
     }
 
+    /// Задача 306: Обработка публичных сделок для расчета Trade Imbalance (VIB)
+    pub fn process_trades(&mut self, trades: &[PublicTradeArc]) {
+        for trade in trades {
+            let side_val = match trade.side {
+                Side::Buy => 1.0,
+                Side::Sell => -1.0,
+            };
+            // В Rust мы поддерживаем глобальное кумулятивное состояние, 
+            // которое при нормализации (центрировании) даст тот же результат, что и cumsum в Python
+            self.cum_vib += (trade.size as f32) * side_val;
+        }
+    }
+
     /// Добавляет новый снимок стакана в историю и возвращает полный тензор
     /// 
     /// Согласно плану 035:
@@ -506,30 +539,72 @@ impl TensorBuilder {
             bid_v[i] = raw[100 + i * 2 + 1]; // Индексы: 101, 103, ..., 199
         }
 
-        // 3. Вычисляем 3 канала согласно плану 053
+        // 3. Вычисляем 6 каналов согласно задаче 306
         // Используем выровненный вектор для SIMD операций (Задача 193)
         let mut features = {
-            let mut v = AVec::<f32, ConstAlign<32>>::with_capacity(32, 150);
-            v.resize(150, 0.0);
+            let mut v = AVec::<f32, ConstAlign<32>>::with_capacity(32, 300);
+            v.resize(300, 0.0);
             v
         };
         
+        // Расчет OFI (Order Flow Imbalance) для канала 3
+        let ap0 = ask_p[0];
+        let av0 = ask_v[0];
+        let bp0 = bid_p[0];
+        let bv0 = bid_v[0];
+        
+        let delta_bid = if self.prev_best_bid_p == 0.0 {
+            0.0
+        } else if bp0 > self.prev_best_bid_p {
+            bv0
+        } else if bp0 < self.prev_best_bid_p {
+            -self.prev_best_bid_v
+        } else {
+            bv0 - self.prev_best_bid_v
+        };
+        
+        let delta_ask = if self.prev_best_ask_p == 0.0 {
+            0.0
+        } else if ap0 < self.prev_best_ask_p {
+            av0
+        } else if ap0 > self.prev_best_ask_p {
+            -self.prev_best_ask_v
+        } else {
+            av0 - self.prev_best_ask_v
+        };
+        
+        self.cum_ofi += delta_bid - delta_ask;
+        
+        // Обновляем состояние для следующего тика
+        self.prev_best_bid_p = bp0;
+        self.prev_best_bid_v = bv0;
+        self.prev_best_ask_p = ap0;
+        self.prev_best_ask_v = av0;
+        
+        // Канал 5: Past Returns (100 тиков)
+        let past_ret_100 = self.calculate_log_returns(100) * 100.0;
+
         for i in 0..50 {
-            // Канал 0: Normalized Price (среднее отклонение)
-            let price_ch = (ask_p[i] + bid_p[i]) / 2.0;
-            features[i] = price_ch;
+            // Канал 0: Normalized Price
+            features[i] = (ask_p[i] + bid_p[i]) / 2.0;
             
-            // Канал 1: Log Volume
-            let vol_ch = ask_v[i] + bid_v[i];
-            features[50 + i] = vol_ch;
+            // Канал 1: Volume Sum
+            features[50 + i] = ask_v[i] + bid_v[i];
             
             // Канал 2: Static Level Imbalance
-            // Формула: (Vbid - Vask) / (Vbid + Vask + eps)
-            let imb_ch = (bid_v[i] - ask_v[i]) / (bid_v[i] + ask_v[i] + 1e-7);
-            features[100 + i] = imb_ch;
+            features[100 + i] = (bid_v[i] - ask_v[i]) / (bid_v[i] + ask_v[i] + 1e-7);
+            
+            // Канал 3: OFI
+            features[150 + i] = self.cum_ofi;
+            
+            // Канал 4: Trade Imbalance (VIB)
+            features[200 + i] = self.cum_vib;
+            
+            // Канал 5: Past Returns
+            features[250 + i] = past_ret_100;
         }
 
-        // 4. Нормализация (Z-score)
+        // 4. Нормализация (Robust/Z-score)
         self.normalizer.normalize(&mut features);
 
         // 5. Валидация (NaN/Inf check) ПОСЛЕ нормализации
@@ -550,20 +625,9 @@ impl TensorBuilder {
 
         // 7. Возвращаем тензор только если окно заполнено
         if self.buffer.len() == self.seq_len {
-            // Плоский вектор: [snapshot_0 (150), snapshot_1 (150), ..., snapshot_N (150)]
-            let mut flattened: Vec<f32> = self.buffer.iter().flat_map(|s| s.iter().copied()).collect();
-            
-            // Задача 091: Добавляем каналы Past Returns
-            if !self.past_returns_lags.is_empty() {
-                for lag in &self.past_returns_lags {
-                    let log_return = self.calculate_log_returns(*lag);
-                    // Broadcast на 50 уровней
-                    for _ in 0..50 {
-                        flattened.push(log_return);
-                    }
-                }
-            }
-            
+            // Плоский вектор: [snapshot_0 (300), snapshot_1 (300), ..., snapshot_N (300)]
+            // Задача 306: Past Returns уже включены в snapshot как канал 5
+            let flattened: Vec<f32> = self.buffer.iter().flat_map(|s| s.iter().copied()).collect();
             Ok(Some(flattened))
         } else {
             Ok(None)
@@ -580,9 +644,9 @@ impl TensorBuilder {
         ob: &crate::data::orderbook::OrderBookSnapshot,
         buffer: &mut [f32],
     ) -> Result<Option<Vec<f32>>> {
-        // Проверяем размер буфера
-        if buffer.len() != 150 {
-            anyhow::bail!("Buffer size must be 150, got {}", buffer.len());
+        // Проверяем размер буфера (Задача 306: 6 каналов * 50 уровней)
+        if buffer.len() != CHANNELS * LOB_DEPTH {
+            anyhow::bail!("Buffer size must be {}, got {}", CHANNELS * LOB_DEPTH, buffer.len());
         }
 
         let mid = ob.get_mid_price() as f32;
@@ -594,52 +658,89 @@ impl TensorBuilder {
 
         // Получаем raw данные (это единственный Vec, который нельзя избежать)
         let raw = ob.get_flat_snapshot();
-        if raw.len() != 200 {
-            anyhow::bail!("Expected 200 raw features, got {}", raw.len());
+        if raw.len() != LOB_DEPTH * 4 {
+            anyhow::bail!("Expected {} raw features, got {}", LOB_DEPTH * 4, raw.len());
         }
 
-        // Zero-copy: Вычисляем 3 канала на лету и пишем напрямую в буфер
+        // Zero-copy: Вычисляем 6 каналов на лету и пишем напрямую в буфер
         // Структура raw: [ask_p_0, ask_v_0, ask_p_1, ask_v_1, ..., ask_p_49, ask_v_49,
         //                 bid_p_0, bid_v_0, bid_p_1, bid_v_1, ..., bid_p_49, bid_v_49]
         
-        for i in 0..50 {
-            // Извлекаем компоненты напрямую из raw без промежуточных Vec
+        // Расчет OFI
+        let ap0 = raw[0];
+        let av0 = raw[1];
+        let bp0 = raw[LOB_DEPTH * 2];
+        let bv0 = raw[LOB_DEPTH * 2 + 1];
+        
+        let delta_bid = if self.prev_best_bid_p == 0.0 { 0.0 }
+                        else if bp0 > self.prev_best_bid_p { bv0 }
+                        else if bp0 < self.prev_best_bid_p { -self.prev_best_bid_v }
+                        else { bv0 - self.prev_best_bid_v };
+        
+        let delta_ask = if self.prev_best_ask_p == 0.0 { 0.0 }
+                        else if ap0 < self.prev_best_ask_p { av0 }
+                        else if ap0 > self.prev_best_ask_p { -self.prev_best_ask_v }
+                        else { av0 - self.prev_best_ask_v };
+        
+        self.cum_ofi += delta_bid - delta_ask;
+        self.prev_best_bid_p = bp0;
+        self.prev_best_bid_v = bv0;
+        self.prev_best_ask_p = ap0;
+        self.prev_best_ask_v = av0;
+        
+        let past_ret_100 = self.calculate_log_returns(100) * 100.0;
+
+        for i in 0..LOB_DEPTH {
             let ask_p = raw[i * 2];
             let ask_v = raw[i * 2 + 1];
-            let bid_p = raw[100 + i * 2];
-            let bid_v = raw[100 + i * 2 + 1];
+            let bid_p = raw[LOB_DEPTH * 2 + i * 2];
+            let bid_v = raw[LOB_DEPTH * 2 + i * 2 + 1];
 
             // Канал 0: Normalized Price
             let price_ch = (ask_p + bid_p) / 2.0;
-            
-            // Канал 1: Log Volume
+            // Канал 1: Volume Sum
             let vol_ch = ask_v + bid_v;
-            
             // Канал 2: Static Level Imbalance
             let imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7);
+            // Канал 3: OFI
+            let ofi_ch = self.cum_ofi;
+            // Канал 4: VIB
+            let vib_ch = self.cum_vib;
+            // Канал 5: Past Returns
+            let pr_ch = past_ret_100;
 
             // Применяем нормализацию на лету в зависимости от типа скейлера
             match self.normalizer.scaler_type {
                 crate::ml::normalization::ScalerType::ZScore => {
                     buffer[i] = (price_ch - self.normalizer.means[i]) * self.normalizer.inv_stds[i];
-                    buffer[50 + i] = (vol_ch - self.normalizer.means[50 + i]) * self.normalizer.inv_stds[50 + i];
-                    buffer[100 + i] = (imb_ch - self.normalizer.means[100 + i]) * self.normalizer.inv_stds[100 + i];
+                    buffer[LOB_DEPTH + i] = (vol_ch - self.normalizer.means[LOB_DEPTH + i]) * self.normalizer.inv_stds[LOB_DEPTH + i];
+                    buffer[LOB_DEPTH * 2 + i] = (imb_ch - self.normalizer.means[LOB_DEPTH * 2 + i]) * self.normalizer.inv_stds[LOB_DEPTH * 2 + i];
+                    buffer[LOB_DEPTH * 3 + i] = (ofi_ch - self.normalizer.means[LOB_DEPTH * 3 + i]) * self.normalizer.inv_stds[LOB_DEPTH * 3 + i];
+                    buffer[LOB_DEPTH * 4 + i] = (vib_ch - self.normalizer.means[LOB_DEPTH * 4 + i]) * self.normalizer.inv_stds[LOB_DEPTH * 4 + i];
+                    buffer[LOB_DEPTH * 5 + i] = (pr_ch - self.normalizer.means[LOB_DEPTH * 5 + i]) * self.normalizer.inv_stds[LOB_DEPTH * 5 + i];
                 }
                 crate::ml::normalization::ScalerType::Robust => {
                     buffer[i] = (price_ch - self.normalizer.medians[i]) * self.normalizer.inv_iqrs[i];
-                    buffer[50 + i] = (vol_ch - self.normalizer.medians[50 + i]) * self.normalizer.inv_iqrs[50 + i];
-                    buffer[100 + i] = (imb_ch - self.normalizer.medians[100 + i]) * self.normalizer.inv_iqrs[100 + i];
+                    buffer[LOB_DEPTH + i] = (vol_ch - self.normalizer.medians[LOB_DEPTH + i]) * self.normalizer.inv_iqrs[LOB_DEPTH + i];
+                    buffer[LOB_DEPTH * 2 + i] = (imb_ch - self.normalizer.medians[LOB_DEPTH * 2 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 2 + i];
+                    buffer[LOB_DEPTH * 3 + i] = (ofi_ch - self.normalizer.medians[LOB_DEPTH * 3 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 3 + i];
+                    buffer[LOB_DEPTH * 4 + i] = (vib_ch - self.normalizer.medians[LOB_DEPTH * 4 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 4 + i];
+                    buffer[LOB_DEPTH * 5 + i] = (pr_ch - self.normalizer.medians[LOB_DEPTH * 5 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 5 + i];
                 }
                 crate::ml::normalization::ScalerType::WinsorRobust => {
-                    // 1. Клиппинг (винзоризация)
-                    let price_clipped = price_ch.clamp(self.normalizer.winsor_low[i], self.normalizer.winsor_high[i]);
-                    let vol_clipped = vol_ch.clamp(self.normalizer.winsor_low[50 + i], self.normalizer.winsor_high[50 + i]);
-                    let imb_clipped = imb_ch.clamp(self.normalizer.winsor_low[100 + i], self.normalizer.winsor_high[100 + i]);
+                    let price_cl = price_ch.clamp(self.normalizer.winsor_low[i], self.normalizer.winsor_high[i]);
+                    let vol_cl = vol_ch.clamp(self.normalizer.winsor_low[LOB_DEPTH + i], self.normalizer.winsor_high[LOB_DEPTH + i]);
+                    let imb_cl = imb_ch.clamp(self.normalizer.winsor_low[LOB_DEPTH * 2 + i], self.normalizer.winsor_high[LOB_DEPTH * 2 + i]);
+                    let ofi_cl = ofi_ch.clamp(self.normalizer.winsor_low[LOB_DEPTH * 3 + i], self.normalizer.winsor_high[LOB_DEPTH * 3 + i]);
+                    let vib_cl = vib_ch.clamp(self.normalizer.winsor_low[LOB_DEPTH * 4 + i], self.normalizer.winsor_high[LOB_DEPTH * 4 + i]);
+                    let pr_cl = pr_ch.clamp(self.normalizer.winsor_low[LOB_DEPTH * 5 + i], self.normalizer.winsor_high[LOB_DEPTH * 5 + i]);
                     
-                    // 2. Robust масштабирование
-                    buffer[i] = (price_clipped - self.normalizer.medians[i]) * self.normalizer.inv_iqrs[i];
-                    buffer[50 + i] = (vol_clipped - self.normalizer.medians[50 + i]) * self.normalizer.inv_iqrs[50 + i];
-                    buffer[100 + i] = (imb_clipped - self.normalizer.medians[100 + i]) * self.normalizer.inv_iqrs[100 + i];
+                    buffer[i] = (price_cl - self.normalizer.medians[i]) * self.normalizer.inv_iqrs[i];
+                    buffer[LOB_DEPTH + i] = (vol_cl - self.normalizer.medians[LOB_DEPTH + i]) * self.normalizer.inv_iqrs[LOB_DEPTH + i];
+                    buffer[LOB_DEPTH * 2 + i] = (imb_cl - self.normalizer.medians[LOB_DEPTH * 2 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 2 + i];
+                    buffer[LOB_DEPTH * 3 + i] = (ofi_cl - self.normalizer.medians[LOB_DEPTH * 3 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 3 + i];
+                    buffer[LOB_DEPTH * 4 + i] = (vib_cl - self.normalizer.medians[LOB_DEPTH * 4 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 4 + i];
+                    buffer[LOB_DEPTH * 5 + i] = (pr_cl - self.normalizer.medians[LOB_DEPTH * 5 + i]) * self.normalizer.inv_iqrs[LOB_DEPTH * 5 + i];
                 }
             }
         }
@@ -651,7 +752,7 @@ impl TensorBuilder {
             }
         }
 
-        // Добавляем в историю (копируем 150 f32 = 600 байт, это приемлемо)
+        // Добавляем в историю (копируем 300 f32 = 1200 байт, это приемлемо)
         let snapshot_vec: Vec<f32> = buffer.to_vec();
         let mut snapshot = AVec::<f32, ConstAlign<32>>::with_capacity(32, snapshot_vec.len());
         snapshot.extend_from_slice(&snapshot_vec);
@@ -665,19 +766,7 @@ impl TensorBuilder {
 
         // Возвращаем тензор только если окно заполнено
         if self.buffer.len() == self.seq_len {
-            let mut flattened: Vec<f32> = self.buffer.iter().flat_map(|s| s.iter().copied()).collect();
-            
-            // Задача 091: Добавляем каналы Past Returns
-            if !self.past_returns_lags.is_empty() {
-                for lag in &self.past_returns_lags {
-                    let log_return = self.calculate_log_returns(*lag);
-                    // Broadcast на 50 уровней
-                    for _ in 0..50 {
-                        flattened.push(log_return);
-                    }
-                }
-            }
-            
+            let flattened: Vec<f32> = self.buffer.iter().flat_map(|s| s.iter().copied()).collect();
             Ok(Some(flattened))
         } else {
             Ok(None)
@@ -744,15 +833,15 @@ mod tests {
         assert!(result.is_some(), "Expected Some for third snapshot");
         
         let tensor = result.unwrap();
-        // Проверяем размер: seq_len * 150 (3 канала * 50 уровней)
-        assert_eq!(tensor.len(), seq_len * 150);
+        // Проверяем размер: seq_len * 300 (6 каналов * 50 уровней)
+        assert_eq!(tensor.len(), seq_len * 300);
     }
 
-    /// Test: Проверяем, что возвращается плоский вектор размером seq_len * 150
+    /// Test: Проверяем, что возвращается плоский вектор размером seq_len * 300
     #[test]
     fn test_returns_flat_vector() {
-        let mean = vec![0.0; 150];
-        let std = vec![1.0; 150];
+        let mean = vec![0.0; 300];
+        let std = vec![1.0; 300];
         let normalizer = Normalizer::new(mean, std);
         
         let seq_len = 2;
@@ -793,15 +882,15 @@ mod tests {
         assert!(result.is_some());
         let tensor = result.unwrap();
         
-        // Проверяем размер: seq_len * 150 (3 канала * 50 уровней)
-        assert_eq!(tensor.len(), seq_len * 150, "Expected flat vector of size {}", seq_len * 150);
+        // Проверяем размер: seq_len * 300 (6 каналов * 50 уровней)
+        assert_eq!(tensor.len(), seq_len * 300, "Expected flat vector of size {}", seq_len * 300);
     }
 
     /// Test: Проверяем, что валидация работает ПОСЛЕ нормализации
     #[test]
     fn test_validation_after_normalization() {
-        let mean = vec![0.0; 150];
-        let std = vec![1.0; 150];
+        let mean = vec![0.0; 300];
+        let std = vec![1.0; 300];
         let normalizer = Normalizer::new(mean, std);
         
         let seq_len = 1;

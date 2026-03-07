@@ -5,8 +5,8 @@ import math
 from dataclasses import dataclass
 from .layers import LOBPatching
 
-# Глобальная конфигурация входных данных (по умолчанию)
-DEFAULT_INPUT_CHANNELS = 3
+# Глобальная конфигурация входных данных (Задача 306)
+DEFAULT_INPUT_CHANNELS = 6
 N_LEVELS = 50
 
 
@@ -18,7 +18,7 @@ class LiTConfig:
     особенно полезно для Knowledge Distillation (Teacher vs Student).
     """
     seq_len: int = 100
-    in_channels: int = 3
+    in_channels: int = 6
     d_model: int = 64
     embed_dim: int = None  # Алиас для d_model (для совместимости с задачей 237)
     nhead: int = 4

@@ -113,7 +113,7 @@ class LiTModule(pl.LightningModule):
     LightningModule для обучения модели LiT.
     Обертка над nn.Module, добавляющая логику обучения, валидации и оптимизации.
     """
-    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=True, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="zscore", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, **model_params):
+    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=True, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, **model_params):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
         self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, **model_params)
@@ -1180,7 +1180,7 @@ def train():
     parser.add_argument("--threshold", type=float, default=0.0005, help="Return threshold for labels")
     parser.add_argument("--class_weight_smooth", type=float, default=1.0, help="Smoothing for class weights calculation")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing for CrossEntropyLoss")
-    parser.add_argument("--loss_type", type=str, default="ce", choices=["ce", "focal"], help="Loss function type")
+    parser.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="Gamma parameter for Focal Loss")
     parser.add_argument("--past_returns_lags", type=str, default="10,50,100", help="Comma-separated list of lags for past returns (e.g., '10,50,100')")
     parser.add_argument("--activation", type=str, default="gelu_exact", choices=["relu", "gelu_exact", "gelu_tanh", "silu"], help="Activation function type")
@@ -1270,8 +1270,8 @@ def train():
     parser.add_argument("--curvature_lambda", type=float, default=1e-4, help="Curvature penalty coefficient (recommended: 1e-4 to 1e-3)")
     parser.add_argument("--input_noise_std", type=float, default=0.005, help="Standard deviation for input noise injection during training")
     
-    # Параметры Robust Scaling (Задача 240)
-    parser.add_argument("--scaler_type", type=str, default="zscore", choices=["zscore", "robust", "winsor_robust"], help="Scaler type: zscore (default), robust (median/IQR), or winsor_robust (clipping + robust)")
+    # Параметры Robust Scaling (Задача 240, 306)
+    parser.add_argument("--scaler_type", type=str, default="robust", choices=["zscore", "robust", "winsor_robust"], help="Scaler type: robust (default, median/IQR), zscore, or winsor_robust")
     parser.add_argument("--winsor_limits", type=str, default="0.01,0.99", help="Winsorization limits as comma-separated floats (e.g., '0.01,0.99' for 1st and 99th percentiles)")
     
     # Параметры Optuna поиска seq_len (Задача 055)
@@ -1305,11 +1305,11 @@ def train():
     
     # Парсим лаги из строки
     past_returns_lags = [int(x.strip()) for x in args.past_returns_lags.split(",")]
-    n_past_returns = len(past_returns_lags)
-    in_channels = 3 + n_past_returns  # 3 базовых канала + N каналов past returns
+    # В плане 306 итоговая структура x_final всегда 6 каналов
+    in_channels = 6
     
     print(f"Using past returns lags: {past_returns_lags}")
-    print(f"Total input channels: {in_channels} (3 baseline + {n_past_returns} past returns)")
+    print(f"Total input channels: {in_channels} (Price, Vol, Imb, OFI, VIB, PastRet)")
     print(f"Data loading mode: {args.data_mode}")
 
     # 1. Фиксируем seed для воспроизводимости

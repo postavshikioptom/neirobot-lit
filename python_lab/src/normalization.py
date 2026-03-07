@@ -139,9 +139,8 @@ class Normalizer:
         if not self.params:
             raise ValueError("Normalizer not fitted or loaded. Call fit() or load() first.")
 
-        # Задача 240: Предварительная винзоризация для winsor_robust
-        if self.scaler_type == "winsor_robust" and self.winsor_limits:
-            data = self.winsorize(data, self.winsor_limits)
+        # Задача 306: Отключаем винзоризацию, так как она «ослепляет» модель на мем-коинах
+        # (Удален блок if self.scaler_type == "winsor_robust")
 
         if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
             if self.scaler_type in ("robust", "winsor_robust"):

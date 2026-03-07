@@ -1590,6 +1590,9 @@ where S: tokio_stream::Stream<Item = WsData> + Unpin
                         }
                     }
                     WsData::Trades(trades) => {
+                        // Задача 306: Передаем сделки в TensorBuilder для расчета VIB
+                        tensor_builder.process_trades(&trades);
+
                         // Обновление статистики VWAP/TWAP (Задача 106)
                         for trade in &trades {
                             execution.on_public_trade(trade.clone());
@@ -2019,7 +2022,7 @@ async fn handle_market_update(
     
     // Заполняем буфер признаками из стакана и нормализуем их на месте (Zero-copy версия, Задача 078.3)
     let start_feature = std::time::Instant::now();
-    let mut buffer = vec![0.0f32; 150];
+    let mut buffer = vec![0.0f32; config.bot.features_dim];
     let feature_res = tensor_builder.process_snapshot_to_buffer(&snapshot, &mut buffer);
     HOT_PATH_STATS.record_feature(start_feature.elapsed().as_micros() as u64);
     

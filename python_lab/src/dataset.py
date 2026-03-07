@@ -677,7 +677,15 @@ class LOBDataset(Dataset):
         if self.exclude_features:
             feat_cols = [c for c in feat_cols if c not in self.exclude_features]
         
-        self.feat_cols = feat_cols # Сохраняем для консистентности
+        self.feat_cols = feat_cols
+        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
+        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
+        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
+ # Сохраняем для консистентности
+        
+        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
+        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
+        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
 
         if self.scaler_type in ("robust", "winsor_robust"):
             norm = Normalizer()
@@ -756,6 +764,10 @@ class LOBDataset(Dataset):
         self.file_path = df if isinstance(df, str) else None
         self.row_offsets = self._build_row_offsets(self.file_path, total_rows)
         self.feat_cols = feat_cols
+        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
+        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
+        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
+
         
         self._cache_batch = None
         self._batch_size = 50000 
@@ -815,7 +827,11 @@ class LOBDataset(Dataset):
 
         if self.exclude_features: feat_cols = [c for c in feat_cols if c not in self.exclude_features]
         
-        self.feat_cols = feat_cols # Сохраняем для консистентности
+        self.feat_cols = feat_cols
+        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
+        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
+        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
+ # Сохраняем для консистентности
         
         total_rows = len(df) - self.seq_len + 1
         n_feats = len(feat_cols)
@@ -893,6 +909,9 @@ class LOBDataset(Dataset):
         # NaN protection (Задача 094-2)
         x_raw = np.nan_to_num(x_raw, nan=0.0)
         
+        # 3-channel LOB (Задача 304: Строго по блокам)
+        # Блок ASK: 0-49 цены, 50-99 объемы
+        # Блок BID: 100-149 цены, 150-199 объемы
         lob_flat = x_raw[:, :200]
         x = torch.from_numpy(lob_flat.copy())
         
@@ -902,23 +921,59 @@ class LOBDataset(Dataset):
             if self.volume_jitter_range > 0:
                 x = apply_volume_jitter(x, self.volume_jitter_range, self.vol_cols, self.generator)
 
-        # 3-channel LOB (Задача 304: Строго по блокам)
-        # Блок ASK: 0-49 цены, 50-99 объемы
-        # Блок BID: 100-149 цены, 150-199 объемы
+        # Подготовка 6 каналов (Задача 306)
         ask_p, ask_v = x[:, 0:50], x[:, 50:100]
         bid_p, bid_v = x[:, 100:150], x[:, 150:200]
         
+        # ch[0-2]: Базовые LOB каналы
         price_ch = (ask_p + bid_p) / 2.0
         vol_ch = ask_v + bid_v
         imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)
-        x_final = torch.stack([price_ch, vol_ch, imb_ch], dim=1)
-
-        if self.n_past_returns > 0:
-            # Признаки LOB занимают 200 колонок
-            # Задача 305-2: Масштабируем доходности (x100), чтобы выровнять дисперсию с LOB признаками
-            past_ret = torch.from_numpy(x_raw[:, 200:200+self.n_past_returns].copy()) * 100.0
-            past_broadcast = past_ret.unsqueeze(-1).repeat(1, 1, self.n_levels)
-            x_final = torch.cat([x_final, past_broadcast], dim=1)
+        
+        # ch[3]: OFI (Order Flow Imbalance) на окне seq_len (по умолчанию 100)
+        # Используем лучшие уровни (index 0 в блоках по 50)
+        ap0, av0, bp0, bv0 = ask_p[:, 0], ask_v[:, 0], bid_p[:, 0], bid_v[:, 0]
+        
+        # Разности между тиками
+        bp_prev = torch.cat([bp0[:1], bp0[:-1]])
+        bv_prev = torch.cat([bv0[:1], bv0[:-1]])
+        ap_prev = torch.cat([ap0[:1], ap0[:-1]])
+        av_prev = torch.cat([av0[:1], av0[:-1]])
+        
+        delta_bid = torch.where(bp0 > bp_prev, bv0, 
+                    torch.where(bp0 < bp_prev, -bv_prev, bv0 - bv_prev))
+        delta_ask = torch.where(ap0 < ap_prev, av0, 
+                    torch.where(ap0 > ap_prev, -av_prev, av0 - av_prev))
+        
+        ofi = (delta_bid - delta_ask).cumsum(dim=0)
+        ofi_ch = ofi.unsqueeze(-1).repeat(1, 50)
+        
+        # ch[4]: Trade Imbalance (VIB) на окне seq_len
+        if self.trade_vol_idx >= 0 and self.trade_side_idx >= 0:
+            tr_v = torch.from_numpy(x_raw[:, self.trade_vol_idx].copy()).float()
+            tr_s = torch.from_numpy(x_raw[:, self.trade_side_idx].copy()).float()
+            vib = (tr_v * tr_s).cumsum(dim=0)
+        else:
+            vib = torch.zeros(x.shape[0], device=x.device)
+        vib_ch = vib.unsqueeze(-1).repeat(1, 50)
+        
+        # ch[5]: Past Returns (100 тиков)
+        try:
+            # Пытаемся найти лаг 100, если нет - берем первый доступный
+            lag_idx = self.past_returns_lags.index(100) if 100 in self.past_returns_lags else 0
+        except:
+            lag_idx = 0
+            
+        pr_feat_name = f"feat_past_return_{self.past_returns_lags[lag_idx]}"
+        if pr_feat_name in self.feat_cols:
+            pr_col_idx = self.feat_cols.index(pr_feat_name)
+            pr = torch.from_numpy(x_raw[:, pr_col_idx].copy()).float() * 100.0
+        else:
+            pr = torch.zeros(x.shape[0], device=x.device)
+        pr_ch = pr.unsqueeze(-1).repeat(1, 50)
+        
+        # Собираем итоговый тензор (Seq, 6, 50)
+        x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
         
         return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
 
@@ -970,10 +1025,21 @@ def load_multi_symbol_data(symbols, data_path="bots", lazy=True) -> Union[pl.Dat
         lf = pl.scan_parquet(path / f"{symbol}_*.parquet").with_columns(pl.lit(symbol).alias("symbol"))
         trades_files = list(path.glob("trades_*.parquet"))
         if trades_files:
-            tr_lf = pl.scan_parquet(trades_files).rename({"timestamp": "timestamp_ms"}).select(["timestamp_ms", pl.col("price").alias("trade_price"), pl.col("size").alias("trade_volume")])
+            tr_lf = pl.scan_parquet(trades_files).rename({"timestamp": "timestamp_ms"}).select([
+                "timestamp_ms", 
+                pl.col("price").alias("feat_trade_price"), 
+                pl.col("size").alias("feat_trade_volume"),
+                pl.when(pl.col("side") == "Buy").then(1.0)
+                .when(pl.col("side") == "Sell").then(-1.0)
+                .otherwise(0.0).alias("feat_trade_side")
+            ])
             lf = lf.sort("timestamp_ms").join_asof(tr_lf.sort("timestamp_ms"), on="timestamp_ms", strategy="backward")
         else:
-            lf = lf.with_columns([pl.lit(None).cast(pl.Float64).alias("trade_price"), pl.lit(None).cast(pl.Float64).alias("trade_volume")])
+            lf = lf.with_columns([
+                pl.lit(None).cast(pl.Float64).alias("feat_trade_price"), 
+                pl.lit(None).cast(pl.Float64).alias("feat_trade_volume"),
+                pl.lit(0.0).alias("feat_trade_side")
+            ])
         scans.append(lf)
     merged = pl.concat(scans).sort(["timestamp_ms", "symbol"])
     return merged if lazy else merged.collect()
