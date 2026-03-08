@@ -697,6 +697,31 @@ class LOBDataset(Dataset):
             # Fallback на первые 200 если ничего не нашли
             self.lob_indices = list(range(0, 200))
         
+        # Задача 306.4.2: Инициализация масок индексов для каждого типа колонок LOB
+        # Это позволяет обращаться к колонкам по именам, а не по жестким слайсам
+        self.ask_p_indices = []
+        self.ask_v_indices = []
+        self.bid_p_indices = []
+        self.bid_v_indices = []
+        
+        for i in range(self.n_levels):
+            try:
+                self.ask_p_indices.append(lookup_list.index(f"feat_ask_p_{i}"))
+            except ValueError:
+                pass
+            try:
+                self.ask_v_indices.append(lookup_list.index(f"feat_ask_v_{i}"))
+            except ValueError:
+                pass
+            try:
+                self.bid_p_indices.append(lookup_list.index(f"feat_bid_p_{i}"))
+            except ValueError:
+                pass
+            try:
+                self.bid_v_indices.append(lookup_list.index(f"feat_bid_v_{i}"))
+            except ValueError:
+                pass
+        
         # Поиск индексов по именам
         def get_idx(name):
             try: return lookup_list.index(name)
@@ -993,20 +1018,26 @@ class LOBDataset(Dataset):
         # NaN protection (Задача 094-2)
         x_raw = np.nan_to_num(x_raw, nan=0.0)
         
-        # 3-channel LOB (Задача 304: Строго по блокам)
-        # Задача 306.2.2: Используем именованный слайс lob_indices
-        lob_flat = x_raw[:, self.lob_indices]
-        x = torch.from_numpy(lob_flat.copy())
+        # Задача 306.4.3: Полный отказ от слайсов - используем маски индексов
+        # Извлекаем каждый тип колонок напрямую из x_raw по именам
+        ask_p = torch.from_numpy(x_raw[:, self.ask_p_indices].copy()).float()
+        ask_v = torch.from_numpy(x_raw[:, self.ask_v_indices].copy()).float()
+        bid_p = torch.from_numpy(x_raw[:, self.bid_p_indices].copy()).float()
+        bid_v = torch.from_numpy(x_raw[:, self.bid_v_indices].copy()).float()
         
+        # Для аугментации нужен полный LOB тензор
         if self.is_train and torch.rand(1, generator=self.generator).item() < self.augment_prob:
+            # Собираем временный тензор для аугментации
+            x_temp = torch.cat([ask_p, ask_v, bid_p, bid_v], dim=1)
+            
             if self.use_symmetric_flip and torch.rand(1, generator=self.generator).item() < 0.5:
-                x, y = apply_symmetric_flip(x, y, self.price_cols, self.ask_cols, self.bid_cols)
+                x_temp, y = apply_symmetric_flip(x_temp, y, self.price_cols, self.ask_cols, self.bid_cols)
             if self.volume_jitter_range > 0:
-                x = apply_volume_jitter(x, self.volume_jitter_range, self.vol_cols, self.generator)
-
-        # Подготовка 6 каналов (Задача 306)
-        ask_p, ask_v = x[:, 0:50], x[:, 50:100]
-        bid_p, bid_v = x[:, 100:150], x[:, 150:200]
+                x_temp = apply_volume_jitter(x_temp, self.volume_jitter_range, self.vol_cols, self.generator)
+            
+            # Разбираем обратно после аугментации
+            ask_p, ask_v = x_temp[:, 0:50], x_temp[:, 50:100]
+            bid_p, bid_v = x_temp[:, 100:150], x_temp[:, 150:200]
         
         # ch[0-2]: Базовые LOB каналы
         price_ch = (ask_p + bid_p) / 2.0
@@ -1040,7 +1071,7 @@ class LOBDataset(Dataset):
                 tr_s = torch.from_numpy(x_raw[:, self.trade_side_idx].copy()).float()
                 vib = (tr_v * tr_s).cumsum(dim=0)
             else:
-                vib = torch.zeros(x.shape[0], device=x.device)
+                vib = torch.zeros(ask_p.shape[0], device=ask_p.device)
         vib_ch = vib.unsqueeze(-1).repeat(1, 50)
         
         # ch[5]: Past Returns (100 тиков)
@@ -1052,7 +1083,7 @@ class LOBDataset(Dataset):
             # Задача 306.3.2: Убрано умножение на 100.0, так как RobustScaler уже нормализовал данные
             pr = torch.from_numpy(x_raw[:, pr_idx].copy()).float()
         else:
-            pr = torch.zeros(x.shape[0], device=x.device)
+            pr = torch.zeros(ask_p.shape[0], device=ask_p.device)
         pr_ch = pr.unsqueeze(-1).repeat(1, 50)
         
         # Собираем итоговый тензор (Seq, 6, 50)
@@ -1134,10 +1165,30 @@ def load_multi_symbol_data(symbols, data_path="bots", lazy=True) -> Union[pl.Dat
         scans.append(lf)
     merged = pl.concat(scans).sort(["timestamp_ms", "symbol"])
     
+    # Задача 306.4.1: Переименование колонок стакана с добавлением префикса feat_
+    # Это обеспечивает унификацию имен и автоматический поиск признаков по префиксу
+    rename_map = {}
+    for i in range(50):
+        rename_map[f"ask_p_{i}"] = f"feat_ask_p_{i}"
+        rename_map[f"ask_v_{i}"] = f"feat_ask_v_{i}"
+        rename_map[f"bid_p_{i}"] = f"feat_bid_p_{i}"
+        rename_map[f"bid_v_{i}"] = f"feat_bid_v_{i}"
+    
+    # Применяем переименование только для существующих колонок
+    existing_cols = merged.collect_schema().names() if lazy else merged.columns
+    rename_map = {k: v for k, v in rename_map.items() if k in existing_cols}
+    if rename_map:
+        merged = merged.rename(rename_map)
+    
     # Задача 306.2.1: Удаляем служебные колонки ПЕРЕД конвертацией в numpy/memmap
     # Используем правильные имена согласно уточнению пользователя
     meta_cols = ["timestamp_ms", "last_update_id", "symbol"]
     merged = merged.drop([c for c in meta_cols if c in merged.columns])
+    
+    # Задача 306.4.1: Сортировка колонок для детерминированного порядка
+    # Это гарантирует, что порядок колонок не зависит от порядка записи в Parquet
+    all_cols = merged.collect_schema().names() if lazy else merged.columns
+    merged = merged.select(sorted(all_cols))
     
     return merged if lazy else merged.collect()
 

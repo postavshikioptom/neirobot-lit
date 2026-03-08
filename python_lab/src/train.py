@@ -1690,13 +1690,9 @@ def train():
             # Шаг 2: Fit нормализатора на 2D сырых данных
             print("Step 2/4: Fitting normalizer on raw 2D training data...")
             train_features_2d = full_dataset.features[train_indices]
-            feat_cols = [c for c in df.columns if c.startswith("feat_")]
+            # Задача 306.4.4: Используем список колонок строго из датасета
+            feat_cols = full_dataset.feat_cols.copy()
             
-            # Добавляем имена для past_returns если они есть (Задача 303-2)
-            if n_past_returns > 0:
-                past_return_names = [f"past_return_{lag}" for lag in past_returns_lags]
-                feat_cols.extend(past_return_names)
-                
             print(f"Features dimension check: {train_features_2d.shape[1]} vs {len(feat_cols)}")
             normalizer.fit(train_features_2d, feature_names=feat_cols, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
@@ -1811,11 +1807,8 @@ def train():
             # Оптимизация памяти: обучаем на 2D данных вместо 3D окон
             train_features_2d = full_dataset.features[train_indices]
             
-            # Извлекаем имена признаков и добавляем past_returns (Задача 303-2)
-            feat_cols = [c for c in df.columns if c.startswith("feat_")]
-            if n_past_returns > 0:
-                past_return_names = [f"past_return_{lag}" for lag in past_returns_lags]
-                feat_cols.extend(past_return_names)
+            # Задача 306.4.4: Используем список колонок строго из датасета
+            feat_cols = full_dataset.feat_cols.copy()
             
             print(f"Features dimension check: {train_features_2d.shape[1]} vs {len(feat_cols)}")
             normalizer.fit(train_features_2d, feature_names=feat_cols, winsor_limits=winsor_limits)
