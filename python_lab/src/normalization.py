@@ -30,9 +30,16 @@ class Normalizer:
         if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
             if isinstance(data, pl.LazyFrame):
                 data = data.collect()
-            
-            feat_cols = [c for c in data.columns if c.startswith("feat_")]
-            # Сохраняем порядок
+
+            # Сортируем для детерминизма: сначала LOB в строгом порядке, потом остальные
+            lob_cols = [f"feat_ask_p_{i}" for i in range(50)] + \
+                       [f"feat_ask_v_{i}" for i in range(50)] + \
+                       [f"feat_bid_p_{i}" for i in range(50)] + \
+                       [f"feat_bid_v_{i}" for i in range(50)]
+            all_feat = sorted([c for c in data.columns if c.startswith("feat_")])
+            feat_cols = [c for c in lob_cols if c in all_feat]
+            feat_cols += [c for c in all_feat if c not in lob_cols]
+            # Сохраняем строгий порядок
             self.feature_order = feat_cols
             
             # Эффективный расчет агрегатов через Polars

@@ -341,11 +341,11 @@ def fast_parquet_reader(file_path, batch_size=100_000, columns=None):
             lob_cols.append(f"bid_v_{i}")
         # Задача 212: Добавляем колонки сделок для очереди лимитных ордеров
         trade_cols = ["trade_price", "trade_volume"]
-        # Пытаемся найти feat_ колонки и label
-        feat_cols = [c for c in all_cols if c.startswith("feat_") or c == "label" or c.startswith("label_h")]
-        
+        # Пытаемся найти feat_ колонки и label - сортируем для детерминизма
+        feat_and_label_cols = sorted([c for c in all_cols if c.startswith("feat_") or c == "label" or c.startswith("label_h")])
+
         # Пересечение с реальными колонками в файле
-        columns = [c for c in (target_cols + lob_cols + trade_cols + feat_cols) if c in all_cols]
+        columns = [c for c in (target_cols + lob_cols + trade_cols + feat_and_label_cols) if c in all_cols]
 
     # Итерируемся батчами через PyArrow (True Streaming)
     for batch in parquet_file.iter_batches(batch_size=batch_size, columns=columns):
@@ -730,9 +730,9 @@ class LOBDataset(Dataset):
                     [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
                     [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
                     [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-        
-        # Добавляем остальные признаки, которые начинаются на feat_, но не входят в LOB
-        all_feat_cols = [c for c in df.columns if c.startswith("feat_")]
+
+        # Добавляем остальные признаки в СТРОГОМ отсортированном порядке для детерминизма
+        all_feat_cols = sorted([c for c in df.columns if c.startswith("feat_")])
         extra_feats = [c for c in all_feat_cols if c not in feat_cols]
         feat_cols.extend(extra_feats)
 
@@ -817,15 +817,15 @@ class LOBDataset(Dataset):
                     [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
                     [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
                     [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-        
-        # Добавляем остальные признаки
-        all_feat_cols = [c for c in schema.names() if c.startswith("feat_")]
+
+        # Добавляем остальные признаки в СТРОГОМ отсортированном порядке для детерминизма
+        all_feat_cols = sorted([c for c in schema.names() if c.startswith("feat_")])
         extra_feats = [c for c in all_feat_cols if c not in feat_cols]
         feat_cols.extend(extra_feats)
 
         if self.exclude_features:
             feat_cols = [c for c in feat_cols if c not in self.exclude_features]
-        
+
         # Защита от NaN в пайплайне Polars (Задача 094-2)
         # Задача 306.2.1: Гарантируем наличие timestamp_ms
         select_cols = [*feat_cols, *self.label_cols, "mid_price"]
@@ -897,9 +897,9 @@ class LOBDataset(Dataset):
                     [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
                     [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
                     [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-        
-        # Добавляем остальные признаки
-        all_feat_cols = [c for c in df.columns if c.startswith("feat_")]
+
+        # Добавляем остальные признаки в СТРОГОМ отсортированном порядке для детерминизма
+        all_feat_cols = sorted([c for c in df.columns if c.startswith("feat_")])
         extra_feats = [c for c in all_feat_cols if c not in feat_cols]
         feat_cols.extend(extra_feats)
 
