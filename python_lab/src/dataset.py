@@ -681,14 +681,11 @@ class LOBDataset(Dataset):
         # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
         self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
         self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
- # Сохраняем для консистентности
-        
-        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
-        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
-        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
+        self.ofi_idx = feat_cols.index("feat_ofi_100") if "feat_ofi_100" in feat_cols else -1
+        self.vib_idx = feat_cols.index("feat_vib_100") if "feat_vib_100" in feat_cols else -1
 
         if self.scaler_type in ("robust", "winsor_robust"):
-            norm = Normalizer()
+            norm = Normalizer(output_path="norm_params.json")
             norm.scaler_type = self.scaler_type
             norm.winsor_limits = self.winsor_limits
             df_feat = df.select(feat_cols)
@@ -724,6 +721,9 @@ class LOBDataset(Dataset):
         if self.n_past_returns > 0 and "mid_price" in df.columns:
             past_returns = compute_past_returns(df["mid_price"].to_numpy(), self.past_returns_lags)
             self.features = np.hstack([self.features, past_returns])
+            # Обновляем feat_cols, чтобы индексы в _process_sample были корректными
+            for lag in self.past_returns_lags:
+                self.feat_cols.append(f"feat_past_return_{lag}")
 
         weight_labels = self.labels[self.seq_len-1:]
         self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
@@ -930,43 +930,53 @@ class LOBDataset(Dataset):
         vol_ch = ask_v + bid_v
         imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)
         
-        # ch[3]: OFI (Order Flow Imbalance) на окне seq_len (по умолчанию 100)
-        # Используем лучшие уровни (index 0 в блоках по 50)
-        ap0, av0, bp0, bv0 = ask_p[:, 0], ask_v[:, 0], bid_p[:, 0], bid_v[:, 0]
-        
-        # Разности между тиками
-        bp_prev = torch.cat([bp0[:1], bp0[:-1]])
-        bv_prev = torch.cat([bv0[:1], bv0[:-1]])
-        ap_prev = torch.cat([ap0[:1], ap0[:-1]])
-        av_prev = torch.cat([av0[:1], av0[:-1]])
-        
-        delta_bid = torch.where(bp0 > bp_prev, bv0, 
-                    torch.where(bp0 < bp_prev, -bv_prev, bv0 - bv_prev))
-        delta_ask = torch.where(ap0 < ap_prev, av0, 
-                    torch.where(ap0 > ap_prev, -av_prev, av0 - av_prev))
-        
-        ofi = (delta_bid - delta_ask).cumsum(dim=0)
+        # ch[3]: OFI (Order Flow Imbalance) - берем уже нормализованный из FeatureEngineer
+        if self.ofi_idx >= 0:
+            ofi = torch.from_numpy(x_raw[:, self.ofi_idx].copy()).float()
+        else:
+            # Fallback для совместимости, если колонка не найдена
+            ap0, av0, bp0, bv0 = ask_p[:, 0], ask_v[:, 0], bid_p[:, 0], bid_v[:, 0]
+            bp_prev = torch.cat([bp0[:1], bp0[:-1]])
+            bv_prev = torch.cat([bv0[:1], bv0[:-1]])
+            ap_prev = torch.cat([ap0[:1], ap0[:-1]])
+            av_prev = torch.cat([av0[:1], av0[:-1]])
+            delta_bid = torch.where(bp0 > bp_prev, bv0, torch.where(bp0 < bp_prev, -bv_prev, bv0 - bv_prev))
+            delta_ask = torch.where(ap0 < ap_prev, av0, torch.where(ap0 > ap_prev, -av_prev, av0 - av_prev))
+            ofi = (delta_bid - delta_ask).cumsum(dim=0)
         ofi_ch = ofi.unsqueeze(-1).repeat(1, 50)
         
-        # ch[4]: Trade Imbalance (VIB) на окне seq_len
-        if self.trade_vol_idx >= 0 and self.trade_side_idx >= 0:
-            tr_v = torch.from_numpy(x_raw[:, self.trade_vol_idx].copy()).float()
-            tr_s = torch.from_numpy(x_raw[:, self.trade_side_idx].copy()).float()
-            vib = (tr_v * tr_s).cumsum(dim=0)
+        # ch[4]: Trade Imbalance (VIB) - берем уже нормализованный из FeatureEngineer
+        if self.vib_idx >= 0:
+            vib = torch.from_numpy(x_raw[:, self.vib_idx].copy()).float()
         else:
-            vib = torch.zeros(x.shape[0], device=x.device)
+            # Fallback
+            if self.trade_vol_idx >= 0 and self.trade_side_idx >= 0:
+                tr_v = torch.from_numpy(x_raw[:, self.trade_vol_idx].copy()).float()
+                tr_s = torch.from_numpy(x_raw[:, self.trade_side_idx].copy()).float()
+                vib = (tr_v * tr_s).cumsum(dim=0)
+            else:
+                vib = torch.zeros(x.shape[0], device=x.device)
         vib_ch = vib.unsqueeze(-1).repeat(1, 50)
         
         # ch[5]: Past Returns (100 тиков)
+        # Ищем лаг 100 в feat_cols
+        pr_col_idx = -1
         try:
-            # Пытаемся найти лаг 100, если нет - берем первый доступный
-            lag_idx = self.past_returns_lags.index(100) if 100 in self.past_returns_lags else 0
+            # Пытаемся найти лаг 100
+            target_lag = 100
+            pr_feat_name = f"feat_past_return_{target_lag}"
+            if pr_feat_name in self.feat_cols:
+                pr_col_idx = self.feat_cols.index(pr_feat_name)
+            else:
+                # Если 100 нет, берем любой доступный из past_returns_lags
+                for lag in self.past_returns_lags:
+                    if f"feat_past_return_{lag}" in self.feat_cols:
+                        pr_col_idx = self.feat_cols.index(f"feat_past_return_{lag}")
+                        break
         except:
-            lag_idx = 0
-            
-        pr_feat_name = f"feat_past_return_{self.past_returns_lags[lag_idx]}"
-        if pr_feat_name in self.feat_cols:
-            pr_col_idx = self.feat_cols.index(pr_feat_name)
+            pass
+
+        if pr_col_idx >= 0:
             pr = torch.from_numpy(x_raw[:, pr_col_idx].copy()).float() * 100.0
         else:
             pr = torch.zeros(x.shape[0], device=x.device)

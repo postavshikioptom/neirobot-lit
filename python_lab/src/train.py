@@ -1305,6 +1305,8 @@ def train():
     
     # Парсим лаги из строки
     past_returns_lags = [int(x.strip()) for x in args.past_returns_lags.split(",")]
+    n_past_returns = len(past_returns_lags)
+    
     # В плане 306 итоговая структура x_final всегда 6 каналов
     in_channels = 6
     
@@ -1783,39 +1785,12 @@ def train():
                             x, y = x_aug, y_aug
                     
                     # Решейп и бродкаст (Error A - исправлено по образу LOBDataset)
-                    n_levels = self.original_ds.n_levels
-                    n_past_returns = self.original_ds.n_past_returns
-                    seq_len = x.shape[0]
+                    # Используем внутреннюю логику оригинального датасета для сборки 6 каналов
+                    # Параметры v, w, regime_id для сбалансированного датасета фиктивны
+                    x_final, _, _, _, _ = self.original_ds._process_sample(
+                        x.numpy(), y.item(), 0.0, 1.0, 0
+                    )
                     
-                    # Реализуем расчет 3-канального тензора согласно плану 053
-                    # Структура x: [ask_p_0..49, ask_v_0..49, bid_p_0..49, bid_v_0..49] (seq_len, 200)
-                    ask_p = x[:, 0:50]      # (seq_len, 50)
-                    ask_v = x[:, 50:100]    # (seq_len, 50)
-                    bid_p = x[:, 100:150]   # (seq_len, 50)
-                    bid_v = x[:, 150:200]   # (seq_len, 50)
-                    
-                    # Канал 0: Normalized Price (среднее отклонение)
-                    price_ch = (ask_p + bid_p) / 2.0  # (seq_len, 50)
-                    
-                    # Канал 1: Log Volume
-                    vol_ch = ask_v + bid_v  # (seq_len, 50)
-                    
-                    # Канал 2: Static Level Imbalance
-                    imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)  # (seq_len, 50)
-                    
-                    # Собираем 3-канальный тензор: (seq_len, 3, 50)
-                    x_reshaped = torch.stack([price_ch, vol_ch, imb_ch], dim=1)
-                    
-                    if n_past_returns > 0:
-                        past_returns = x[:, 200:200+n_past_returns]
-                        # (Seq, N_lags) -> (Seq, N_lags, 1) -> (Seq, N_lags, 50)
-                        past_returns_broadcast = past_returns.unsqueeze(-1).repeat(1, 1, n_levels)
-                        x_final = torch.cat([x_reshaped, past_returns_broadcast], dim=1)
-                    else:
-                        x_final = x_reshaped
-                    
-                    # Возвращаем 5 элементов для совместимости с основным циклом
-                    # x_final, y, vol_target, weight, regime_id
                     return x_final, y, torch.tensor(0.0).float(), torch.tensor(1.0).float(), torch.tensor(0).long()
             
             # Заменяем train_ds

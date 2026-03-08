@@ -66,18 +66,27 @@ class FocalLoss(nn.Module):
     """
     def __init__(self, alpha=None, gamma=2.0, label_smoothing=0.0, reduction='mean'):
         super().__init__()
-        self.alpha = alpha
+        # Задача 306: Используем register_buffer для автоматического переноса весов на GPU
+        # Переименовано в self.weight для соответствия плану исправления
+        if alpha is not None:
+            if not isinstance(alpha, torch.Tensor):
+                alpha = torch.tensor(alpha, dtype=torch.float32)
+            self.register_buffer('weight', alpha)
+        else:
+            self.weight = None
+            
         self.gamma = gamma
         self.label_smoothing = label_smoothing
         self.reduction = reduction
 
-    def forward(self, inputs, targets):
+    def forward(self, input, target):
         # Базовый CrossEntropy с поддержкой весов и сглаживания меток
+        # Нужно явно перенести веса на устройство входа (logits) для надежности (Device Mismatch)
         ce_loss = F.cross_entropy(
-            inputs, 
-            targets, 
-            reduction='none', 
-            weight=self.alpha, 
+            input, 
+            target, 
+            weight=self.weight.to(input.device) if self.weight is not None else None, 
+            reduction='none',
             label_smoothing=self.label_smoothing
         )
         
@@ -122,16 +131,24 @@ class MultiHorizonLoss(nn.Module):
         
         # Веса горизонтов (по умолчанию равные)
         if horizon_weights is None:
-            self.horizon_weights = torch.ones(num_horizons) / num_horizons
+            horizon_weights_tensor = torch.ones(num_horizons) / num_horizons
         else:
-            self.horizon_weights = torch.tensor(horizon_weights, dtype=torch.float32)
+            horizon_weights_tensor = torch.tensor(horizon_weights, dtype=torch.float32)
             # Нормализуем веса
-            self.horizon_weights = self.horizon_weights / self.horizon_weights.sum()
+            horizon_weights_tensor = horizon_weights_tensor / horizon_weights_tensor.sum()
+        
+        # Регистрируем как buffer для автоматического переноса на GPU
+        self.register_buffer('horizon_weights', horizon_weights_tensor)
         
         # Веса классов (опционально)
-        self.class_weights = class_weights
-        if class_weights is not None and not isinstance(class_weights, torch.Tensor):
-            self.class_weights = torch.tensor(class_weights, dtype=torch.float32)
+        if class_weights is not None:
+            if not isinstance(class_weights, torch.Tensor):
+                class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
+            else:
+                class_weights_tensor = class_weights
+            self.register_buffer('class_weights', class_weights_tensor)
+        else:
+            self.class_weights = None
     
     def forward(self, logits, targets, sample_weights=None):
         """
@@ -564,9 +581,14 @@ class DistillationLoss(nn.Module):
         self.ignore_index = ignore_index
         
         # Веса горизонтов
-        self.horizon_weights = horizon_weights
-        if horizon_weights is not None and not isinstance(horizon_weights, torch.Tensor):
-            self.horizon_weights = torch.tensor(horizon_weights, dtype=torch.float32)
+        if horizon_weights is not None:
+            if not isinstance(horizon_weights, torch.Tensor):
+                horizon_weights_tensor = torch.tensor(horizon_weights, dtype=torch.float32)
+            else:
+                horizon_weights_tensor = horizon_weights
+            self.register_buffer('horizon_weights', horizon_weights_tensor)
+        else:
+            self.horizon_weights = None
             
         self.kl_div = nn.KLDivLoss(reduction='none')  # Всегда считаем поштучно, потом редуцируем сами
         self.ce_loss = nn.CrossEntropyLoss(

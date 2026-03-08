@@ -57,10 +57,37 @@ class FeatureEngineer:
             for c in ask_v_cols + bid_v_cols
         ]
 
-        # 5. Выполняем все трансформации разом
-        df = df.with_columns(price_exprs + vol_exprs)
+        # 5. Вычисляем OFI и VIB (Задача 306)
+        # OFI (Order Flow Imbalance) для лучшего уровня (depth 0)
+        # delta_bid = if bp0 > bp_prev { bv0 } else if bp0 < bp_prev { -bv_prev } else { bv0 - bv_prev }
+        # delta_ask = if ap0 < ap_prev { av0 } else if ap0 > ap_prev { -av_prev } else { av0 - av_prev }
+        # ofi = delta_bid - delta_ask
+        
+        ap0 = pl.col("ask_p_0")
+        av0 = pl.col("ask_v_0")
+        bp0 = pl.col("bid_p_0")
+        bv0 = pl.col("bid_v_0")
+        
+        ap_prev = ap0.shift(1).fill_null(ap0)
+        av_prev = av0.shift(1).fill_null(av0)
+        bp_prev = bp0.shift(1).fill_null(bp0)
+        bv_prev = bv0.shift(1).fill_null(bv0)
+        
+        delta_bid = pl.when(bp0 > bp_prev).then(bv0).when(bp0 < bp_prev).then(-bv_prev).otherwise(bv0 - bv_prev)
+        delta_ask = pl.when(ap0 < ap_prev).then(av0).when(ap0 > ap_prev).then(-av_prev).otherwise(av0 - av_prev)
+        
+        ofi_expr = (delta_bid - delta_ask).cast(pl.Float32).alias("feat_ofi_100")
+        
+        # VIB (Trade Imbalance) - если есть колонки сделок (Задача 212)
+        if "feat_trade_volume" in df.columns and "feat_trade_side" in df.columns:
+            vib_expr = (pl.col("feat_trade_volume") * pl.col("feat_trade_side")).cast(pl.Float32).alias("feat_vib_100")
+        else:
+            vib_expr = pl.lit(0.0).cast(pl.Float32).alias("feat_vib_100")
 
-        # 6. Формируем итоговый DF с СТРОГИМ ПОРЯДКОМ столбцов (Interleaved по стороне)
+        # 6. Выполняем все трансформации разом
+        df = df.with_columns(price_exprs + vol_exprs + [ofi_expr, vib_expr])
+
+        # 7. Формируем итоговый DF с СТРОГИМ ПОРЯДКОМ столбцов (Interleaved по стороне)
         # Это критически важно для Dataset.py (задача 304)
         ordered_feat_cols = []
         # Блок ASK (индексы 0-99)
@@ -73,13 +100,17 @@ class FeatureEngineer:
 
         # Все остальное (метаданные и дополнительные признаки)
         meta_cols = ["timestamp_ms", "mid_price", "last_update_id"]
-        other_cols = [c for c in df.columns if c.startswith("feat_past_ret_")]
-
+        other_cols = [c for c in df.columns if c.startswith("feat_past_return_")]
+        
+        # Добавляем OFI и VIB в дополнительные признаки (Задача 306)
+        extra_feats = ["feat_ofi_100", "feat_vib_100"]
+        
         # Возвращаем DF, где ПРИЗНАКИ LOB ПЕРВЫМИ 200 КОЛОНКАМИ
         return df.select(
             [pl.col(c) for c in ordered_feat_cols] + 
             [pl.col(c) for c in meta_cols if c in df.columns] +
-            [pl.col(c) for c in other_cols]
+            [pl.col(c) for c in other_cols] +
+            [pl.col(c) for c in extra_feats]
         )
 
 if __name__ == "__main__":
