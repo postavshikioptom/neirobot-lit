@@ -1590,8 +1590,13 @@ def train():
             **time_weighting_params
         )
     
-    # Проверка данных на NaN перед обучением
-    print("\nПроверка данных на NaN...")
+    # Задача 306.2.4: Остановка обучения при обнаружении NaN во входных данных
+    if args.data_mode != "streaming":
+        if np.isnan(full_dataset.features).any():
+            raise ValueError("КРИТИЧНО: Входящие features содержат NaN строки для запуска обучения!")
+    
+    # Проверка данных на NaN перед обучением (Sample-based check)
+    print("\nПроверка данных на NaN (sampling)...")
     nan_check_samples = min(100, len(full_dataset))
     nan_found = False
     

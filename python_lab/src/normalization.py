@@ -15,6 +15,8 @@ class Normalizer:
         self.params: Dict[str, Dict[str, float]] = {}
         self.scaler_type = "zscore"
         self.winsor_limits = None
+        # Задача 306.2.3: Сохраняем строгий порядок признаков
+        self.feature_order: List[str] = []
 
     def fit(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], feature_names: List[str] = None, winsor_limits: List[float] = None) -> Dict[str, Dict[str, float]]:
         """
@@ -30,6 +32,8 @@ class Normalizer:
                 data = data.collect()
             
             feat_cols = [c for c in data.columns if c.startswith("feat_")]
+            # Сохраняем порядок
+            self.feature_order = feat_cols
             
             # Эффективный расчет агрегатов через Polars
             summary_exprs = [
@@ -76,6 +80,9 @@ class Normalizer:
             if data.shape[1] != len(feature_names):
                 raise ValueError(f"Data shape {data.shape} mismatch with feature_names length {len(feature_names)}")
             
+            # Сохраняем порядок
+            self.feature_order = feature_names
+            
             means = np.mean(data, axis=0)
             stds = np.std(data, axis=0)
             medians = np.median(data, axis=0)
@@ -108,7 +115,8 @@ class Normalizer:
         save_data = {
             "params": self.params,
             "scaler_type": self.scaler_type,
-            "winsor_limits": self.winsor_limits
+            "winsor_limits": self.winsor_limits,
+            "feature_order": self.feature_order
         }
         with open(self.output_path, 'w') as f:
             json.dump(save_data, f, indent=4)
@@ -122,11 +130,13 @@ class Normalizer:
                 self.params = data["params"]
                 self.scaler_type = data.get("scaler_type", "zscore")
                 self.winsor_limits = data.get("winsor_limits")
+                self.feature_order = data.get("feature_order", [])
             else:
                 # Compatibility with old format
                 self.params = data
                 self.scaler_type = "zscore"
                 self.winsor_limits = None
+                self.feature_order = list(self.params.keys())
                 
         print(f"[{self.__class__.__name__}] Normalization params loaded from {self.output_path} (Type: {self.scaler_type})")
 
@@ -144,8 +154,10 @@ class Normalizer:
 
         if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
             if self.scaler_type in ("robust", "winsor_robust"):
+                # Задача 306.3.4: Безопасная проверка scale для Polars
                 exprs = [
-                    ((pl.col(c) - self.params[c]["median"]) / (self.params[c]["iqr"] + 1e-8))
+                    ((pl.col(c) - self.params[c]["median"]) / 
+                     (self.params[c]["iqr"] if self.params[c]["iqr"] > 1e-7 else 1.0))
                     .cast(pl.Float32)
                     .alias(c)
                     for c in self.params
@@ -164,13 +176,15 @@ class Normalizer:
                 raise ValueError(f"Data shape {data.shape} mismatch with params length {len(self.params)}")
             
             res = data.copy().astype(np.float32)
-            param_names = list(self.params.keys())
+            # Задача 306.2.3: Используем сохраненный порядок признаков
+            param_names = self.feature_order if self.feature_order else list(self.params.keys())
 
             for i, name in enumerate(param_names):
                 p = self.params[name]
                 if self.scaler_type in ("robust", "winsor_robust"):
                     center = p["median"]
-                    scale = p["iqr"] + 1e-8
+                    # Задача 306.3.4: Безопасная проверка scale - если IQR слишком мал, используем 1.0
+                    scale = p["iqr"] if p["iqr"] > 1e-7 else 1.0
                 else:  # zscore
                     center = p["mean"]
                     scale = p["std"]

@@ -221,7 +221,7 @@ def compute_trade_imbalance(
     
     Args:
         df_snapshots: DataFrame со снапшотами стакана (timestamp_ms, ...)
-        df_trades: DataFrame с публичными сделками (timestamp, price, size, side)
+        df_trades: DataFrame с публичными сделками (timestamp_ms, price, size, side)
         windows: список временных окон для агрегации (например, ["1s", "5s", "15s", "60s"])
         agg_type: тип агрегации - 'vol' (объем) или 'count' (количество сделок)
         noise_filter_pct: процент для фильтрации шума (отсекаем сделки меньше этого процента от медианы)
@@ -235,6 +235,10 @@ def compute_trade_imbalance(
             col_name = f"feat_imb_{agg_type}_{w}"
             df_snapshots = df_snapshots.with_columns(pl.lit(0.0).alias(col_name))
         return df_snapshots
+    
+    # Задача 306: Гарантируем имя timestamp_ms
+    if "timestamp" in df_trades.columns and "timestamp_ms" not in df_trades.columns:
+        df_trades = df_trades.rename({"timestamp": "timestamp_ms"})
     
     # 1. Фильтрация шума: отсекаем сделки меньше noise_filter_pct от медианного размера
     median_size = df_trades["size"].median()
@@ -269,10 +273,10 @@ def compute_trade_imbalance(
         pl.col("signed_val").abs().alias("abs_val")
     )
     
-    # 3. Преобразуем timestamp в datetime для rolling_sum_by
-    # timestamp в trades - это миллисекунды (i64), преобразуем в datetime
+    # 3. Преобразуем timestamp_ms в datetime для rolling_sum_by
+    # timestamp_ms в trades - это миллисекунды (i64), преобразуем в datetime
     df_trades = df_trades.with_columns(
-        pl.from_epoch(pl.col("timestamp"), time_unit="ms").alias("datetime")
+        pl.from_epoch(pl.col("timestamp_ms"), time_unit="ms").alias("datetime")
     )
     
     # 4. Для каждого окна вычисляем rolling imbalance
@@ -546,14 +550,21 @@ class LOBDataLoader:
         lf = lf.sort("timestamp_ms")
         return lf if lazy else lf.collect()
 
-    def load_trades(self, lazy: bool = False) -> Union[pl.DataFrame, pl.LazyFrame]:
+    def load_trades(self, lazy: bool = False) -> Union[pl.LazyFrame, pl.DataFrame]:
         trades_files = sorted(self.data_path.glob("trades_*.parquet"))
-        empty_schema = {"timestamp": pl.Int64, "price": pl.Float64, "size": pl.Float64, "side": pl.Utf8}
+        # Задача 306: Используем только timestamp_ms
+        empty_schema = {"timestamp_ms": pl.Int64, "price": pl.Float64, "size": pl.Float64, "side": pl.Utf8}
         
         if not trades_files:
             return pl.LazyFrame(schema=empty_schema) if lazy else pl.DataFrame(schema=empty_schema)
         
-        return pl.scan_parquet(trades_files) if lazy else pl.read_parquet(trades_files)
+        lf = pl.scan_parquet(trades_files)
+        # Если в файле колонка называется timestamp, переименовываем в timestamp_ms
+        actual_cols = lf.collect_schema().names()
+        if "timestamp" in actual_cols and "timestamp_ms" not in actual_cols:
+            lf = lf.rename({"timestamp": "timestamp_ms"})
+            
+        return lf if lazy else lf.collect()
 
 class LOBDataset(Dataset):
     """
@@ -659,6 +670,57 @@ class LOBDataset(Dataset):
         final_weights = final_weights / (final_weights.mean() + 1e-8)
         return torch.tensor(final_weights, dtype=torch.float32)
 
+    def _setup_feature_indices(self, df_cols: List[str] = None):
+        """
+        Задача 306.2.2: Централизованная настройка индексов признаков для устойчивости к изменениям структуры.
+        Результат: В массиве x_raw первым элементом всегда будет ask_p_0 (индекс 0).
+        """
+        # Если передан список колонок DF, используем его для поиска
+        # Иначе используем self.feat_cols (который соответствует numpy массиву)
+        lookup_list = df_cols if df_cols is not None else self.feat_cols
+        
+        # Строго заданный порядок признаков LOB (Задача 304)
+        lob_column_names = [f"feat_ask_p_{i}" for i in range(self.n_levels)] + \
+                           [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
+                           [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
+                           [f"feat_bid_v_{i}" for i in range(self.n_levels)]
+        
+        # Задача 306.2.2: Создаем маску индексов для LOB
+        self.lob_indices = []
+        for c in lob_column_names:
+            try:
+                self.lob_indices.append(lookup_list.index(c))
+            except ValueError:
+                pass # Пропускаем если колонки нет
+        
+        if not self.lob_indices:
+            # Fallback на первые 200 если ничего не нашли
+            self.lob_indices = list(range(0, 200))
+        
+        # Поиск индексов по именам
+        def get_idx(name):
+            try: return lookup_list.index(name)
+            except (ValueError, AttributeError): return -1
+
+        self.trade_vol_idx = get_idx("feat_trade_volume")
+        self.trade_side_idx = get_idx("feat_trade_side")
+        self.ofi_idx = get_idx("feat_ofi_100")
+        self.vib_idx = get_idx("feat_vib_100")
+        
+        # Индексы для Past Returns
+        self.past_ret_indices = []
+        for lag in self.past_returns_lags:
+            name = f"feat_past_return_{lag}"
+            idx = get_idx(name)
+            if idx >= 0:
+                self.past_ret_indices.append(idx)
+        
+        # Если past_returns_lags не в feat_cols (они могут добавляться позже через hstack),
+        # то они будут находиться после всех feat_cols
+        if not self.past_ret_indices and self.n_past_returns > 0:
+            start_idx = len(self.feat_cols) if hasattr(self, 'feat_cols') else 200
+            self.past_ret_indices = list(range(start_idx, start_idx + self.n_past_returns))
+
     def _init_memory_mode(self, df: pl.DataFrame):
         if not isinstance(df, pl.DataFrame):
             raise TypeError("For 'memory' mode, df must be a pl.DataFrame")
@@ -678,11 +740,9 @@ class LOBDataset(Dataset):
             feat_cols = [c for c in feat_cols if c not in self.exclude_features]
         
         self.feat_cols = feat_cols
-        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
-        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
-        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
-        self.ofi_idx = feat_cols.index("feat_ofi_100") if "feat_ofi_100" in feat_cols else -1
-        self.vib_idx = feat_cols.index("feat_vib_100") if "feat_vib_100" in feat_cols else -1
+        
+        # Задача 306.2.2: Инициализируем именованные индексы
+        self._setup_feature_indices()
 
         if self.scaler_type in ("robust", "winsor_robust"):
             norm = Normalizer(output_path="norm_params.json")
@@ -696,7 +756,14 @@ class LOBDataset(Dataset):
         else:
             self.robust_params = None
         
-        select_cols = [pl.concat_list(feat_cols).alias("features"), *self.label_cols, "timestamp_ms"]
+        # Задача 306.2.1: Гарантируем наличие timestamp_ms для внутренних нужд, но исключаем из признаков
+        select_cols = [pl.concat_list(feat_cols).alias("features"), *self.label_cols]
+        if "timestamp_ms" in df.columns:
+            select_cols.append("timestamp_ms")
+        elif "timestamp" in df.columns:
+            df = df.rename({"timestamp": "timestamp_ms"})
+            select_cols.append("timestamp_ms")
+            
         if "mid_price" in df.columns:
             select_cols.append(pl.col("mid_price"))
             
@@ -710,7 +777,11 @@ class LOBDataset(Dataset):
         else:
             self.labels = sequence_df.select(pl.col("label")).to_series().to_numpy()
         
-        self.timestamps = sequence_df.select(pl.col("timestamp_ms")).to_series().to_numpy()
+        if "timestamp_ms" in sequence_df.columns:
+            self.timestamps = sequence_df.select(pl.col("timestamp_ms")).to_series().to_numpy()
+        else:
+            # Если таймстампов нет (удалены в load_multi_symbol_data), используем индексы
+            self.timestamps = np.arange(len(sequence_df), dtype=np.int64)
         
         if "mid_price" in df.columns:
             mid_prices = df["mid_price"].to_numpy()
@@ -756,7 +827,15 @@ class LOBDataset(Dataset):
             feat_cols = [c for c in feat_cols if c not in self.exclude_features]
         
         # Защита от NaN в пайплайне Polars (Задача 094-2)
-        self.lazy_df = df.select([*feat_cols, *self.label_cols, "timestamp_ms", "mid_price"]).fill_null(0.0)
+        # Задача 306.2.1: Гарантируем наличие timestamp_ms
+        select_cols = [*feat_cols, *self.label_cols, "mid_price"]
+        if "timestamp_ms" in schema.names():
+            select_cols.append("timestamp_ms")
+        elif "timestamp" in schema.names():
+            df = df.rename({"timestamp": "timestamp_ms"})
+            select_cols.append("timestamp_ms")
+            
+        self.lazy_df = df.select(select_cols).fill_null(0.0)
         
         total_rows = self.lazy_df.select(pl.len()).collect(streaming=True).item()
         self.total_samples = total_rows - self.seq_len + 1
@@ -764,9 +843,8 @@ class LOBDataset(Dataset):
         self.file_path = df if isinstance(df, str) else None
         self.row_offsets = self._build_row_offsets(self.file_path, total_rows)
         self.feat_cols = feat_cols
-        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
-        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
-        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
+        # Задача 306.2.2: Централизованная настройка индексов
+        self._setup_feature_indices()
 
         
         self._cache_batch = None
@@ -828,10 +906,8 @@ class LOBDataset(Dataset):
         if self.exclude_features: feat_cols = [c for c in feat_cols if c not in self.exclude_features]
         
         self.feat_cols = feat_cols
-        # Сохраняем индексы колонок для быстрого доступа в _process_sample (Задача 306)
-        self.trade_vol_idx = feat_cols.index("feat_trade_volume") if "feat_trade_volume" in feat_cols else -1
-        self.trade_side_idx = feat_cols.index("feat_trade_side") if "feat_trade_side" in feat_cols else -1
- # Сохраняем для консистентности
+        # Задача 306.2.2: Централизованная настройка индексов
+        self._setup_feature_indices()
         
         total_rows = len(df) - self.seq_len + 1
         n_feats = len(feat_cols)
@@ -845,6 +921,11 @@ class LOBDataset(Dataset):
         mid_prices = df["mid_price"].to_numpy()
         vols_arr = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
         
+        has_ts = "timestamp_ms" in df.columns
+        if not has_ts and "timestamp" in df.columns:
+            df = df.rename({"timestamp": "timestamp_ms"})
+            has_ts = True
+
         # Построчная запись (чанками)
         for i in range(total_rows):
             f_map[i] = df.select(feat_cols).slice(i, self.seq_len).to_numpy()
@@ -853,7 +934,10 @@ class LOBDataset(Dataset):
             else:
                 l_map[i] = df["label"][i + self.seq_len - 1]
             v_map[i] = vols_arr[i]
-            t_map[i] = df["timestamp_ms"][i + self.seq_len - 1]
+            if has_ts:
+                t_map[i] = df["timestamp_ms"][i + self.seq_len - 1]
+            else:
+                t_map[i] = i + self.seq_len - 1
 
         w_arr = self._calculate_time_weights(t_map[:], l_map[:]).numpy()
         w_map = np.memmap(self.cache_dir / "weights.npy", dtype='float32', mode='w+', shape=(total_rows,))
@@ -910,9 +994,8 @@ class LOBDataset(Dataset):
         x_raw = np.nan_to_num(x_raw, nan=0.0)
         
         # 3-channel LOB (Задача 304: Строго по блокам)
-        # Блок ASK: 0-49 цены, 50-99 объемы
-        # Блок BID: 100-149 цены, 150-199 объемы
-        lob_flat = x_raw[:, :200]
+        # Задача 306.2.2: Используем именованный слайс lob_indices
+        lob_flat = x_raw[:, self.lob_indices]
         x = torch.from_numpy(lob_flat.copy())
         
         if self.is_train and torch.rand(1, generator=self.generator).item() < self.augment_prob:
@@ -928,13 +1011,15 @@ class LOBDataset(Dataset):
         # ch[0-2]: Базовые LOB каналы
         price_ch = (ask_p + bid_p) / 2.0
         vol_ch = ask_v + bid_v
-        imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-7)
+        # Задача 306.3.1: Безопасный расчет Imbalance с abs() в знаменателе
+        denom = torch.abs(bid_v) + torch.abs(ask_v) + 1e-6
+        imb_ch = torch.clamp((bid_v - ask_v) / denom, min=-5.0, max=5.0)
         
         # ch[3]: OFI (Order Flow Imbalance) - берем уже нормализованный из FeatureEngineer
         if self.ofi_idx >= 0:
             ofi = torch.from_numpy(x_raw[:, self.ofi_idx].copy()).float()
         else:
-            # Fallback для совместимости, если колонка не найдена
+            # Fallback для совместимости
             ap0, av0, bp0, bv0 = ask_p[:, 0], ask_v[:, 0], bid_p[:, 0], bid_v[:, 0]
             bp_prev = torch.cat([bp0[:1], bp0[:-1]])
             bv_prev = torch.cat([bv0[:1], bv0[:-1]])
@@ -959,31 +1044,22 @@ class LOBDataset(Dataset):
         vib_ch = vib.unsqueeze(-1).repeat(1, 50)
         
         # ch[5]: Past Returns (100 тиков)
-        # Ищем лаг 100 в feat_cols
-        pr_col_idx = -1
-        try:
-            # Пытаемся найти лаг 100
-            target_lag = 100
-            pr_feat_name = f"feat_past_return_{target_lag}"
-            if pr_feat_name in self.feat_cols:
-                pr_col_idx = self.feat_cols.index(pr_feat_name)
-            else:
-                # Если 100 нет, берем любой доступный из past_returns_lags
-                for lag in self.past_returns_lags:
-                    if f"feat_past_return_{lag}" in self.feat_cols:
-                        pr_col_idx = self.feat_cols.index(f"feat_past_return_{lag}")
-                        break
-        except:
-            pass
-
-        if pr_col_idx >= 0:
-            pr = torch.from_numpy(x_raw[:, pr_col_idx].copy()).float() * 100.0
+        # Задача 306.2.2: Используем заранее найденные индексы
+        if self.past_ret_indices:
+            # Пытаемся взять лаг 100 (обычно последний в списке, если lags=[10, 50, 100])
+            # Для простоты берем первый доступный из найденных, если 100 нет
+            pr_idx = self.past_ret_indices[-1] # Предполагаем, что самый длинный лаг последний
+            # Задача 306.3.2: Убрано умножение на 100.0, так как RobustScaler уже нормализовал данные
+            pr = torch.from_numpy(x_raw[:, pr_idx].copy()).float()
         else:
             pr = torch.zeros(x.shape[0], device=x.device)
         pr_ch = pr.unsqueeze(-1).repeat(1, 50)
         
         # Собираем итоговый тензор (Seq, 6, 50)
         x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
+        
+        # Задача 306.3.3: Глобальный предохранитель - ограничиваем весь тензор
+        x_final = torch.clamp(x_final, min=-12.0, max=12.0)
         
         return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
 
@@ -1035,7 +1111,12 @@ def load_multi_symbol_data(symbols, data_path="bots", lazy=True) -> Union[pl.Dat
         lf = pl.scan_parquet(path / f"{symbol}_*.parquet").with_columns(pl.lit(symbol).alias("symbol"))
         trades_files = list(path.glob("trades_*.parquet"))
         if trades_files:
-            tr_lf = pl.scan_parquet(trades_files).rename({"timestamp": "timestamp_ms"}).select([
+            tr_lf = pl.scan_parquet(trades_files)
+            # Приводим к единому имени timestamp_ms
+            if "timestamp" in tr_lf.collect_schema().names():
+                tr_lf = tr_lf.rename({"timestamp": "timestamp_ms"})
+            
+            tr_lf = tr_lf.select([
                 "timestamp_ms", 
                 pl.col("price").alias("feat_trade_price"), 
                 pl.col("size").alias("feat_trade_volume"),
@@ -1052,6 +1133,12 @@ def load_multi_symbol_data(symbols, data_path="bots", lazy=True) -> Union[pl.Dat
             ])
         scans.append(lf)
     merged = pl.concat(scans).sort(["timestamp_ms", "symbol"])
+    
+    # Задача 306.2.1: Удаляем служебные колонки ПЕРЕД конвертацией в numpy/memmap
+    # Используем правильные имена согласно уточнению пользователя
+    meta_cols = ["timestamp_ms", "last_update_id", "symbol"]
+    merged = merged.drop([c for c in meta_cols if c in merged.columns])
+    
     return merged if lazy else merged.collect()
 
 def load_symbol_config(symbol, config_path="bots") -> Dict[str, Any]:
