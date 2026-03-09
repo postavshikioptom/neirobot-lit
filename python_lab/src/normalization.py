@@ -5,6 +5,17 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Dict, List
 
+def symlog_transform(x):
+    """
+    Symmetric Log Transform: f(x) = sign(x) * log1p(abs(x)).
+    Сжимает динамический диапазон, сохраняя знак и структуру данных.
+    """
+    if isinstance(x, (np.ndarray, float, int)):
+        return np.sign(x) * np.log1p(np.abs(x))
+    else: # assume torch.Tensor
+        import torch
+        return torch.sign(x) * torch.log1p(torch.abs(x))
+
 class Normalizer:
     """
     Класс для расчета и применения параметров нормализации Z-score (mean, std).

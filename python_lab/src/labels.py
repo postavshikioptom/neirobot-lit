@@ -10,13 +10,15 @@ class Labeler:
     - Может генерировать метки для нескольких горизонтов одновременно
     - Автоматически маскирует недоступные горизонты значением -100
     """
-    def __init__(self, horizon: Union[int, List[int]] = 100, threshold: float = 0.0005):
+    def __init__(self, horizon: Union[int, List[int]] = 100, threshold: float = 0.0005, dynamic_threshold: bool = True, window: int = 1000, K: float = 0.5):
         """
         horizon (K): Горизонт предсказания в количестве событий (строк).
                      Может быть int (один горизонт) или List[int] (несколько горизонтов).
                      Например: [10, 50, 100] для multi-horizon prediction.
-        threshold: Порог доходности для определения значимого движения цены.
-                   Например, 0.0005 соответствует 0.05% изменения цены.
+        threshold: Базовый порог доходности (используется если dynamic_threshold=False).
+        dynamic_threshold: Если True, порог вычисляется как rolling_std * K.
+        window: Окно для расчета rolling_std.
+        K: Коэффициент для динамического порога.
         """
         # Конвертируем в список для единообразия
         if isinstance(horizon, int):
@@ -27,6 +29,9 @@ class Labeler:
             self.single_horizon = False
         
         self.threshold = threshold
+        self.dynamic_threshold = dynamic_threshold
+        self.window = window
+        self.K = K
         self.max_horizon = max(self.horizons)
 
     def add_labels(self, df: Union[pl.DataFrame, pl.LazyFrame]) -> Union[pl.DataFrame, pl.LazyFrame]:
@@ -49,6 +54,20 @@ class Labeler:
         """
         is_lazy = isinstance(df, pl.LazyFrame)
         
+        # 1. Рассчитываем динамический порог если нужно
+        if self.dynamic_threshold:
+            # Используем std доходностей на окне
+            df = df.with_columns(
+                returns_std=pl.col("mid_price").pct_change().rolling_std(window_size=self.window).fill_null(strategy="backward")
+            )
+            # Порог = std * K. Ограничиваем снизу 0.0001 (0.01%)
+            df = df.with_columns(
+                dynamic_threshold=pl.col("returns_std").mul(self.K).clip(lower_bound=0.0001)
+            )
+            threshold_expr = pl.col("dynamic_threshold")
+        else:
+            threshold_expr = pl.lit(self.threshold)
+
         # Для каждого горизонта создаем метки
         label_columns = []
         
@@ -66,16 +85,15 @@ class Labeler:
             )
             
             # 3. Тернарная разметка с маскированием
-            # Если future_return is null (нет будущего), метка = -100
             label_col = f"label_h{horizon}" if not self.single_horizon else "label"
             df = df.with_columns(
                 **{label_col: pl.when(pl.col(return_col).is_null())
-                    .then(pl.lit(-100))  # Маскирование
-                    .when(pl.col(return_col) > self.threshold)
-                    .then(pl.lit(1))  # Up
-                    .when(pl.col(return_col) < -self.threshold)
-                    .then(pl.lit(2))  # Down
-                    .otherwise(pl.lit(0))  # Flat
+                    .then(pl.lit(-100))
+                    .when(pl.col(return_col) > threshold_expr)
+                    .then(pl.lit(1))
+                    .when(pl.col(return_col) < -threshold_expr)
+                    .then(pl.lit(2))
+                    .otherwise(pl.lit(0))
                     .cast(pl.Int8)}
             )
             

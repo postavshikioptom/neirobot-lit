@@ -199,15 +199,15 @@ scale = p["iqr"] if p["iqr"] > 1e-7 else 1.0 # если все значения 
 
 ---
 
-### 📋 ЗАДАЧА 306-4 ПЛАН РЕАЛИЗАЦИИ: "Total Column Sovereignty"
+### 📋 ЗАДАЧА 306-4 ПЛАН РЕАЛИЗАЦИИ: "Total Column Sovereignty" ✅ ЗАВЕРШЕНО
 
-#### Подзадача 306.4.1: Унификация имен и сортировка в `load_multi_symbol_data`
+#### Подзадача 306.4.1: Унификация имен и сортировка в `load_multi_symbol_data` ✅ ЗАВЕРШЕНО
 **Файл:** [./python_lab/src/dataset.py](./python_lab/src/dataset.py)
 *   **Действие:** На этапе загрузки (Feature Engineering) переименовать все колонки стакана: `ask_p_0` -> `feat_ask_p_0`, `ask_v_0` -> `feat_ask_v_0` и так далее.
 *   **Зачем:** Это позволит `Normalizer` и `Dataset` автоматически и безошибочно находить **все** признаки по префиксу `feat_`.
 *   **Сортировка:** В конце функции `load_multi_symbol_data` выполнить `merged.select(sorted(merged.columns))`. Это даст детерминированный порядок колонок независимо от того, как они записаны в Parquet.
 
-#### Подзадача 306.4.2: Инициализация масок индексов в `LOBDataset`
+#### Подзадача 306.4.2: Инициализация масок индексов в `LOBDataset` ✅ ЗАВЕРШЕНО
 **Файл:** [./python_lab/src/dataset.py](./python_lab/src/dataset.py)
 *   **Действие:** В `__init__` после формирования `self.feat_cols` рассчитать **маски индексов** (списки целых чисел):
     *   `self.ask_p_indices = [self.feat_cols.index(f"feat_ask_p_{i}") for i in range(50)]`
@@ -216,7 +216,7 @@ scale = p["iqr"] if p["iqr"] > 1e-7 else 1.0 # если все значения 
     *   `self.bid_v_indices = [self.feat_cols.index(f"feat_bid_v_{i}") for i in range(50)]`
     *   Найти `self.ofi_idx`, `self.vib_idx` и `self.past_ret_indices` через `.index()` в списке `self.feat_cols`.
 
-#### Подзадача 306.4.3: Полный отказ от слайсов в `_process_sample`
+#### Подзадача 306.4.3: Полный отказ от слайсов в `_process_sample` ✅ ЗАВЕРШЕНО
 **Файл:** [./python_lab/src/dataset.py](./python_lab/src/dataset.py)
 *   **Действие:** Заменить все жесткие обращения типа `x[:, 0:50]` на использование масок:
     ```python
@@ -225,7 +225,7 @@ scale = p["iqr"] if p["iqr"] > 1e-7 else 1.0 # если все значения 
     ```
 *   **Зачем:** Теперь, даже если при сортировке `feat_ask_p_0` окажется на 150-й позиции, код выберет именно его. Это делает логику "бронебойной".
 
-#### Подзадача 306.4.4: Синхронизация `Normalizer` и `train.py`
+#### Подзадача 306.4.4: Синхронизация `Normalizer` и `train.py` ✅ ЗАВЕРШЕНО
 **Файлы:** [./python_lab/src/normalization.py](./python_lab/src/normalization.py), [./python_lab/src/train.py](./python_lab/src/train.py)
 *   **Действие:** 
     1.  В `Normalizer.fit` передавать `feature_names=full_dataset.feat_cols`. 

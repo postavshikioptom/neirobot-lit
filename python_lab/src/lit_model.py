@@ -172,10 +172,12 @@ class CustomTransformerEncoderLayer(nn.Module):
         self.v_proj = nn.Linear(d_model, self.num_kv_heads * self.head_dim)
         self.out_proj = nn.Linear(d_model, d_model)
         
-        # QK Normalization (Задача 305-2)
+        # QK Normalization (Задача 305-2, Задача 307)
         # Стабилизация внимания через LayerNorm перед вычислением softmax
+        # Используем learnable scale для управления амплитудой
         self.q_norm = nn.LayerNorm(self.head_dim)
         self.k_norm = nn.LayerNorm(self.head_dim)
+        self.qk_scale = nn.Parameter(torch.ones(1) * (1.0 / math.sqrt(self.head_dim)))
         
         # Feedforward Network
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -221,10 +223,10 @@ class CustomTransformerEncoderLayer(nn.Module):
         k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         
-        # QK Normalization и масштабирование (Задача 305-2)
-        # Применяем LayerNorm и делим на sqrt(head_dim) для предотвращения взрывных активаций
-        q = self.q_norm(q) / math.sqrt(self.head_dim)
-        k = self.k_norm(k) / math.sqrt(self.head_dim)
+        # QK Normalization и масштабирование (Задача 305-2, Задача 307)
+        # Применяем LayerNorm и learnable scale для предотвращения взрывных активаций
+        q = self.q_norm(q) * self.qk_scale
+        k = self.k_norm(k)
         
         # GQA: расширяем KV heads для каждой группы Query heads
         if self.use_gqa and self.num_kv_heads < self.num_heads:
@@ -521,7 +523,8 @@ class LiTModel(nn.Module):
         if not self.training and not self.multi_task:
             return logits
             
-        vol = self.vol_regressor(self.bottleneck_act(self.vol_bottleneck(pooled)))
+        # Задача 307.1: Отключаем градиенты от vol-головы в backbone, чтобы фокус был на классификации
+        vol = self.vol_regressor(self.bottleneck_act(self.vol_bottleneck(pooled.detach())))
         
         if self.multi_task:
             return logits, vol

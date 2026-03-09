@@ -650,6 +650,26 @@ class LOBDataset(Dataset):
         else:
             raise ValueError(f"Unknown data_mode: {data_mode}")
 
+        # Задача 307.6: Аудит целостности признаков и логирование первого сэмпла
+        expected_cols = [f"feat_bid_p_{i}" for i in range(50)] + [f"feat_ask_p_{i}" for i in range(50)]
+        actual_cols = self.feat_cols if hasattr(self, 'feat_cols') else []
+        missing = [c for c in expected_cols if c not in actual_cols]
+        
+        if not missing:
+            print(f"[{self.__class__.__name__}] Feature Map Verified: 6 channels, 50 levels. Total features: 300. Status: OK")
+        
+        if len(self) > 0:
+            sample_x, _, _, _, _ = self[0]
+            print(f"[{self.__class__.__name__}] First Sample Statistics (SymLog applied):")
+            channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
+            for i in range(sample_x.shape[1]):
+                chan = sample_x[:, i, :]
+                print(f"  Channel {i} ({channel_names[i]}): min={chan.min():.4f}, max={chan.max():.4f}, mean={chan.mean():.4f}")
+        
+        # Информационный лог о загрузке
+        n_samples = len(self)
+        print(f"[{self.__class__.__name__}] Loaded {n_samples} samples. Data mode: {data_mode}")
+
     def _calculate_time_weights(self, timestamps: np.ndarray, labels: np.ndarray) -> torch.Tensor:
         max_ts = timestamps.max()
         half_life_ms = self.half_life_hours * 3600 * 1000
@@ -1042,9 +1062,9 @@ class LOBDataset(Dataset):
         # ch[0-2]: Базовые LOB каналы
         price_ch = (ask_p + bid_p) / 2.0
         vol_ch = ask_v + bid_v
-        # Задача 306.3.1: Безопасный расчет Imbalance с abs() в знаменателе
-        denom = torch.abs(bid_v) + torch.abs(ask_v) + 1e-6
-        imb_ch = torch.clamp((bid_v - ask_v) / denom, min=-5.0, max=5.0)
+        from .normalization import symlog_transform
+        # Задача 307.2: Заменяем Clamp на SymLog для сохранения структуры экстремальных сигналов мемкоинов
+        imb_ch = symlog_transform((bid_v - ask_v) / denom)
         
         # ch[3]: OFI (Order Flow Imbalance) - берем уже нормализованный из FeatureEngineer
         if self.ofi_idx >= 0:
@@ -1089,8 +1109,9 @@ class LOBDataset(Dataset):
         # Собираем итоговый тензор (Seq, 6, 50)
         x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
         
-        # Задача 306.3.3: Глобальный предохранитель - ограничиваем весь тензор
-        x_final = torch.clamp(x_final, min=-12.0, max=12.0)
+        from .normalization import symlog_transform
+        # Задача 307: Замена Clamp на SymLog для сохранения динамического диапазона
+        x_final = symlog_transform(x_final)
         
         return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
 

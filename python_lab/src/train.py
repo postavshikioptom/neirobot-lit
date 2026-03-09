@@ -1221,8 +1221,8 @@ def train():
     parser.add_argument("--volume_jitter_range", type=float, default=0.1, help="Max relative volume change (e.g. 0.1 for +/- 10%)")
     parser.add_argument("--aug_seed", type=int, default=42, help="Seed for reproducible augmentation")
     
-    # Параметры балансировки (Задача 127)
-    parser.add_argument("--balance_method", type=str, default="none", choices=["none", "smote", "bgmm"], help="Oversampling method for imbalanced classes")
+    # Задача 307.3: Отключаем оверсемплинг данных (оставляем только веса в FocalLoss для стабильности I/O)
+    parser.add_argument("--balance_method", type=str, default="none", choices=["none", "smote", "bgmm", "adasyn"], help="Dataset balancing method (deprecated in 307)")
     parser.add_argument("--balance_ratio", type=float, default=0.5, help="Target ratio for minority classes relative to majority class")
     
     # Параметры Knowledge Distillation (Задача 151)
@@ -1655,7 +1655,8 @@ def train():
     print(f"  Test:  indices {test_indices[0]}-{test_indices[-1]} ({len(test_ds)} samples, {len(test_ds)/total_len*100:.1f}%)")
     
     # 7. Оверсэмплинг и нормализация тренировочного набора (Задача 127, оптимизация 303)
-    if args.balance_method != "none":
+    # Задача 307: Отключаем оверсемплинг (SMOTE/BGMM), так как он конфликтует с весами классов и I/O
+    if False: # args.balance_method != "none":
         if args.data_mode == "streaming":
             print("\n⚠️  WARNING: Oversampling is not supported in 'streaming' mode. Skipping balancing.")
             # Для streaming режима все равно нужен fit
