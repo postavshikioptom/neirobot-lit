@@ -852,10 +852,59 @@ class LOBDataset(Dataset):
         has_ask_v = all(c in df.columns for c in ask_v_cols)
         has_mid_price = "mid_price" in df.columns
         
-        # Инициализируем кэши как None, заполним позже
-        self.vib_cache = None
-        self.past_ret_cache = None
+        # Задача 308: Вычисляем VIB и PastRet ДО нормализации (из сырых данных)
+        # Это критически важно, т.к. после robust нормализации значения объемов и цен
+        # center around 0, что приводит к нулевым VIB и PastRet
+        print(f"[LOBDataset] Computing on-the-fly features: VIB and PastReturns...")
+        
+        # Извлекаем сырые объемы (НЕ нормализованные) напрямую из DataFrame
+        # bid_v: колонки feat_bid_v_{i}, ask_v: колонки feat_ask_v_{i}
+        bid_v_raw = df.select([f"feat_bid_v_{i}" for i in range(self.n_levels)]).to_numpy()
+        ask_v_raw = df.select([f"feat_ask_v_{i}" for i in range(self.n_levels)]).to_numpy()
+        
+        # 1. Расчет VIB (Volume Imbalance) на СЫРЫХ объемах
+        bid_v_sum = bid_v_raw.sum(axis=1)
+        ask_v_sum = ask_v_raw.sum(axis=1)
+        denom = bid_v_sum + ask_v_sum
+        self.vib_cache = np.where(denom > 1e-9, (bid_v_sum - ask_v_sum) / (denom + 1e-9), 0.0).astype(np.float32)
+        
+        # 2. Расчет PastRet (Log Returns) на СЫРОЙ mid_price
+        # Используем mid_price из DataFrame напрямую (до нормализации)
+        raw_mid_prices = df["mid_price"].to_numpy() if "mid_price" in df.columns else None
+        if raw_mid_prices is None:
+            # Fallback: вычисляем из сырых цен (ask_p_0 + bid_p_0) / 2
+            ask_p_raw = df.select([f"feat_ask_p_{i}" for i in range(self.n_levels)]).to_numpy()
+            bid_p_raw = df.select([f"feat_bid_p_{i}" for i in range(self.n_levels)]).to_numpy()
+            raw_mid_prices = (ask_p_raw[:, 0] + bid_p_raw[:, 0]) / 2.0
+            
+        log_prices = np.log(np.maximum(raw_mid_prices, 1e-9))
+        self.past_ret_cache = np.zeros(len(log_prices), dtype=np.float32)
+        
+        lag = 100
+        if len(log_prices) > lag:
+            self.past_ret_cache[lag:] = log_prices[lag:] - log_prices[:-lag]
 
+        # 3. Нормализация VIB и PastRet через отдельный Normalizer
+        temp_df = pl.DataFrame({
+            "feat_vib_val": self.vib_cache,
+            "feat_past_ret_val": self.past_ret_cache
+        })
+        
+        norm_temp = Normalizer(output_path=None)
+        norm_temp.scaler_type = self.scaler_type
+        norm_temp.winsor_limits = self.winsor_limits
+        
+        norm_temp.fit(temp_df)
+        transformed = norm_temp.transform(temp_df)
+        
+        self.vib_cache = transformed["feat_vib_val"].to_numpy().astype(np.float32)
+        self.past_ret_cache = transformed["feat_past_ret_val"].to_numpy().astype(np.float32)
+        
+        self.has_computed_features = True
+        print(f"[LOBDataset] Features VIB and PastRet computed and normalized (Robust).")
+        # --------------------------------------
+        
+        # Нормализация основных LOB признаков (после расчета VIB/PastRet!)
         if self.scaler_type in ("robust", "winsor_robust"):
             norm = Normalizer(output_path="norm_params.json")
             norm.scaler_type = self.scaler_type
@@ -895,63 +944,13 @@ class LOBDataset(Dataset):
             # Если таймстампов нет (удалены в load_multi_symbol_data), используем индексы
             self.timestamps = np.arange(len(sequence_df), dtype=np.int64)
         
-        # Задача 308: Извлекаем mid_prices для использования в кэшировании
-        mid_prices = None
-        if "mid_price" in df.columns:
-            mid_prices = df["mid_price"].to_numpy()
-            self.vols = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
+        # VIB и PastRet уже вычислены ДО нормализации (см. строки 855-904)
+        # Для расчета волатильности используем сырые mid_prices (уже получены выше)
+        if raw_mid_prices is not None:
+            self.vols = compute_target_vol(raw_mid_prices, window=self.vol_window)[self.seq_len - 1:]
         else:
             self.vols = np.zeros(len(self.labels) - self.seq_len + 1, dtype=np.float32)
-
-        # --- ИСПРАВЛЕННЫЙ БЛОК ЗАДАЧИ 308-2 ---
-        print(f"[LOBDataset] Computing on-the-fly features: VIB and PastReturns...")
         
-        # 1. Расчет VIB (Volume Imbalance)
-        # Суммируем объемы напрямую по индексам масок
-        bid_v_sum = self.features[:, self.bid_v_indices].sum(axis=1) 
-        ask_v_sum = self.features[:, self.ask_v_indices].sum(axis=1)
-        denom = bid_v_sum + ask_v_sum
-        
-        # VIB с защитой от деления на 0
-        self.vib_cache = np.where(denom > 1e-9, (bid_v_sum - ask_v_sum) / (denom + 1e-9), 0.0).astype(np.float32)
-
-        # 2. Расчет PastRet (Log Returns) 
-        # Используем mid_price из DataFrame, который мы извлекли выше (строка 901)
-        # Если mid_prices нет, используем прокси из features (среднее ask/bid 0 уровня)
-        if mid_prices is None:
-            # ask_p_0 (0) и bid_p_0 (100) - это прокси для mid_price
-            prices = (self.features[:, self.ask_p_indices[0]] + self.features[:, self.bid_p_indices[0]]) / 2.0
-        else:
-            prices = mid_prices
-            
-        log_prices = np.log(np.maximum(prices, 1e-9))
-        self.past_ret_cache = np.zeros(len(prices), dtype=np.float32)
-        
-        lag = 100
-        if len(log_prices) > lag:
-            # Правильный расчет: разница между текущей ценой и ценой 100 шагов назад
-            self.past_ret_cache[lag:] = log_prices[lag:] - log_prices[:-lag]
-
-        # 3. Нормализация через временный DataFrame с правильными префиксами feat_
-        temp_df = pl.DataFrame({
-            "feat_vib_val": self.vib_cache,
-            "feat_past_ret_val": self.past_ret_cache
-        })
-        
-        norm_temp = Normalizer(output_path=None)
-        norm_temp.scaler_type = self.scaler_type
-        norm_temp.winsor_limits = self.winsor_limits
-        
-        norm_temp.fit(temp_df)
-        transformed = norm_temp.transform(temp_df)
-        
-        self.vib_cache = transformed["feat_vib_val"].to_numpy().astype(np.float32)
-        self.past_ret_cache = transformed["feat_past_ret_val"].to_numpy().astype(np.float32)
-        
-        self.has_computed_features = True
-        print(f"[LOBDataset] Features VIB and PastRet computed and normalized (Robust).")
-        # --------------------------------------
-
         weight_labels = self.labels[self.seq_len-1:]
         self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
         
