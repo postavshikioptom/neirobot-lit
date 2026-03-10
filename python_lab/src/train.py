@@ -1177,7 +1177,7 @@ def train():
     parser.add_argument("--horizons", type=str, default=None, help="Comma-separated list of horizons for multi-horizon prediction (e.g., '10,50,100')")
     parser.add_argument("--horizon_weights", type=str, default=None, help="Comma-separated list of weights for each horizon (e.g., '0.4,0.3,0.3')")
     parser.add_argument("--use_horizon_embedding", action="store_true", help="Use Horizon Embedding instead of separate heads")
-    parser.add_argument("--threshold", type=float, default=0.0005, help="Return threshold for labels")
+    parser.add_argument("--threshold", type=float, default=0.0005, help="Статический порог доходности (0.0005 = 0.05%)")
     parser.add_argument("--class_weight_smooth", type=float, default=1.0, help="Smoothing for class weights calculation")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing for CrossEntropyLoss")
     parser.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
@@ -1448,7 +1448,11 @@ def train():
         horizon_weights = None
         print(f"Using single horizon prediction: {horizons}")
     
-    labeler = Labeler(horizon=horizons, threshold=args.threshold)
+    labeler = Labeler(
+        horizon=horizons, 
+        threshold=args.threshold, 
+        dynamic_threshold=False  # Выключаем авто-подбор, переходим на ручное управление
+    )
     
     if args.data_mode == "streaming":
         df = labeler.add_labels(df)

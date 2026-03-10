@@ -10,7 +10,7 @@ class Labeler:
     - Может генерировать метки для нескольких горизонтов одновременно
     - Автоматически маскирует недоступные горизонты значением -100
     """
-    def __init__(self, horizon: Union[int, List[int]] = 100, threshold: float = 0.0005, dynamic_threshold: bool = True, window: int = 1000, K: float = 0.5):
+    def __init__(self, horizon: Union[int, List[int]] = 100, threshold: float = 0.0005, dynamic_threshold: bool = False, window: int = 1000, K: float = 0.5):
         """
         horizon (K): Горизонт предсказания в количестве событий (строк).
                      Может быть int (один горизонт) или List[int] (несколько горизонтов).
@@ -106,6 +106,8 @@ class Labeler:
         # Вывод статистики распределения классов для отладки (только для DataFrame)
         if not is_lazy:
             print(f"\n[{self.__class__.__name__}] Labels distribution:")
+            if not self.dynamic_threshold:
+                print(f"  [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: {self.threshold:.6f} ({self.threshold*100:.2f}%)")
             print(f"  Horizons: {self.horizons}, Threshold: {self.threshold}")
             
             for label_col in label_columns:

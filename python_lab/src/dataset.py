@@ -836,7 +836,7 @@ class LOBDataset(Dataset):
         # .to_series().to_numpy() гарантирует, что мы получим плоский массив чисел
         raw_bid_sum = df.select(pl.sum_horizontal(bid_v_cols)).to_series().to_numpy().astype(np.float64)
         raw_ask_sum = df.select(pl.sum_horizontal(ask_v_cols)).to_series().to_numpy().astype(np.float64)
-        raw_prices = df[price_col].to_series().to_numpy().astype(np.float64)
+        raw_prices = df[price_col].to_numpy().astype(np.float64)
 
         # 2. Расчет VIB (теперь на 100% сырых данных)
         denom = raw_bid_sum + raw_ask_sum
@@ -1222,13 +1222,16 @@ class LOBDataset(Dataset):
         off = idx - self._cache_start_idx
         x_raw_current = self._cache_batch[off]
         
+        # Update current cache indices
+        self._current_cache_off = off
+
         return self._process_sample(
             x_raw_current, 
             self._cache_labels[off], 
             self._cache_vols[off], 
             self.sample_weights[idx], 
             torch.tensor(self.regime_ids[idx]).long(), 
-            idx=idx
+            idx=off # Using offset because caches in streaming are batch-local
         )
 
     def _process_sample(self, x_raw, y, v, w, regime_id, idx=None):
@@ -1282,9 +1285,8 @@ class LOBDataset(Dataset):
         
         # ch[4]: Trade Imbalance (VIB) - используем значение из кэша (Задача 308-3)
         if idx is not None and hasattr(self, 'vib_cache') and self.vib_cache is not None:
-            # Используем индекс конца окна для текущего значения признака
-            v_val = float(self.vib_cache[idx + self.seq_len - 1])
-            vib_ch = torch.full((x_raw.shape[0], 50), v_val, dtype=torch.float32)
+            v_seq = self.vib_cache[idx : idx + self.seq_len]
+            vib_ch = torch.from_numpy(v_seq.copy()).float().unsqueeze(-1).repeat(1, 50)
         elif self.vib_idx >= 0:
             vib = torch.from_numpy(x_raw[:, self.vib_idx].copy()).float()
             vib_ch = vib.unsqueeze(-1).repeat(1, 50)
@@ -1297,8 +1299,10 @@ class LOBDataset(Dataset):
         
         # ch[5]: Past Returns (100 тиков) - используем значение из кэша (Задача 308-3)
         if idx is not None and hasattr(self, 'past_ret_cache') and self.past_ret_cache is not None:
-            r_val = float(self.past_ret_cache[idx + self.seq_len - 1])
-            pr_ch = torch.full((x_raw.shape[0], 50), r_val, dtype=torch.float32)
+            r_seq = self.past_ret_cache[idx : idx + self.seq_len]
+            if r_seq.ndim > 1:
+                r_seq = r_seq[:, -1]
+            pr_ch = torch.from_numpy(r_seq.copy()).float().unsqueeze(-1).repeat(1, 50)
         elif self.past_ret_indices:
             pr_idx = self.past_ret_indices[-1]
             pr = torch.from_numpy(x_raw[:, pr_idx].copy()).float()

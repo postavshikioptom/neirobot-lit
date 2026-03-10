@@ -1,0 +1,98 @@
+ПОСЛЕ ЗАДАЧИ 308
+
+[Labeler] Labels distribution:
+  Horizons: [100], Threshold: 0.0005
+  single: {'label': [0, 1, 2], 'count': [149069, 269437, 273573]} | Masked: 0
+Initializing normalizer...
+Creating dataset in 'memory' mode (raw features)...
+[LOBDataset] Computing features from RAW data...
+[LOBDataset] Feature Map Verified: 6 channels, 50 levels. Total features: 300. Status: OK
+[LOBDataset] First Sample Statistics (SymLog applied):
+  Channel 0 (Price): min=-4.2309, max=3.6262, mean=-0.0728
+  Channel 1 (Vol): min=-1.4621, max=1.6363, mean=-0.0866
+  Channel 2 (Imb): min=-1.7050, max=2.1016, mean=0.0760
+  Channel 3 (OFI): min=-10.4854, max=6.7569, mean=-0.4892
+  Channel 4 (VIB): min=-0.3645, max=0.2074, mean=-0.2450
+  Channel 5 (PastRet): min=0.0000, max=0.0000, mean=0.0000
+[LOBDataset] Loaded 691980 samples. Data mode: memory
+
+.....
+Normalizer fitted on 484385 samples
+Applying normalization to all data subsets (preventing leakage)...
+Dataset split (Chronological): Train=484385, Val=103797, Test=103798
+Augmentation enabled for training: flip=False, jitter=0.1, prob=0.5
+Calculating class weights from training set...
+Effective class weights: [Flat: 1.46, Up: 0.79, Down: 0.76]
+Initializing model with loss: focal (gamma=2.0), activation: gelu_exact, scheduler: plateau
+Gradient clipping: mode=none, threshold=0.01
+.......
+Epoch 0 (10m 37s) Validation: MCC=0.0360, Macro-F1=0.1871, ECE=0.1629, MCE=0.1841
+✓ Reliability diagram saved to: /kaggle/reports/FARTCOINUSDT/reliability_diagram_epoch_0.png
+  Vol-MSE=1.007087, Vol-MAE=0.565010
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0360, F1=0.1871, Samples=103797
+warning: Embedding dir exists, did you set global_step for add_embedding()?
+✓ Logged 1000 embeddings to TensorBoard Projector
+
+Epoch 1 (5m 41s) Validation: MCC=0.0376, Macro-F1=0.2358, ECE=0.1298, MCE=0.3922
+  Vol-MSE=1.017204, Vol-MAE=0.539614
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0376, F1=0.2358, Samples=103797
+
+Epoch 2 (5m 40s) Validation: MCC=0.0055, Macro-F1=0.2725, ECE=0.1163, MCE=0.5105
+  Vol-MSE=1.218032, Vol-MAE=0.581799
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0055, F1=0.2725, Samples=103797
+
+Epoch 3 (5m 41s) Validation: MCC=0.0007, Macro-F1=0.2672, ECE=0.1533, MCE=0.5847
+  Vol-MSE=1.223743, Vol-MAE=0.607086
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0007, F1=0.2672, Samples=103797
+
+Epoch 4 (5m 42s) Validation: MCC=0.0053, Macro-F1=0.2629, ECE=0.1930, MCE=0.4568
+  Vol-MSE=1.289566, Vol-MAE=0.634764
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0053, F1=0.2629, Samples=103797
+
+Epoch 5 (5m 39s) Validation: MCC=0.0211, Macro-F1=0.3319, ECE=0.1312, MCE=0.5000
+✓ Reliability diagram saved to: /kaggle/reports/FARTCOINUSDT/reliability_diagram_epoch_5.png
+  Vol-MSE=1.257315, Vol-MAE=0.615688
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0211, F1=0.3319, Samples=103797
+
+Epoch 6 (5m 37s) Validation: MCC=0.0118, Macro-F1=0.3281, ECE=0.1689, MCE=0.7730
+  Vol-MSE=1.455007, Vol-MAE=0.659046
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0118, F1=0.3281, Samples=103797
+
+Epoch 7 (5m 40s) Validation: MCC=0.0129, Macro-F1=0.3300, ECE=0.1869, MCE=0.7060
+  Vol-MSE=1.323583, Vol-MAE=0.646668
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0129, F1=0.3300, Samples=103797
+
+Epoch 8 (5m 41s) Validation: MCC=0.0089, Macro-F1=0.3249, ECE=0.2124, MCE=0.7395
+  Vol-MSE=1.430489, Vol-MAE=0.670484
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0089, F1=0.3249, Samples=103797
+
+Epoch 9 (5m 41s) Validation: MCC=0.0100, Macro-F1=0.3262, ECE=0.2213, MCE=0.7321
+  Vol-MSE=1.383781, Vol-MAE=0.667457
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0100, F1=0.3262, Samples=103797
+
+Epoch 10 (10m 46s) Validation: MCC=0.0060, Macro-F1=0.3287, ECE=0.2338, MCE=0.5733
+✓ Reliability diagram saved to: /kaggle/reports/FARTCOINUSDT/reliability_diagram_epoch_10.png
+  Vol-MSE=1.600835, Vol-MAE=0.715948
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0060, F1=0.3287, Samples=103797
