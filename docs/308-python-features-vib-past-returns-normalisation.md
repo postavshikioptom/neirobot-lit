@@ -226,6 +226,88 @@ Grok предложил использовать `fit_transform` в `dataset.py`
 **Твоему АИ кодеру нужно просто "прокинуть" индекс `idx` от самого верха (`__getitem__`) до самого низа (`_process_sample`).** Это как вставить вилку в розетку — ток (данные) есть, но прибор не включен.
 ==================
 
+# ЗАДАЧА 308-4: Исправление расчета индикаторов, чтоб считались до номрализации данных
+Я детально изучил диагноз Grok и **полностью с ним согласен**. Это классическая ошибка «порядка операций». 
+
+### В чем корень проблемы (Подтверждение диагноза):
+В текущем коде `dataset.py` расчет VIB и PastRet происходит в методе `_init_memory_mode` **после** того, как основные данные (`self.data`) уже прошли через `Normalizer`. 
+1. **Для VIB**: Объемы (`bid_v`, `ask_v`) нормализованы через `RobustScaler`. Их медиана становится `0`. Когда мы считаем `(0 - 0) / (0 + 0)`, мы получаем либо `0`, либо мусор из-за деления на микро-числа.
+2. **Для PastRet**: Цены также нормализованы. Разница между нормализованными ценами — это крошечные значения, которые после округления в `float32` превращаются в `0.0000`.
+
+**Нам нужны сырые (raw) значения для расчетов, а нормализация должна идти в самом конце.**
+
+---
+
+## План задачи 308-4: Реструктуризация конвейера признаков
+
+### Подзадача 1: Перенос расчета ДО нормализации в `memory` mode
+**Файл**: [./python_lab/src/dataset.py](./python_lab/src/dataset.py)
+**Что сделать**: В методе `_init_memory_mode` изменить порядок действий.
+1. Сначала извлечь сырые данные из `df` (который еще не нормализован).
+2. Рассчитать `VIB` и `PastRet` на этих сырых данных.
+3. Сохранить их в `self.vib_cache` и `self.past_ret_cache`.
+4. И только ПОТОМ запускать основную нормализацию `self.data`.
+
+**Код для замены (в `_init_memory_mode`):**
+```python
+        # 1. РАСЧЕТ ИЗ СЫРЫХ ДАННЫХ (ДО НОРМАЛИЗАЦИИ)
+        print(f"[LOBDataset] Computing features from RAW data...")
+        
+        # Извлекаем все колонки объемов и цен из исходного Polars DataFrame (df)
+        bid_cols = [c for c in df.columns if "bid_v_" in c]
+        ask_cols = [c for c in df.columns if "ask_v_" in c]
+        price_col = "mid_price" if "mid_price" in df.columns else df.columns[0] # берем первую цену
+        
+        # Считаем VIB на сырых объемах
+        raw_bid_sum = df.select(pl.sum_horizontal(bid_cols)).to_numpy().flatten()
+        raw_ask_sum = df.select(pl.sum_horizontal(ask_cols)).to_numpy().flatten()
+        denom = raw_bid_sum + raw_ask_sum
+        self.vib_cache = np.where(denom > 1e-9, (raw_bid_sum - raw_ask_sum) / (denom + 1e-9), 0.0)
+
+        # Считаем PastRet на сырых ценах
+        raw_prices = df[price_col].to_numpy()
+        log_prices = np.log(np.maximum(raw_prices, 1e-9))
+        self.past_ret_cache = np.zeros(len(raw_prices), dtype=np.float32)
+        lag = 100
+        if len(log_prices) > lag:
+            self.past_ret_cache[lag:] = log_prices[lag:] - log_prices[:-lag]
+
+        # 2. НОРМАЛИЗАЦИЯ НОВЫХ ПРИЗНАКОВ
+        # (Используем временный Normalizer как в плане 308-2)
+        temp_df = pl.DataFrame({
+            "feat_vib_val": self.vib_cache.astype(np.float32),
+            "feat_past_ret_val": self.past_ret_cache.astype(np.float32)
+        })
+        norm_temp = Normalizer(output_path=None)
+        norm_temp.scaler_type = self.scaler_type
+        norm_temp.winsor_limits = self.winsor_limits
+        norm_temp.fit(temp_df)
+        transformed = norm_temp.transform(temp_df)
+        
+        self.vib_cache = transformed["feat_vib_val"].to_numpy()
+        self.past_ret_cache = transformed["feat_past_ret_val"].to_numpy()
+
+        # 3. ТЕПЕРЬ НОРМАЛИЗУЕМ ОСНОВНЫЕ ДАННЫЕ
+        # (Тут идет старый код нормализации self.data)
+```
+
+### Подзадача 2: Исправление Fallback-логики в `_process_sample`
+**Файл**: [./python_lab/src/dataset.py](./python_lab/src/dataset.py)
+**Что сделать**: Если вдруг кэша нет (например, в `streaming` режиме), расчет "на лету" тоже должен учитывать, что `x_raw` уже нормализован. 
+**Решение**: В `streaming` моде **запретить** расчет VIB из нормализованного `x_raw`. Либо передавать в `_process_sample` сырой батч, либо (лучше) вычислять VIB/PastRet в момент загрузки батча в память, **до** того как он попадет в `Normalizer`.
+
+### Подзадача 3: Унификация имен в `memmap` и `memory`
+**Что сделать**: Проверить, что функции `compute_depth_imbalance_globally` и `compute_past_returns_globally` возвращают данные в том же формате, что и наш новый кэш, чтобы `_process_sample` работал одинаково для всех режимов.
+
+---
+
+### Почему это сработает?
+Когда мы считаем VIB на **сырых** объемах (например, `Bid=100`, `Ask=50`), мы получаем четкий сигнал `(100-50)/(100+50) = 0.33`. 
+Если мы сначала нормализуем их (например, `RobustScaler` превратит `100` в `0.1`, а `50` в `-0.1`), то мы получим `(0.1 - (-0.1)) / (0.1 + (-0.1)) = 0.2 / 0 = ОШИБКА/НУЛЬ`. 
+
+**Твой АИ кодер должен просто переставить блоки кода местами: Сначала расчёты индикаторов из DataFrame -> Потом нормализация всего.**
+
+Ждем реализации 308-4, и нули в 4, 5 каналах исчезнут навсегда.
 
 
 

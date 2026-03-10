@@ -824,6 +824,49 @@ class LOBDataset(Dataset):
         if not isinstance(df, pl.DataFrame):
             raise TypeError("For 'memory' mode, df must be a pl.DataFrame")
         
+        # 1. РАСЧЕТ ИЗ СЫРЫХ ДАННЫХ (ДО НОРМАЛИЗАЦИИ)
+        # Задача 308-4: Расчет индикаторов до нормализации основных данных
+        print(f"[{self.__class__.__name__}] Computing features from RAW data...")
+        
+        bid_v_cols = [f"feat_bid_v_{i}" for i in range(self.n_levels)]
+        ask_v_cols = [f"feat_ask_v_{i}" for i in range(self.n_levels)]
+        price_col = "mid_price" if "mid_price" in df.columns else df.columns[0]
+        
+        # 1. Извлекаем сырые данные как ВЕКТОРЫ (1D arrays)
+        # .to_series().to_numpy() гарантирует, что мы получим плоский массив чисел
+        raw_bid_sum = df.select(pl.sum_horizontal(bid_v_cols)).to_series().to_numpy().astype(np.float64)
+        raw_ask_sum = df.select(pl.sum_horizontal(ask_v_cols)).to_series().to_numpy().astype(np.float64)
+        raw_prices = df[price_col].to_series().to_numpy().astype(np.float64)
+
+        # 2. Расчет VIB (теперь на 100% сырых данных)
+        denom = raw_bid_sum + raw_ask_sum
+        # Используем маску, чтобы не делить на ноль, и считаем разницу
+        v_diff = raw_bid_sum - raw_ask_sum
+        self.vib_cache = np.where(denom > 1e-6, v_diff / (denom + 1e-6), 0.0).astype(np.float32)
+
+        # 3. Расчет PastRet
+        log_p = np.log(np.maximum(raw_prices, 1e-9))
+        self.past_ret_cache = np.zeros(len(log_p), dtype=np.float32)
+        lag = 100
+        if len(log_p) > lag:
+            self.past_ret_cache[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
+
+        # 4. Нормализация (ВАЖНО: проверяем, что в temp_df именно 1D массивы)
+        temp_df_indicators = pl.DataFrame({
+            "feat_vib_val": self.vib_cache,
+            "feat_past_ret_val": self.past_ret_cache
+        })
+        norm_temp = Normalizer(output_path=None)
+        norm_temp.scaler_type = self.scaler_type
+        norm_temp.winsor_limits = self.winsor_limits
+        norm_temp.fit(temp_df_indicators)
+        transformed_indicators = norm_temp.transform(temp_df_indicators)
+        
+        self.vib_cache = transformed_indicators["feat_vib_val"].to_numpy().astype(np.float32)
+        self.past_ret_cache = transformed_indicators["feat_past_ret_val"].to_numpy().astype(np.float32)
+        self.has_computed_features = True
+
+        # 3. ПОДГОТОВКА И НОРМАЛИЗАЦИЯ ОСНОВНЫХ ДАННЫХ
         # Строго заданный порядок признаков LOB (Задача 304)
         feat_cols = [f"feat_ask_p_{i}" for i in range(self.n_levels)] + \
                     [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
@@ -842,19 +885,6 @@ class LOBDataset(Dataset):
         
         # Задача 306.2.2: Инициализируем именованные индексы
         self._setup_feature_indices()
-
-        # Задача 308: Извлечение сырых bid_v и ask_v для расчета VIB
-        bid_v_cols = [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-        ask_v_cols = [f"feat_ask_v_{i}" for i in range(self.n_levels)]
-        
-        # Проверяем наличие колонок в df
-        has_bid_v = all(c in df.columns for c in bid_v_cols)
-        has_ask_v = all(c in df.columns for c in ask_v_cols)
-        has_mid_price = "mid_price" in df.columns
-        
-        # Инициализируем кэши как None, заполним позже
-        self.vib_cache = None
-        self.past_ret_cache = None
 
         if self.scaler_type in ("robust", "winsor_robust"):
             norm = Normalizer(output_path="norm_params.json")
@@ -892,65 +922,22 @@ class LOBDataset(Dataset):
         if "timestamp_ms" in sequence_df.columns:
             self.timestamps = sequence_df.select(pl.col("timestamp_ms")).to_series().to_numpy()
         else:
-            # Если таймстампов нет (удалены в load_multi_symbol_data), используем индексы
             self.timestamps = np.arange(len(sequence_df), dtype=np.int64)
         
-        # Задача 308: Извлекаем mid_prices для использования в кэшировании
-        mid_prices = None
+        # Расчет волатильности для взвешивания или адаптивного порога
         if "mid_price" in df.columns:
             mid_prices = df["mid_price"].to_numpy()
             self.vols = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
         else:
             self.vols = np.zeros(len(self.labels) - self.seq_len + 1, dtype=np.float32)
 
-        # --- ИСПРАВЛЕННЫЙ БЛОК ЗАДАЧИ 308-2 ---
-        print(f"[LOBDataset] Computing on-the-fly features: VIB and PastReturns...")
+        weight_labels = self.labels[self.seq_len-1:]
+        self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
         
-        # 1. Расчет VIB (Volume Imbalance)
-        # Суммируем объемы напрямую по индексам масок
-        bid_v_sum = self.features[:, self.bid_v_indices].sum(axis=1) 
-        ask_v_sum = self.features[:, self.ask_v_indices].sum(axis=1)
-        denom = bid_v_sum + ask_v_sum
-        
-        # VIB с защитой от деления на 0
-        self.vib_cache = np.where(denom > 1e-9, (bid_v_sum - ask_v_sum) / (denom + 1e-9), 0.0).astype(np.float32)
-
-        # 2. Расчет PastRet (Log Returns) 
-        # Используем mid_price из DataFrame, который мы извлекли выше (строка 901)
-        # Если mid_prices нет, используем прокси из features (среднее ask/bid 0 уровня)
-        if mid_prices is None:
-            # ask_p_0 (0) и bid_p_0 (100) - это прокси для mid_price
-            prices = (self.features[:, self.ask_p_indices[0]] + self.features[:, self.bid_p_indices[0]]) / 2.0
-        else:
-            prices = mid_prices
-            
-        log_prices = np.log(np.maximum(prices, 1e-9))
-        self.past_ret_cache = np.zeros(len(prices), dtype=np.float32)
-        
-        lag = 100
-        if len(log_prices) > lag:
-            # Правильный расчет: разница между текущей ценой и ценой 100 шагов назад
-            self.past_ret_cache[lag:] = log_prices[lag:] - log_prices[:-lag]
-
-        # 3. Нормализация через временный DataFrame с правильными префиксами feat_
-        temp_df = pl.DataFrame({
-            "feat_vib_val": self.vib_cache,
-            "feat_past_ret_val": self.past_ret_cache
-        })
-        
-        norm_temp = Normalizer(output_path=None)
-        norm_temp.scaler_type = self.scaler_type
-        norm_temp.winsor_limits = self.winsor_limits
-        
-        norm_temp.fit(temp_df)
-        transformed = norm_temp.transform(temp_df)
-        
-        self.vib_cache = transformed["feat_vib_val"].to_numpy().astype(np.float32)
-        self.past_ret_cache = transformed["feat_past_ret_val"].to_numpy().astype(np.float32)
-        
-        self.has_computed_features = True
-        print(f"[LOBDataset] Features VIB and PastRet computed and normalized (Robust).")
-        # --------------------------------------
+        self.regime_ids = np.zeros(len(self.features) - self.seq_len + 1, dtype=np.int64)
+        if self.regime_detector and self.regime_detector.is_fitted:
+            regime_features = compute_regime_features(df, window=self.regime_window)
+            self.regime_ids = self.regime_detector.predict_states(regime_features)[self.seq_len - 1:]
 
         weight_labels = self.labels[self.seq_len-1:]
         self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
@@ -1135,13 +1122,11 @@ class LOBDataset(Dataset):
             # Нормализация
             temp_df = pl.DataFrame({
                 "feat_vib": vib_raw.astype(np.float32),
-                "feat_pr10": past_ret_raw[:, 0].astype(np.float32),
-                "feat_pr50": past_ret_raw[:, 1].astype(np.float32),
-                "feat_pr100": past_ret_raw[:, 2].astype(np.float32)
+                "feat_past_ret": past_ret_raw[:, -1].astype(np.float32)
             })
             
             if temp_df.height > 0 and self.scaler_type in ("robust", "winsor_robust"):
-                norm_cache = Normalizer(output_path="norm_params_cache.json")
+                norm_cache = Normalizer(output_path=None)
                 norm_cache.scaler_type = self.scaler_type
                 norm_cache.winsor_limits = self.winsor_limits
                 norm_cache.fit(temp_df)
@@ -1149,17 +1134,15 @@ class LOBDataset(Dataset):
                 
                 # Создаем memmap файлы и записываем данные
                 self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
-                self.vib_cache[:] = temp_norm["feat_vib"].to_numpy()
+                self.vib_cache[:] = temp_norm["feat_vib"].to_numpy().astype(np.float32)
                 
-                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=past_ret_raw.shape)
-                self.past_ret_cache[:, 0] = temp_norm["feat_feat_pr10"].to_numpy() if "feat_feat_pr10" in temp_norm else temp_norm["feat_pr10"].to_numpy()
-                self.past_ret_cache[:, 1] = temp_norm["feat_feat_pr50"].to_numpy() if "feat_feat_pr50" in temp_norm else temp_norm["feat_pr50"].to_numpy()
-                self.past_ret_cache[:, 2] = temp_norm["feat_feat_pr100"].to_numpy() if "feat_feat_pr100" in temp_norm else temp_norm["feat_pr100"].to_numpy()
+                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+                self.past_ret_cache[:] = temp_norm["feat_past_ret"].to_numpy().astype(np.float32)
             else:
                 self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
                 self.vib_cache[:] = vib_raw.astype(np.float32)
-                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=past_ret_raw.shape)
-                self.past_ret_cache[:] = past_ret_raw.astype(np.float32)
+                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+                self.past_ret_cache[:] = past_ret_raw[:, -1].astype(np.float32)
             
             self.vib_cache.flush()
             self.past_ret_cache.flush()
@@ -1188,6 +1171,41 @@ class LOBDataset(Dataset):
             start = idx
             batch_df = self.lazy_df.slice(start, self._batch_size + self.seq_len - 1).collect(streaming=True)
             
+            # Задача 308-4: Расчет индикаторов до нормализации в streaming моде
+            bid_cols = [f"feat_bid_v_{i}" for i in range(self.n_levels)]
+            ask_cols = [f"feat_ask_v_{i}" for i in range(self.n_levels)]
+            
+            raw_bid_sum = batch_df.select(pl.sum_horizontal(bid_cols)).to_numpy().flatten()
+            raw_ask_sum = batch_df.select(pl.sum_horizontal(ask_cols)).to_numpy().flatten()
+            denom = raw_bid_sum + raw_ask_sum
+            vib_raw = np.where(denom > 1e-9, (raw_bid_sum - raw_ask_sum) / (denom + 1e-9), 0.0).astype(np.float32)
+            
+            mid_prices = batch_df["mid_price"].to_numpy()
+            log_prices = np.log(np.maximum(mid_prices, 1e-9))
+            past_ret_raw = np.zeros(len(mid_prices), dtype=np.float32)
+            if len(log_prices) > self.seq_len: # Используем seq_len как лаг в streaming моде
+                past_ret_raw[self.seq_len:] = log_prices[self.seq_len:] - log_prices[:-self.seq_len]
+            
+            # Нормализация индикаторов
+            temp_df_ind = pl.DataFrame({"feat_vib_val": vib_raw, "feat_past_ret_val": past_ret_raw})
+            norm_temp = Normalizer(output_path=None)
+            norm_temp.scaler_type = self.scaler_type
+            norm_temp.winsor_limits = self.winsor_limits
+            norm_temp.fit(temp_df_ind)
+            transformed_ind = norm_temp.transform(temp_df_ind)
+            
+            self.vib_cache = transformed_ind["feat_vib_val"].to_numpy().astype(np.float32)
+            self.past_ret_cache = transformed_ind["feat_past_ret_val"].to_numpy().astype(np.float32)
+            
+            # Нормализация основных признаков
+            if self.scaler_type in ("robust", "winsor_robust") and hasattr(self, 'robust_params') and self.robust_params:
+                # В streaming моде мы предполагаем, что параметры уже загружены
+                norm = Normalizer(output_path=None)
+                norm.params = self.robust_params
+                norm.scaler_type = self.scaler_type
+                norm.feature_order = self.feat_cols
+                batch_df = norm.transform(batch_df)
+
             # Формирование последовательностей
             feat_data = batch_df.select(self.feat_cols).to_numpy()
             self._cache_batch = np.stack([feat_data[i:i+self.seq_len] for i in range(len(batch_df) - self.seq_len + 1)], axis=0)
@@ -1202,8 +1220,6 @@ class LOBDataset(Dataset):
             self._cache_start_idx, self._cache_end_idx = start, start + len(self._cache_labels)
 
         off = idx - self._cache_start_idx
-        
-        # Задача 308: Расчет VIB и PastRet для текущего сэмпла в потоке (on-the-fly)
         x_raw_current = self._cache_batch[off]
         
         return self._process_sample(
