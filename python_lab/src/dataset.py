@@ -903,55 +903,54 @@ class LOBDataset(Dataset):
         else:
             self.vols = np.zeros(len(self.labels) - self.seq_len + 1, dtype=np.float32)
 
-        # Задача 308: Вычисление VIB и Past Returns on-the-fly с нормализацией
-        if has_bid_v and has_ask_v and mid_prices is not None:
-            print(f"[{self.__class__.__name__}] Computing on-the-fly features: VIB and PastReturns...")
-            
-            # Извлекаем сырые объемы bid и ask
-            bid_v_raw = df.select(bid_v_cols).to_numpy()  # (N, 50)
-            ask_v_raw = df.select(ask_v_cols).to_numpy()  # (N, 50)
-            
-            # Вычисляем VIB глобально
-            vib_raw = compute_depth_imbalance_globally(bid_v_raw, ask_v_raw)  # (N,)
-            
-            # Вычисляем Past Returns глобально
-            past_ret_raw = compute_past_returns_globally(mid_prices, lags=self.past_returns_lags)  # (N, 3)
-            
-            # Создаем временный DataFrame для нормализации
-            temp_df = pl.DataFrame({
-                "vib": vib_raw,
-                "past_ret_10": past_ret_raw[:, 0],
-                "past_ret_50": past_ret_raw[:, 1],
-                "past_ret_100": past_ret_raw[:, 2]
-            })
-            
-            # Применяем ту же нормализацию, что и к основным признакам
-            if self.scaler_type in ("robust", "winsor_robust"):
-                norm_cache = Normalizer(output_path="norm_params_cache.json")
-                norm_cache.scaler_type = self.scaler_type
-                norm_cache.winsor_limits = self.winsor_limits
-                norm_cache.fit(temp_df, winsor_limits=self.winsor_limits)
-                temp_df_norm = norm_cache.transform(temp_df)
-                
-                # Сохраняем нормализованные значения в кэши
-                self.vib_cache = temp_df_norm["vib"].to_numpy().astype(np.float32)
-                self.past_ret_cache = np.column_stack([
-                    temp_df_norm["past_ret_10"].to_numpy(),
-                    temp_df_norm["past_ret_50"].to_numpy(),
-                    temp_df_norm["past_ret_100"].to_numpy()
-                ]).astype(np.float32)
-            else:
-                # Если нормализация не используется, сохраняем сырые значения
-                self.vib_cache = vib_raw.astype(np.float32)
-                self.past_ret_cache = past_ret_raw.astype(np.float32)
-            
-            print(f"[{self.__class__.__name__}] On-the-fly features generated and normalized via {self.scaler_type}")
+        # --- ИСПРАВЛЕННЫЙ БЛОК ЗАДАЧИ 308-2 ---
+        print(f"[LOBDataset] Computing on-the-fly features: VIB and PastReturns...")
+        
+        # 1. Расчет VIB (Volume Imbalance)
+        # Суммируем объемы напрямую по индексам масок
+        bid_v_sum = self.features[:, self.bid_v_indices].sum(axis=1) 
+        ask_v_sum = self.features[:, self.ask_v_indices].sum(axis=1)
+        denom = bid_v_sum + ask_v_sum
+        
+        # VIB с защитой от деления на 0
+        self.vib_cache = np.where(denom > 1e-9, (bid_v_sum - ask_v_sum) / (denom + 1e-9), 0.0).astype(np.float32)
+
+        # 2. Расчет PastRet (Log Returns) 
+        # Используем mid_price из DataFrame, который мы извлекли выше (строка 901)
+        # Если mid_prices нет, используем прокси из features (среднее ask/bid 0 уровня)
+        if mid_prices is None:
+            # ask_p_0 (0) и bid_p_0 (100) - это прокси для mid_price
+            prices = (self.features[:, self.ask_p_indices[0]] + self.features[:, self.bid_p_indices[0]]) / 2.0
         else:
-            # Если данных нет, создаем пустые кэши
-            n_samples = len(self.features)
-            self.vib_cache = np.zeros(n_samples, dtype=np.float32)
-            self.past_ret_cache = np.zeros((n_samples, len(self.past_returns_lags)), dtype=np.float32)
-            print(f"[{self.__class__.__name__}] Warning: Missing bid_v, ask_v or mid_price. VIB and PastRet will be zeros.")
+            prices = mid_prices
+            
+        log_prices = np.log(np.maximum(prices, 1e-9))
+        self.past_ret_cache = np.zeros(len(prices), dtype=np.float32)
+        
+        lag = 100
+        if len(log_prices) > lag:
+            # Правильный расчет: разница между текущей ценой и ценой 100 шагов назад
+            self.past_ret_cache[lag:] = log_prices[lag:] - log_prices[:-lag]
+
+        # 3. Нормализация через временный DataFrame с правильными префиксами feat_
+        temp_df = pl.DataFrame({
+            "feat_vib_val": self.vib_cache,
+            "feat_past_ret_val": self.past_ret_cache
+        })
+        
+        norm_temp = Normalizer(output_path=None)
+        norm_temp.scaler_type = self.scaler_type
+        norm_temp.winsor_limits = self.winsor_limits
+        
+        norm_temp.fit(temp_df)
+        transformed = norm_temp.transform(temp_df)
+        
+        self.vib_cache = transformed["feat_vib_val"].to_numpy().astype(np.float32)
+        self.past_ret_cache = transformed["feat_past_ret_val"].to_numpy().astype(np.float32)
+        
+        self.has_computed_features = True
+        print(f"[LOBDataset] Features VIB and PastRet computed and normalized (Robust).")
+        # --------------------------------------
 
         weight_labels = self.labels[self.seq_len-1:]
         self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
@@ -1135,26 +1134,32 @@ class LOBDataset(Dataset):
             
             # Нормализация
             temp_df = pl.DataFrame({
-                "vib": vib_raw,
-                "pr10": past_ret_raw[:, 0],
-                "pr50": past_ret_raw[:, 1],
-                "pr100": past_ret_raw[:, 2]
+                "feat_vib": vib_raw.astype(np.float32),
+                "feat_pr10": past_ret_raw[:, 0].astype(np.float32),
+                "feat_pr50": past_ret_raw[:, 1].astype(np.float32),
+                "feat_pr100": past_ret_raw[:, 2].astype(np.float32)
             })
             
-            norm_cache = Normalizer(output_path="norm_params_cache.json")
-            norm_cache.scaler_type = self.scaler_type
-            norm_cache.winsor_limits = self.winsor_limits
-            norm_cache.fit(temp_df, winsor_limits=self.winsor_limits)
-            temp_norm = norm_cache.transform(temp_df)
-            
-            # Создаем memmap файлы и записываем данные
-            self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
-            self.vib_cache[:] = temp_norm["vib"].to_numpy()
-            
-            self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=past_ret_raw.shape)
-            self.past_ret_cache[:, 0] = temp_norm["pr10"].to_numpy()
-            self.past_ret_cache[:, 1] = temp_norm["pr50"].to_numpy()
-            self.past_ret_cache[:, 2] = temp_norm["pr100"].to_numpy()
+            if temp_df.height > 0 and self.scaler_type in ("robust", "winsor_robust"):
+                norm_cache = Normalizer(output_path="norm_params_cache.json")
+                norm_cache.scaler_type = self.scaler_type
+                norm_cache.winsor_limits = self.winsor_limits
+                norm_cache.fit(temp_df)
+                temp_norm = norm_cache.transform(temp_df)
+                
+                # Создаем memmap файлы и записываем данные
+                self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+                self.vib_cache[:] = temp_norm["feat_vib"].to_numpy()
+                
+                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=past_ret_raw.shape)
+                self.past_ret_cache[:, 0] = temp_norm["feat_feat_pr10"].to_numpy() if "feat_feat_pr10" in temp_norm else temp_norm["feat_pr10"].to_numpy()
+                self.past_ret_cache[:, 1] = temp_norm["feat_feat_pr50"].to_numpy() if "feat_feat_pr50" in temp_norm else temp_norm["feat_pr50"].to_numpy()
+                self.past_ret_cache[:, 2] = temp_norm["feat_feat_pr100"].to_numpy() if "feat_feat_pr100" in temp_norm else temp_norm["feat_pr100"].to_numpy()
+            else:
+                self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+                self.vib_cache[:] = vib_raw.astype(np.float32)
+                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=past_ret_raw.shape)
+                self.past_ret_cache[:] = past_ret_raw.astype(np.float32)
             
             self.vib_cache.flush()
             self.past_ret_cache.flush()
@@ -1176,19 +1181,7 @@ class LOBDataset(Dataset):
         w = self.sample_weights[idx]
         regime_id = torch.tensor(self.regime_ids[idx]).long()
         
-        # Задача 308: Извлечение значений VIB и PastRet из кэшей
-        vib_val = None
-        past_ret_val = None
-        
-        if self.vib_cache is not None and self.data_mode == "memory":
-            # Для memory режима берем значение по индексу последнего элемента последовательности
-            vib_val = self.vib_cache[idx + self.seq_len - 1]
-        
-        if self.past_ret_cache is not None and self.data_mode == "memory":
-            # Берем последний лаг (индекс -1, это лаг 100)
-            past_ret_val = self.past_ret_cache[idx + self.seq_len - 1, -1]
-        
-        return self._process_sample(x_raw, y, v, w, regime_id, vib_val, past_ret_val)
+        return self._process_sample(x_raw, y, v, w, regime_id, idx=idx)
 
     def _getitem_streaming(self, idx):
         if self._cache_batch is None or not (self._cache_start_idx <= idx < self._cache_end_idx):
@@ -1213,26 +1206,16 @@ class LOBDataset(Dataset):
         # Задача 308: Расчет VIB и PastRet для текущего сэмпла в потоке (on-the-fly)
         x_raw_current = self._cache_batch[off]
         
-        # Вычисляем VIB из последнего шага последовательности
-        bv = x_raw_current[-1, self.bid_v_indices]
-        av = x_raw_current[-1, self.ask_v_indices]
-        vib_val = (bv.sum() - av.sum()) / (bv.sum() + av.sum() + 1e-8)
-        
-        # Вычисляем Past Return за окно seq_len (от первого до последнего шага)
-        # Используем первую колонку (ask_p_0) как прокси для mid_price
-        past_ret_val = np.log(max(x_raw_current[-1, 0], 1e-10)) - np.log(max(x_raw_current[0, 0], 1e-10))
-        
         return self._process_sample(
             x_raw_current, 
             self._cache_labels[off], 
             self._cache_vols[off], 
             self.sample_weights[idx], 
-            torch.tensor(0).long(), 
-            vib_val, 
-            past_ret_val
+            torch.tensor(self.regime_ids[idx]).long(), 
+            idx=idx
         )
 
-    def _process_sample(self, x_raw, y, v, w, regime_id, vib_val=None, past_ret_val=None):
+    def _process_sample(self, x_raw, y, v, w, regime_id, idx=None):
         from .normalization import symlog_transform
         # NaN protection (Задача 094-2)
         x_raw = np.nan_to_num(x_raw, nan=0.0)
@@ -1281,37 +1264,33 @@ class LOBDataset(Dataset):
             ofi = (delta_bid - delta_ask).cumsum(dim=0)
         ofi_ch = ofi.unsqueeze(-1).repeat(1, 50)
         
-        # ch[4]: Trade Imbalance (VIB) - используем значение из кэша или fallback
-        # Задача 308: Приоритет отдается vib_val из кэша
-        if vib_val is not None:
-            # Используем нормализованное значение из кэша
-            vib = torch.full((ask_p.shape[0],), vib_val, dtype=torch.float32)
+        # ch[4]: Trade Imbalance (VIB) - используем значение из кэша (Задача 308-3)
+        if idx is not None and hasattr(self, 'vib_cache') and self.vib_cache is not None:
+            # Используем индекс конца окна для текущего значения признака
+            v_val = float(self.vib_cache[idx + self.seq_len - 1])
+            vib_ch = torch.full((x_raw.shape[0], 50), v_val, dtype=torch.float32)
         elif self.vib_idx >= 0:
             vib = torch.from_numpy(x_raw[:, self.vib_idx].copy()).float()
+            vib_ch = vib.unsqueeze(-1).repeat(1, 50)
         else:
-            # Fallback
-            if self.trade_vol_idx >= 0 and self.trade_side_idx >= 0:
-                tr_v = torch.from_numpy(x_raw[:, self.trade_vol_idx].copy()).float()
-                tr_s = torch.from_numpy(x_raw[:, self.trade_side_idx].copy()).float()
-                vib = (tr_v * tr_s).cumsum(dim=0)
-            else:
-                vib = torch.zeros(ask_p.shape[0], device=ask_p.device)
-        vib_ch = vib.unsqueeze(-1).repeat(1, 50)
+            # Fallback на расчет на лету
+            bv_sum = bid_v.sum(dim=1)
+            av_sum = ask_v.sum(dim=1)
+            v_val = (bv_sum[-1] - av_sum[-1]) / (bv_sum[-1] + av_sum[-1] + 1e-8)
+            vib_ch = torch.full((x_raw.shape[0], 50), v_val.item(), dtype=torch.float32)
         
-        # ch[5]: Past Returns (100 тиков) - используем значение из кэша или fallback
-        # Задача 308: Приоритет отдается past_ret_val из кэша
-        if past_ret_val is not None:
-            # Используем нормализованное значение из кэша (лаг 100)
-            pr = torch.full((ask_p.shape[0],), past_ret_val, dtype=torch.float32)
+        # ch[5]: Past Returns (100 тиков) - используем значение из кэша (Задача 308-3)
+        if idx is not None and hasattr(self, 'past_ret_cache') and self.past_ret_cache is not None:
+            r_val = float(self.past_ret_cache[idx + self.seq_len - 1])
+            pr_ch = torch.full((x_raw.shape[0], 50), r_val, dtype=torch.float32)
         elif self.past_ret_indices:
-            # Пытаемся взять лаг 100 (обычно последний в списке, если lags=[10, 50, 100])
-            # Для простоты берем первый доступный из найденных, если 100 нет
-            pr_idx = self.past_ret_indices[-1] # Предполагаем, что самый длинный лаг последний
-            # Задача 306.3.2: Убрано умножение на 100.0, так как RobustScaler уже нормализовал данные
+            pr_idx = self.past_ret_indices[-1]
             pr = torch.from_numpy(x_raw[:, pr_idx].copy()).float()
+            pr_ch = pr.unsqueeze(-1).repeat(1, 50)
         else:
-            pr = torch.zeros(ask_p.shape[0], device=ask_p.device)
-        pr_ch = pr.unsqueeze(-1).repeat(1, 50)
+            # Fallback на расчет на лету (логарифмическая доходность за окно)
+            r_val = torch.log(torch.max(ask_p[-1, 0], torch.tensor(1e-10))) - torch.log(torch.max(ask_p[0, 0], torch.tensor(1e-10)))
+            pr_ch = torch.full((x_raw.shape[0], 50), r_val.item(), dtype=torch.float32)
         
         # Собираем итоговый тензор (Seq, 6, 50)
         x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)

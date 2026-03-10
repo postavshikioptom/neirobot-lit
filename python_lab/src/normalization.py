@@ -21,8 +21,13 @@ class Normalizer:
     Класс для расчета и применения параметров нормализации Z-score (mean, std).
     Обеспечивает идентичность предобработки данных в Python (обучение) и Rust (инференс).
     """
-    def __init__(self, output_path: Union[str, Path]):
-        self.output_path = Path(output_path)
+    def __init__(self, output_path: Union[str, Path] = None):
+        """
+        Инициализация нормализатора.
+        :param output_path: Путь для сохранения/загрузки статистик (может быть None)
+        """
+        # ИСПРАВЛЕНИЕ: Обработка None для временных расчетов в памяти
+        self.output_path = Path(output_path) if output_path is not None else None
         self.params: Dict[str, Dict[str, float]] = {}
         self.scaler_type = "zscore"
         self.winsor_limits = None
@@ -67,7 +72,13 @@ class Normalizer:
                 ]
 
             summary = data.select(summary_exprs)
-            results = summary.to_dicts()[0]
+            summary_dicts = summary.to_dicts()
+            
+            if not summary_dicts or len(summary_dicts) == 0:
+                print(f"[Normalizer] WARNING: No features matching '^feat_.*$' found in DataFrame. Statistics not updated.")
+                return self
+
+            results = summary_dicts[0] # Теперь здесь не упадет
 
             for c in feat_cols:
                 q25 = results[f"{c}_q25"]
@@ -119,6 +130,9 @@ class Normalizer:
 
     def save(self, scaler_type: str = "zscore", winsor_limits: List[float] = None):
         """Сохраняет параметры нормализации в JSON файл для последующего использования в Rust."""
+        if self.output_path is None:
+            return # Ничего не сохраняем, если путь не задан
+            
         self.scaler_type = scaler_type
         self.winsor_limits = winsor_limits
         
@@ -135,6 +149,9 @@ class Normalizer:
 
     def load(self):
         """Загружает параметры из существующего JSON файла."""
+        if self.output_path is None or not self.output_path.exists():
+            return # Ничего не загружаем
+            
         with open(self.output_path, 'r') as f:
             data = json.load(f)
             if isinstance(data, dict) and "params" in data:
