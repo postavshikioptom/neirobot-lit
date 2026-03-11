@@ -21,10 +21,12 @@ class Normalizer:
     Класс для расчета и применения параметров нормализации Z-score (mean, std).
     Обеспечивает идентичность предобработки данных в Python (обучение) и Rust (инференс).
     """
-    def __init__(self, output_path: Union[str, Path] = None):
+    def __init__(self, output_path: Union[str, Path] = None, eps: float = 1e-6, scale_multiplier: float = 1.0):
         """
         Инициализация нормализатора.
         :param output_path: Путь для сохранения/загрузки статистик (может быть None)
+        :param eps: Малое число для защиты от деления на ноль в IQR (Задача 310.2.2)
+        :param scale_multiplier: Множитель для расширения диапазона признаков (Задача 310.2.2)
         """
         # ИСПРАВЛЕНИЕ: Обработка None для временных расчетов в памяти
         self.output_path = Path(output_path) if output_path is not None else None
@@ -33,6 +35,8 @@ class Normalizer:
         self.winsor_limits = None
         # Задача 306.2.3: Сохраняем строгий порядок признаков
         self.feature_order: List[str] = []
+        self.eps = eps
+        self.scale_multiplier = scale_multiplier
 
     def fit(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], feature_names: List[str] = None, winsor_limits: List[float] = None) -> Dict[str, Dict[str, float]]:
         """
@@ -182,17 +186,18 @@ class Normalizer:
 
         if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
             if self.scaler_type in ("robust", "winsor_robust"):
-                # Задача 306.3.4: Безопасная проверка scale для Polars
+                # Задача 306.3.4, 310.2.2: Безопасная проверка scale для Polars с добавлением eps
+                # Применяем scale_multiplier для "расширения" диапазона (Price Widening)
                 exprs = [
                     ((pl.col(c) - self.params[c]["median"]) / 
-                     (self.params[c]["iqr"] if self.params[c]["iqr"] > 1e-7 else 1.0))
+                     ((self.params[c]["iqr"] + self.eps) / self.scale_multiplier))
                     .cast(pl.Float32)
                     .alias(c)
                     for c in self.params
                 ]
             else:  # zscore
                 exprs = [
-                    ((pl.col(c) - self.params[c]["mean"]) / self.params[c]["std"])
+                    ((pl.col(c) - self.params[c]["mean"]) / (self.params[c]["std"] + self.eps))
                     .cast(pl.Float32)
                     .alias(c)
                     for c in self.params
@@ -211,11 +216,11 @@ class Normalizer:
                 p = self.params[name]
                 if self.scaler_type in ("robust", "winsor_robust"):
                     center = p["median"]
-                    # Задача 306.3.4: Безопасная проверка scale - если IQR слишком мал, используем 1.0
-                    scale = p["iqr"] if p["iqr"] > 1e-7 else 1.0
+                    # Задача 306.3.4, 310.2.2: Безопасная проверка scale с eps и multiplier
+                    scale = (p["iqr"] + self.eps) / self.scale_multiplier
                 else:  # zscore
                     center = p["mean"]
-                    scale = p["std"]
+                    scale = p["std"] + self.eps
 
                 if data.ndim == 2:
                     res[:, i] = (data[:, i] - center) / scale

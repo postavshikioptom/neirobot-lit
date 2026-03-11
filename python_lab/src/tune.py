@@ -8,7 +8,7 @@ from pathlib import Path
 import argparse
 
 from .train import LiTModule
-from .dataset import LOBPyTorchDataset, LOBDataset
+from .dataset import LOBPyTorchDataset, LOBDataset, LOBDataLoader
 from .features import FeatureEngineer
 from .labels import Labeler
 from .normalization import Normalizer
@@ -85,7 +85,7 @@ def prepare_data(args):
     data_path = base_path / "bots" / args.symbol / "data" / "raw"
 
     print(f"Pre-loading raw data for tuning {args.symbol}...")
-    loader = LOBDataset(str(data_path), args.symbol)
+    loader = LOBDataLoader(str(data_path), args.symbol)
     df = loader.load_data()
 
     # Сохраняем сырые данные (без feature engineering)
@@ -223,20 +223,25 @@ def objective(trial):
     # 3. Нормализация (fit на данных)
     # В тюнинге делаем упрощенно. Normalizer требует путь, но мы его не будем сохранять
     normalizer = Normalizer("/tmp/tune_norm.json")
-    normalizer.fit(df_feat)
-    df_norm = normalizer.transform(df_feat)
+    
+    # Задача 311: Обучаем на каналах
+    temp_ds = LOBDataset(df_feat, seq_len=1, data_mode="memory", is_train=False)
+    channels_df = temp_ds._compute_channels_for_normalization(list(range(len(df_feat))))
+    normalizer.fit(channels_df)
 
     # 4. Создание Dataset с новым seq_len и количеством лагов
     n_past_returns = len(past_returns_lags)
     full_dataset = LOBPyTorchDataset(
-        df_norm, 
+        df_feat,  # ПЕРЕДАЕМ RAW ДАННЫЕ (Задача 311)
         seq_len=seq_len, 
         n_past_returns=n_past_returns,
+        past_returns_lags=past_returns_lags, # ПЕРЕДАЕМ ЛАГИ (Задача 311)
         is_train=False,  # Будет переопределено для train_ds
         augment_prob=augment_prob,
         use_symmetric_flip=use_symmetric_flip,
         volume_jitter_range=volume_jitter_range,
-        aug_seed=aug_seed
+        aug_seed=aug_seed,
+        normalizer=normalizer  # ПЕРЕДАЕМ NORMALIZER (Задача 311)
     )
     
     # Проверяем режим CV

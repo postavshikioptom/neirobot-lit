@@ -30,37 +30,29 @@ except ImportError:
 
 class ExportWrapper(nn.Module):
     """
-    Обертка для экспорта модели с входом формы (B, S, 150).
-    Преобразует плоский вход (B, S, 150) в (B, S, in_channels, n_levels)
+    Обертка для экспорта модели с входом формы (B, S, 300).
+    Преобразует плоский вход (B, S, 300) в (B, S, in_channels, n_levels)
     для совместимости с LOBPatching внутри модели.
     
-    150 = 50 уровней * 3 канала (Price, Volume, Imbalance)
+    300 = 50 уровней * 6 каналов (Price, Vol, Imb, OFI, VIB, PastRet)
     """
-    def __init__(self, model, in_channels=3, n_levels=50):
+    def __init__(self, model, in_channels=6, n_levels=50):
         super().__init__()
         self.model = model
-        self.in_channels = in_channels
+        self.in_channels = in_channels  # 6 каналов
         self.n_levels = n_levels
         
     def forward(self, x):
         """
-        x: (Batch, Seq, 150) - плоский входной тензор
-        Преобразуем в (Batch, Seq, 3, 50) для LOBPatching
-        
-        Согласно плану 053:
-        - 150 = 50 уровней * 3 канала (Price, Volume, Imbalance)
-        - Это ровно 3 канала по 50 уровней
-        - LOBPatching должен быть внутри графа и обработать этот вход целиком
+        x: (Batch, Seq, 300) - плоский входной тензор
+        300 = 6 каналов * 50 уровней
         """
         b, s, f = x.shape
         
-        # Reshape (B, S, 150) -> (B, S, 3, 50)
-        # 3 канала: Price, Volume, Imbalance
-        # 50 уровней стакана
-        x_reshaped = x.view(b, s, 3, self.n_levels)  # (B, S, 3, 50)
+        # Reshape (B, S, 300) -> (B, S, 6, 50)
+        # 6 каналов: Price, Volume, Imbalance, OFI, VIB, PastReturns
+        x_reshaped = x.view(b, s, 6, self.n_levels)  # (B, S, 6, 50)
         
-        # Передаем в модель БЕЗ потери данных
-        # LOBPatching внутри модели обработает (B, S, 3, 50)
         return self.model(x_reshaped)
 
 def convert_to_fp16(onnx_path, output_path):
@@ -193,15 +185,15 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         
         model = ModelWithTemperature(model, temperature)
     
-    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 150) -> (B, S, 3, 50)
-    # Согласно плану 053: 150 = 50 уровней * 3 канала (Price, Volume, Imbalance)
-    in_channels = 3  # 3 канала согласно плану 053
+    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 300) -> (B, S, 6, 50)
+    # Согласно задаче 311: 300 = 50 уровней * 6 каналов (Price, Volume, Imbalance, OFI, VIB, PastRet)
+    in_channels = 6  # 6 каналов согласно задаче 311
     n_levels = 50  # Стандартное значение
     export_model = ExportWrapper(model, in_channels=in_channels, n_levels=n_levels)
     export_model.eval()
     
-    # 5. Dummy input - форма (1, 100, 150) согласно плану 053
-    dummy_input = torch.randn(1, seq_len, 150)
+    # 5. Dummy input - форма (1, 100, 300) согласно задаче 311
+    dummy_input = torch.randn(1, seq_len, 300)
     
     # Проверяем, использует ли модель regime embedding
     num_regimes = getattr(model, 'num_regimes', 0)
@@ -300,34 +292,34 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
     # где 3 = каналы (Price, Volume, Imbalance)
     # 50 = уровни стакана
     
-    # Структурируем metadata для совместимости с Rust кодом (Задача 055)
-    model_params = {
-        "seq_len": seq_len,
-        "n_levels": n_levels,
-        "in_channels": in_channels,  # 3 канала согласно плану 053
-        "past_returns_lags": past_returns_lags,
-    }
-    
-    # Сохраняем дополнительные метаданные для отладки и мониторинга
-    export_metadata = {
-        "model_name": "LiT",
-        "activation": activation,
-        "onnx_file": Path(output_path).name,
-        "temperature_embedded": embed_temperature,
-        "precision": final_precision,
-        "quantized": use_fp16,
-        "num_regimes": num_regimes,
-        "regime_embedding_dim": regime_embedding_dim,
-        "use_regime_embedding": use_regime,
-        "sparsity": float(sparsity),
-        "pruned": sparsity > 0.01,
-        "num_horizons": num_horizons,
-        "use_horizon_embedding": use_horizon_embedding,
-        "multi_horizon": num_horizons > 1,
-        "input_shape": [1, seq_len, 150],
-        "input_format": "flat_lob_3ch",
-        "input_description": "Flat LOB buffer: 50 levels * 3 channels (Price, Volume, Imbalance) = 150 features"
-    }
+        # Структурируем metadata для совместимости с Rust кодом (Задача 311)
+        model_params = {
+            "seq_len": seq_len,
+            "n_levels": n_levels,
+            "in_channels": in_channels,  # 6 каналов согласно задаче 311
+            "past_returns_lags": past_returns_lags,
+        }
+        
+        # Сохраняем дополнительные метаданные для отладки и мониторинга
+        export_metadata = {
+            "model_name": "LiT",
+            "activation": activation,
+            "onnx_file": Path(output_path).name,
+            "temperature_embedded": embed_temperature,
+            "precision": final_precision,
+            "quantized": use_fp16,
+            "num_regimes": num_regimes,
+            "regime_embedding_dim": regime_embedding_dim,
+            "use_regime_embedding": use_regime,
+            "sparsity": float(sparsity),
+            "pruned": sparsity > 0.01,
+            "num_horizons": num_horizons,
+            "use_horizon_embedding": use_horizon_embedding,
+            "multi_horizon": num_horizons > 1,
+            "input_shape": [1, seq_len, 300],
+            "input_format": "flat_lob_6ch",
+            "input_description": "Flat LOB buffer: 50 levels * 6 channels (Price, Vol, Imb, OFI, VIB, PastRet) = 300 features"
+        }
     
     # 9. Экспорт параметров HMM (regime_config.json) - Задача 155
     regime_config_path = Path(output_path).parent / "regime_config.json"
@@ -371,24 +363,24 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         means, stds, medians, iqrs = [], [], [], []
         winsor_limits_vals = []
         
-        order = ["p", "v", "i"]
-        for prefix in order:
-            for i in range(n_levels):
-                feat_name = f"feat_{prefix}_{i}"
-                p = norm_params.get(feat_name, {})
-                m = p.get("mean", 0.0)
-                s = p.get("std", 1.0)
-                med = p.get("median", m)
-                iqr = p.get("iqr", s)
-                
-                means.append(float(m))
-                stds.append(float(s))
-                medians.append(float(med))
-                iqrs.append(float(iqr))
-                
-                if "winsor_low" in p and "winsor_high" in p:
-                    winsor_limits_vals.append(float(p["winsor_low"]))
-                    winsor_limits_vals.append(float(p["winsor_high"]))
+        # В задаче 311 параметры нормализатора имеют имена feat_0..feat_299
+        # Rust ожидает именно этот порядок
+        for i in range(300):
+            feat_name = f"feat_{i}"
+            p = norm_params.get(feat_name, {})
+            m = p.get("mean", 0.0)
+            s = p.get("std", 1.0)
+            med = p.get("median", m)
+            iqr = p.get("iqr", s)
+            
+            means.append(float(m))
+            stds.append(float(s))
+            medians.append(float(med))
+            iqrs.append(float(iqr))
+            
+            if "winsor_low" in p and "winsor_high" in p:
+                winsor_limits_vals.append(float(p["winsor_low"]))
+                winsor_limits_vals.append(float(p["winsor_high"]))
         
         # Задача 240: Финализация параметров нормализации
         final_winsor_limits = winsor_limits_vals if winsor_limits_vals else hparams.get("winsor_limits", None)

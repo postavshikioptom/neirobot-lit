@@ -247,6 +247,42 @@ class LiTModule(pl.LightningModule):
                 handle.remove()
             delattr(self, 'activation_hooks')
 
+    def log_channel_statistics(self, batch, batch_idx):
+        """
+        Логирует статистику каналов ПОСЛЕ нормализации.
+        Вызывается для диагностики первого батча.
+        """
+        if batch_idx != 0:
+            return
+        
+        # Распаковываем батч: x, y, vol, weights, regime_id
+        if len(batch) == 5:
+            x, y, vol_target, weights, regime_id = batch
+        else:
+            x, y, vol_target, weights = batch
+            
+        # x: (Batch, Seq, Channels, Levels)
+        channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
+        
+        print("\n[ДИАГНОСТИКА] Статистика каналов ПОСЛЕ нормализации:")
+        for ch_idx, ch_name in enumerate(channel_names):
+            if ch_idx < x.shape[2]:
+                ch_data = x[:, :, ch_idx, :]  # (Batch, Seq, Levels)
+                print(f"  Channel {ch_idx} ({ch_name}): "
+                      f"min={ch_data.min():.4f}, "
+                      f"max={ch_data.max():.4f}, "
+                      f"mean={ch_data.mean():.4f}, "
+                      f"std={ch_data.std():.4f}")
+        
+        # Также логируем в TensorBoard
+        if self.logger and hasattr(self.logger, 'experiment'):
+            writer = self.logger.experiment
+            for ch_idx, ch_name in enumerate(channel_names):
+                if ch_idx < x.shape[2]:
+                    ch_data = x[:, :, ch_idx, :]
+                    writer.add_scalar(f"Stats_train/{ch_name}_Mean", ch_data.mean(), self.global_step)
+                    writer.add_scalar(f"Stats_train/{ch_name}_Std", ch_data.std(), self.global_step)
+
     def training_step(self, batch, batch_idx):
         # Распаковываем батч: x, y, vol, weights, regime_id
         if len(batch) == 5:
@@ -255,6 +291,10 @@ class LiTModule(pl.LightningModule):
             # Обратная совместимость: если regime_id нет, используем None
             x, y, vol_target, weights = batch
             regime_id = None
+        
+        # Логируем статистику каналов для первого батча первой эпохи
+        if self.current_epoch == 0 and batch_idx == 0:
+            self.log_channel_statistics(batch, batch_idx)
         
         # Задача 238: Применяем input noise injection во время обучения
         if self.input_noise_std > 0:
@@ -877,6 +917,7 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
                 regime_window=1000,
                 scaler_type=args.scaler_type,
                 winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+                normalizer=normalizer,
                 **time_weighting_params
             )
         elif args.data_mode == "memmap":
@@ -895,6 +936,7 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
                 regime_window=1000,
                 scaler_type=args.scaler_type,
                 winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+                normalizer=normalizer,
                 **time_weighting_params
             )
         else:
@@ -913,6 +955,7 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
                 regime_window=1000,
                 scaler_type=args.scaler_type,
                 winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+                normalizer=normalizer,
                 **time_weighting_params
             )
         
@@ -1270,9 +1313,10 @@ def train():
     parser.add_argument("--curvature_lambda", type=float, default=1e-4, help="Curvature penalty coefficient (recommended: 1e-4 to 1e-3)")
     parser.add_argument("--input_noise_std", type=float, default=0.005, help="Standard deviation for input noise injection during training")
     
-    # Параметры Robust Scaling (Задача 240, 306)
+    # Параметры Robust Scaling (Задача 240, 306, 310.2.2)
     parser.add_argument("--scaler_type", type=str, default="robust", choices=["zscore", "robust", "winsor_robust"], help="Scaler type: robust (default, median/IQR), zscore, or winsor_robust")
     parser.add_argument("--winsor_limits", type=str, default="0.01,0.99", help="Winsorization limits as comma-separated floats (e.g., '0.01,0.99' for 1st and 99th percentiles)")
+    parser.add_argument("--scale_multiplier", type=float, default=1.5, help="Multiplier for Normalizer scale (Price Widening, Задача 310.2.2)")
     
     # Параметры Optuna поиска seq_len (Задача 055)
     parser.add_argument("--optuna_seq_len_search", action="store_true", help="Enable Optuna hyperparameter search for seq_len")
@@ -1461,7 +1505,7 @@ def train():
 
     # 5. Инициализация Normalizer (fit будет позже на train set)
     print("Initializing normalizer...")
-    normalizer = Normalizer(norm_params_path)
+    normalizer = Normalizer(norm_params_path, scale_multiplier=args.scale_multiplier)
     
     # 5.5. Обучение RegimeDetector (Задача 155)
     regime_detector = None
@@ -1552,6 +1596,8 @@ def train():
             regime_window=1000,
             scaler_type=args.scaler_type,  # Задача 240
             winsor_limits=winsor_limits,  # Задача 240
+            scale_multiplier=args.scale_multiplier, # Задача 310.2.2
+            normalizer=normalizer,
             **time_weighting_params
         )
     elif args.data_mode == "memmap":
@@ -1572,6 +1618,8 @@ def train():
             regime_window=1000,
             scaler_type=args.scaler_type,  # Задача 240
             winsor_limits=winsor_limits,  # Задача 240
+            scale_multiplier=args.scale_multiplier, # Задача 310.2.2
+            normalizer=normalizer,
             **time_weighting_params
         )
     else:
@@ -1591,6 +1639,8 @@ def train():
             regime_window=1000,
             scaler_type=args.scaler_type,  # Задача 240
             winsor_limits=winsor_limits,  # Задача 240
+            scale_multiplier=args.scale_multiplier, # Задача 310.2.2
+            normalizer=normalizer,
             **time_weighting_params
         )
     
@@ -1609,6 +1659,10 @@ def train():
             sample = full_dataset[i]
             x, y, vol_target, weight = sample[:4]  # Первые 4 элемента
             
+            if i == 0:
+                # Задача 311: Добавить логирование тензоров после нормализации (для отладки)
+                print(f"Sample Normalized Tensor (first 5 features of channel 0): {x[0, :5]}")
+
             if torch.isnan(x).any():
                 print(f"⚠️  WARNING: NaN обнаружен в признаках (x) на индексе {i}")
                 nan_found = True
@@ -1806,44 +1860,35 @@ def train():
     else:
         # Если балансировка не используется, обучаем нормализатор на обычном тренировочном наборе
         if args.data_mode != "streaming":
-            print("\nFitting normalizer on original training set...")
+            print("\nFitting normalizer on original training set (channels-based)...")
             train_indices = train_ds.indices
             
-            # Оптимизация памяти: обучаем на 2D данных вместо 3D окон
-            train_features_2d = full_dataset.features[train_indices]
+            # Задача 311: Извлечь каналы для тренировочных индексов
+            train_channels_df = full_dataset._compute_channels_for_normalization(train_indices)
             
-            # Задача 306.4.4: Используем список колонок строго из датасета
-            feat_cols = full_dataset.feat_cols.copy()
-            
-            print(f"Features dimension check: {train_features_2d.shape[1]} vs {len(feat_cols)}")
-            normalizer.fit(train_features_2d, feature_names=feat_cols, winsor_limits=winsor_limits)
+            print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
+            normalizer.fit(train_channels_df, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
-            print(f"✓ Normalizer fitted on {len(train_features_2d)} samples")
+            print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
         else:
             # Для streaming обучаем на сэмпе
+            print("\nFitting normalizer on streaming sample (channels-based)...")
             sample_df = df.head(100000).collect(engine="streaming")
-            normalizer.fit(sample_df, winsor_limits=winsor_limits)
+            
+            # Для streaming вычисляем каналы вручную из сэмпла
+            # Используем временный датасет для доступа к логике формирования каналов
+            temp_ds = LOBDataset(sample_df, seq_len=1, data_mode="memory", is_train=False)
+            sample_channels_df = temp_ds._compute_channels_for_normalization(list(range(len(sample_df))))
+            
+            normalizer.fit(sample_channels_df, winsor_limits=winsor_limits)
             normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
             update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
+            print(f"✓ Normalizer fitted on {len(sample_channels_df)} samples (streaming sample)")
 
     # 8. Финальная нормализация всех данных
-    # Применяем параметры Z-score, вычисленные на train set, ко всему набору
-    if args.data_mode != "streaming":
-        print("Applying normalization to all data subsets (preventing leakage)...")
-        # Нормализуем исходные данные (features)
-        full_dataset.features = normalizer.transform(full_dataset.features)
-        # Примечание: если была балансировка, train_ds уже заменен на BalancedTrainDataset, 
-        # который работает со своей копией данных. Валидация и тест берут данные из full_dataset.
-    else:
-        # Для streaming нормализация уже "встроена" в LazyFrame (нужно убедиться в этом)
-        # В текущей реализации streaming в train.py нормализация применяется к LazyFrame df
-        df = normalizer.transform(df)
-        # Но нам нужно пересоздать датасет, если мы изменили df после его создания?
-        # В Lightning/streaming это сложнее. Для простоты считаем, что для streaming 
-        # нормализация применяется один раз.
-        pass
-
+    # Примечание: глобальная нормализация удалена (Задача 311), так как теперь 
+    # нормализация выполняется на лету в LOBDataset.__getitem__
     print(f"Dataset split (Chronological): Train={len(train_ds)}, Val={len(val_ds)}, Test={len(test_ds)}")
     if args.use_symmetric_flip or args.volume_jitter_range > 0:
         print(f"Augmentation enabled for training: flip={args.use_symmetric_flip}, jitter={args.volume_jitter_range}, prob={args.augment_prob}")

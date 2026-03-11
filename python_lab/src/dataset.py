@@ -642,10 +642,12 @@ class LOBDataset(Dataset):
         volume_jitter_range: float = 0.1,
         aug_seed: int = 42,
         regime_detector = None,
+        normalizer: Union[Normalizer, None] = None,
         regime_window: int = 1000,
         exclude_features: Union[List[str], None] = None,
         scaler_type: str = "zscore",
-        winsor_limits: tuple[float, float] = (0.01, 0.99)
+        winsor_limits: tuple[float, float] = (0.01, 0.99),
+        scale_multiplier: float = 1.0
     ):
         self.seq_len = seq_len
         self.n_levels = 50
@@ -657,10 +659,12 @@ class LOBDataset(Dataset):
         self.half_life_hours = half_life_hours
         self.min_weight = min_weight
         self.regime_detector = regime_detector
+        self.normalizer = normalizer
         self.regime_window = regime_window
         self.exclude_features = exclude_features
         self.scaler_type = scaler_type
         self.winsor_limits = winsor_limits
+        self.scale_multiplier = scale_multiplier
         
         self.is_train = is_train
         self.augment_prob = augment_prob
@@ -851,25 +855,9 @@ class LOBDataset(Dataset):
         if len(log_p) > lag:
             self.past_ret_cache[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
         
-        # Шаг 1: Диагностика до нормализации
+        # Шаг 1: Диагностика сырых признаков (индикаторов)
         print(f"[DEBUG] past_ret raw: min={self.past_ret_cache.min():.6f}, max={self.past_ret_cache.max():.6f}")
-
-        # 4. Нормализация (ВАЖНО: проверяем, что в temp_df именно 1D массивы)
-        temp_df_indicators = pl.DataFrame({
-            "feat_vib_val": self.vib_cache,
-            "feat_past_ret_val": self.past_ret_cache
-        })
-        norm_temp = Normalizer(output_path=None)
-        norm_temp.scaler_type = self.scaler_type
-        norm_temp.winsor_limits = self.winsor_limits
-        norm_temp.fit(temp_df_indicators)
-        transformed_indicators = norm_temp.transform(temp_df_indicators)
-        
-        self.vib_cache = transformed_indicators["feat_vib_val"].to_numpy().astype(np.float32)
-        self.past_ret_cache = transformed_indicators["feat_past_ret_val"].to_numpy().astype(np.float32)
-        
-        # Шаг 1: Диагностика после нормализации
-        print(f"[DEBUG] past_ret normalized: min={self.past_ret_cache.min():.6f}, max={self.past_ret_cache.max():.6f}")
+        print(f"[DEBUG] vib raw: min={self.vib_cache.min():.6f}, max={self.vib_cache.max():.6f}")
         
         self.has_computed_features = True
 
@@ -893,47 +881,49 @@ class LOBDataset(Dataset):
         # Задача 306.2.2: Инициализируем именованные индексы
         self._setup_feature_indices()
 
-        if self.scaler_type in ("robust", "winsor_robust"):
-            norm = Normalizer(output_path="norm_params.json")
-            norm.scaler_type = self.scaler_type
-            norm.winsor_limits = self.winsor_limits
-            df_feat = df.select(feat_cols)
-            norm.fit(df_feat, winsor_limits=self.winsor_limits)
-            df_norm = norm.transform(df_feat)
-            df = df.drop(feat_cols).hstack(df_norm)
-            self.robust_params = norm.params
-        else:
-            self.robust_params = None
+        # Задача 311: Сохраняем СЫРЫЕ данные
+        df_feat = df.select(feat_cols)
+        self.x_raw = df_feat.to_numpy().astype(np.float32)
+
+        # Задача 311: Обучаем нормализатор на каналах (а не на сырых признаках)
+        if self.normalizer is not None and self.is_train:
+            print(f"[{self.__class__.__name__}] Training normalizer on CHANNELS...")
+            channels_data = self._compute_channels_for_normalization(df_feat)
+            self.normalizer.fit(channels_data, feature_names=channels_data.columns)
+
+        self.robust_params = None
         
         # Задача 306.2.1: Гарантируем наличие timestamp_ms для внутренних нужд, но исключаем из признаков
-        select_cols = [pl.concat_list(feat_cols).alias("features"), *self.label_cols]
+        # (Мы больше не создаем self.features как np.stack, так как используем self.x_raw)
+        
+        # Нам все еще нужны labels и timestamps
+        select_cols = self.label_cols[:]
         if "timestamp_ms" in df.columns:
             select_cols.append("timestamp_ms")
         elif "timestamp" in df.columns:
-            df = df.rename({"timestamp": "timestamp_ms"})
-            select_cols.append("timestamp_ms")
+            select_cols.append("timestamp") # Will rename later
             
         if "mid_price" in df.columns:
-            select_cols.append(pl.col("mid_price"))
+            select_cols.append("mid_price")
             
-        sequence_df = df.select(select_cols)
-        features_series = sequence_df.select(pl.col("features")).to_series()
-        self.features = np.stack([np.array(row, dtype=np.float32) for row in features_series.to_list()], axis=0)
-        
+        aux_df = df.select(select_cols)
+        if "timestamp" in aux_df.columns and "timestamp_ms" not in aux_df.columns:
+            aux_df = aux_df.rename({"timestamp": "timestamp_ms"})
+
         if self.is_multi_horizon:
-            labels_list = [sequence_df.select(pl.col(lc)).to_series().to_numpy() for lc in self.label_cols]
+            labels_list = [aux_df.select(pl.col(lc)).to_series().to_numpy() for lc in self.label_cols]
             self.labels = np.stack(labels_list, axis=1)
         else:
-            self.labels = sequence_df.select(pl.col("label")).to_series().to_numpy()
+            self.labels = aux_df.select(pl.col("label")).to_series().to_numpy()
         
-        if "timestamp_ms" in sequence_df.columns:
-            self.timestamps = sequence_df.select(pl.col("timestamp_ms")).to_series().to_numpy()
+        if "timestamp_ms" in aux_df.columns:
+            self.timestamps = aux_df.select(pl.col("timestamp_ms")).to_series().to_numpy()
         else:
-            self.timestamps = np.arange(len(sequence_df), dtype=np.int64)
+            self.timestamps = np.arange(len(aux_df), dtype=np.int64)
         
         # Расчет волатильности для взвешивания или адаптивного порога
-        if "mid_price" in df.columns:
-            mid_prices = df["mid_price"].to_numpy()
+        if "mid_price" in aux_df.columns:
+            mid_prices = aux_df["mid_price"].to_numpy()
             self.vols = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
         else:
             self.vols = np.zeros(len(self.labels) - self.seq_len + 1, dtype=np.float32)
@@ -941,7 +931,7 @@ class LOBDataset(Dataset):
         weight_labels = self.labels[self.seq_len-1:]
         self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
         
-        self.regime_ids = np.zeros(len(self.features) - self.seq_len + 1, dtype=np.int64)
+        self.regime_ids = np.zeros(len(self.x_raw) - self.seq_len + 1, dtype=np.int64)
         if self.regime_detector and self.regime_detector.is_fitted:
             regime_features = compute_regime_features(df, window=self.regime_window)
             self.regime_ids = self.regime_detector.predict_states(regime_features)[self.seq_len - 1:]
@@ -1158,14 +1148,21 @@ class LOBDataset(Dataset):
 
 
     def __len__(self):
-        return self.total_samples if self.data_mode == "streaming" else len(self.features) - self.seq_len + 1
+        max_lag = max(self.past_returns_lags) if self.past_returns_lags else 100
+        base_len = self.total_samples if self.data_mode == "streaming" else len(self.x_raw) - self.seq_len + 1
+        return max(0, base_len - max_lag)
 
     def __getitem__(self, idx):
+        # Задача 310.2.1: Добавляем смещение (offset) равное максимальному лагу, 
+        # чтобы первый же сэмпл содержал валидную историю PastReturns
+        max_lag = max(self.past_returns_lags) if self.past_returns_lags else 100
+        idx = idx + max_lag
+
         if self.data_mode == "streaming":
             return self._getitem_streaming(idx)
         
         # Memory/Memmap access
-        x_raw = self.features[idx : idx + self.seq_len] if self.data_mode == "memory" else self.features_seq[idx]
+        x_raw = self.x_raw[idx : idx + self.seq_len] if self.data_mode == "memory" else self.features_seq[idx]
         y = self.labels[idx + self.seq_len - 1] if self.data_mode == "memory" else self.labels[idx]
         v = self.vols[idx]
         w = self.sample_weights[idx]
@@ -1195,7 +1192,7 @@ class LOBDataset(Dataset):
             
             # Нормализация индикаторов
             temp_df_ind = pl.DataFrame({"feat_vib_val": vib_raw, "feat_past_ret_val": past_ret_raw})
-            norm_temp = Normalizer(output_path=None)
+            norm_temp = Normalizer(output_path=None, scale_multiplier=self.scale_multiplier)
             norm_temp.scaler_type = self.scaler_type
             norm_temp.winsor_limits = self.winsor_limits
             norm_temp.fit(temp_df_ind)
@@ -1204,15 +1201,6 @@ class LOBDataset(Dataset):
             self.vib_cache = transformed_ind["feat_vib_val"].to_numpy().astype(np.float32)
             self.past_ret_cache = transformed_ind["feat_past_ret_val"].to_numpy().astype(np.float32)
             
-            # Нормализация основных признаков
-            if self.scaler_type in ("robust", "winsor_robust") and hasattr(self, 'robust_params') and self.robust_params:
-                # В streaming моде мы предполагаем, что параметры уже загружены
-                norm = Normalizer(output_path=None)
-                norm.params = self.robust_params
-                norm.scaler_type = self.scaler_type
-                norm.feature_order = self.feat_cols
-                batch_df = norm.transform(batch_df)
-
             # Формирование последовательностей
             feat_data = batch_df.select(self.feat_cols).to_numpy()
             self._cache_batch = np.stack([feat_data[i:i+self.seq_len] for i in range(len(batch_df) - self.seq_len + 1)], axis=0)
@@ -1241,6 +1229,103 @@ class LOBDataset(Dataset):
             idx=off # Using offset because caches in streaming are batch-local
         )
 
+    def normalize_channel(self, channel_data: torch.Tensor, channel_idx: int) -> torch.Tensor:
+        """
+        Нормализует канал используя статистики из normalizer.
+        
+        Args:
+            channel_data: (Seq, Levels) - сырые данные канала
+            channel_idx: индекс канала (0=price, 1=vol, 2=imb, 3=ofi, 4=vib, 5=pastret)
+        
+        Returns:
+            Нормализованный канал той же формы
+        """
+        if self.normalizer is None:
+            return channel_data
+        
+        seq_len, n_levels = channel_data.shape
+        normalized = torch.zeros_like(channel_data)
+        
+        for level in range(n_levels):
+            feat_idx = channel_idx * n_levels + level
+            param_key = f"feat_{feat_idx}"
+            
+            if self.normalizer.scaler_type == "zscore":
+                mean = self.normalizer.params.get(param_key, {}).get("mean", 0.0)
+                std = self.normalizer.params.get(param_key, {}).get("std", 1.0)
+                normalized[:, level] = (channel_data[:, level] - mean) / (std + 1e-8)
+            
+            elif self.normalizer.scaler_type == "robust":
+                median = self.normalizer.params.get(param_key, {}).get("median", 0.0)
+                iqr = self.normalizer.params.get(param_key, {}).get("iqr", 1.0)
+                normalized[:, level] = (channel_data[:, level] - median) / (iqr + 1e-8)
+        
+        return normalized
+
+    def _compute_channels_for_normalization(self, data: Union[pl.DataFrame, List[int], np.ndarray]) -> pl.DataFrame:
+        """
+        Вычисляет каналы из сырых данных для обучения нормализатора.
+        data может быть DataFrame, списком индексов или NumPy массивом.
+        """
+        if isinstance(data, list):
+            # Если переданы индексы, берем данные из self.x_raw (только для Memory mode)
+            if not hasattr(self, 'x_raw') or self.x_raw is None:
+                # В streaming режиме x_raw может не быть, тогда берем из self.features (если это не LazyFrame)
+                if isinstance(self.features, np.ndarray):
+                    x_data = self.features[data]
+                else:
+                    raise ValueError("Indices provided for _compute_channels_for_normalization, but x_raw is missing.")
+            else:
+                x_data = self.x_raw[data]
+            
+            ask_p = x_data[:, self.ask_p_indices]
+            ask_v = x_data[:, self.ask_v_indices]
+            bid_p = x_data[:, self.bid_p_indices]
+            bid_v = x_data[:, self.bid_v_indices]
+            
+            # Векторизованный расчет OFI/VIB/PastRet для сэмпла
+            ofi_ch = np.zeros_like(ask_p)
+            if self.ofi_idx >= 0:
+                ofi_val = x_data[:, self.ofi_idx]
+                ofi_ch = np.repeat(ofi_val[:, np.newaxis], 50, axis=1)
+                
+            vib_ch = np.zeros_like(ask_p)
+            if hasattr(self, 'vib_cache') and self.vib_cache is not None:
+                vib_val = self.vib_cache[data]
+                vib_ch = np.repeat(vib_val[:, np.newaxis], 50, axis=1)
+                
+            past_ret_ch = np.zeros_like(ask_p)
+            if hasattr(self, 'past_ret_cache') and self.past_ret_cache is not None:
+                past_ret_val = self.past_ret_cache[data]
+                if past_ret_val.ndim > 1:
+                    past_ret_val = past_ret_val[:, 0]
+                past_ret_ch = np.repeat(past_ret_val[:, np.newaxis], 50, axis=1)
+        else:
+            # Для DataFrame (streaming/temp_ds)
+            df_raw = data
+            ask_p = df_raw.select([f"feat_ask_p_{i}" for i in range(50)]).to_numpy()
+            bid_p = df_raw.select([f"feat_bid_p_{i}" for i in range(50)]).to_numpy()
+            ask_v = df_raw.select([f"feat_ask_v_{i}" for i in range(50)]).to_numpy()
+            bid_v = df_raw.select([f"feat_bid_v_{i}" for i in range(50)]).to_numpy()
+            
+            ofi_ch = np.zeros_like(ask_p)
+            if self.ofi_idx >= 0:
+                ofi_cols = [c for c in df_raw.columns if "ofi" in c.lower()]
+                if ofi_cols:
+                    ofi_val = df_raw.select(ofi_cols[0]).to_numpy()
+                    ofi_ch = np.repeat(ofi_val, 50, axis=1)
+            
+            vib_ch = np.zeros_like(ask_p)
+            past_ret_ch = np.zeros_like(ask_p)
+
+        # Формируем каналы (как в Rust)
+        price_ch = (ask_p + bid_p) / 2.0
+        vol_ch = ask_v + bid_v
+        imb_ch = (bid_v - ask_v) / (bid_v + ask_v + 1e-8)
+        
+        channels = np.concatenate([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, past_ret_ch], axis=1)
+        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(300)])
+
     def _process_sample(self, x_raw, y, v, w, regime_id, idx=None):
         from .normalization import symlog_transform
         # NaN protection (Задача 094-2)
@@ -1268,16 +1353,19 @@ class LOBDataset(Dataset):
             bid_p, bid_v = x_temp[:, 100:150], x_temp[:, 150:200]
         
         # ch[0-2]: Базовые LOB каналы
-        price_ch = (ask_p + bid_p) / 2.0
-        vol_ch = ask_v + bid_v
-        # Задача 307.2: Заменяем Clamp на SymLog для сохранения структуры экстремальных сигналов мемкоинов. 
-        # denom = Vbid + Vask + epsilon
+        price_ch_raw = (ask_p + bid_p) / 2.0
+        vol_ch_raw = ask_v + bid_v
         denom = bid_v + ask_v + 1e-8
-        imb_ch = symlog_transform((bid_v - ask_v) / denom)
+        imb_ch_raw = (bid_v - ask_v) / denom
         
-        # ch[3]: OFI (Order Flow Imbalance) - берем уже нормализованный из FeatureEngineer
+        # Применяем нормализацию к КАНАЛАМ (Задача 311)
+        price_ch = self.normalize_channel(price_ch_raw, channel_idx=0)
+        vol_ch = self.normalize_channel(vol_ch_raw, channel_idx=1)
+        imb_ch = self.normalize_channel(imb_ch_raw, channel_idx=2)
+        
+        # ch[3]: OFI (Order Flow Imbalance)
         if self.ofi_idx >= 0:
-            ofi = torch.from_numpy(x_raw[:, self.ofi_idx].copy()).float()
+            ofi_raw = torch.from_numpy(x_raw[:, self.ofi_idx].copy()).float()
         else:
             # Fallback для совместимости
             ap0, av0, bp0, bv0 = ask_p[:, 0], ask_v[:, 0], bid_p[:, 0], bid_v[:, 0]
@@ -1287,48 +1375,46 @@ class LOBDataset(Dataset):
             av_prev = torch.cat([av0[:1], av0[:-1]])
             delta_bid = torch.where(bp0 > bp_prev, bv0, torch.where(bp0 < bp_prev, -bv_prev, bv0 - bv_prev))
             delta_ask = torch.where(ap0 < ap_prev, av0, torch.where(ap0 > ap_prev, -av_prev, av0 - av_prev))
-            ofi = (delta_bid - delta_ask).cumsum(dim=0)
-        ofi_ch = ofi.unsqueeze(-1).repeat(1, 50)
+            ofi_raw = (delta_bid - delta_ask).cumsum(dim=0)
         
-        # ch[4]: Trade Imbalance (VIB) - используем значение из кэша (Задача 308-3)
+        ofi_ch_raw = ofi_raw.unsqueeze(-1).repeat(1, 50)
+        ofi_ch = self.normalize_channel(ofi_ch_raw, channel_idx=3)
+        
+        # ch[4]: Trade Imbalance (VIB)
         if idx is not None and hasattr(self, 'vib_cache') and self.vib_cache is not None:
             v_seq = self.vib_cache[idx : idx + self.seq_len]
-            vib_ch = torch.from_numpy(v_seq.copy()).float().unsqueeze(-1).repeat(1, 50)
+            vib_raw = torch.from_numpy(v_seq.copy()).float()
         elif self.vib_idx >= 0:
-            vib = torch.from_numpy(x_raw[:, self.vib_idx].copy()).float()
-            vib_ch = vib.unsqueeze(-1).repeat(1, 50)
+            vib_raw = torch.from_numpy(x_raw[:, self.vib_idx].copy()).float()
         else:
             # Fallback на расчет на лету
             bv_sum = bid_v.sum(dim=1)
             av_sum = ask_v.sum(dim=1)
             v_val = (bv_sum[-1] - av_sum[-1]) / (bv_sum[-1] + av_sum[-1] + 1e-8)
-            vib_ch = torch.full((x_raw.shape[0], 50), v_val.item(), dtype=torch.float32)
+            vib_raw = torch.full((x_raw.shape[0],), v_val.item(), dtype=torch.float32)
         
-        # ch[5]: Past Returns (100 тиков) - используем значение из кэша (Задача 308-3)
+        vib_ch_raw = vib_raw.unsqueeze(-1).repeat(1, 50)
+        vib_ch = self.normalize_channel(vib_ch_raw, channel_idx=4)
+        
+        # ch[5]: Past Returns (100 тиков)
         if idx is not None and hasattr(self, 'past_ret_cache') and self.past_ret_cache is not None:
             r_seq = self.past_ret_cache[idx : idx + self.seq_len]
             if r_seq.ndim > 1:
                 r_seq = r_seq[:, -1]
-            
-            # Задача 310: Диагностический вывод для первого сэмпла в батче
-            if idx == 0 and self.is_train:
-                print(f"[DEBUG] _process_sample past_ret: min={r_seq.min():.6f}, max={r_seq.max():.6f}")
-                
-            pr_ch = torch.from_numpy(r_seq.copy()).float().unsqueeze(-1).repeat(1, 50)
+            pr_raw = torch.from_numpy(r_seq.copy()).float()
         elif self.past_ret_indices:
             pr_idx = self.past_ret_indices[-1]
-            pr = torch.from_numpy(x_raw[:, pr_idx].copy()).float()
-            pr_ch = pr.unsqueeze(-1).repeat(1, 50)
+            pr_raw = torch.from_numpy(x_raw[:, pr_idx].copy()).float()
         else:
             # Fallback на расчет на лету (логарифмическая доходность за окно)
             r_val = torch.log(torch.max(ask_p[-1, 0], torch.tensor(1e-10))) - torch.log(torch.max(ask_p[0, 0], torch.tensor(1e-10)))
-            pr_ch = torch.full((x_raw.shape[0], 50), r_val.item(), dtype=torch.float32)
+            pr_raw = torch.full((x_raw.shape[0],), r_val.item(), dtype=torch.float32)
+            
+        pr_ch_raw = pr_raw.unsqueeze(-1).repeat(1, 50)
+        pr_ch = self.normalize_channel(pr_ch_raw, channel_idx=5)
         
         # Собираем итоговый тензор (Seq, 6, 50)
         x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
-        
-        # Шаг 2: Убрана финальная двойная symlog_transform(x_final)
-        # Так как imb_ch уже обработан, а остальные каналы приходят либо нормализованными, либо не требуют symlog
         
         return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
 
