@@ -46,3 +46,59 @@ Horizons: [100], Threshold: 0.0004
   single: {'label': [0, 1, 2], 'count': [403356, 139944, 148779]} | Masked: 0
 
 ===============================
+Epoch 3 (5m 58s) Validation: MCC=0.0210, Macro-F1=0.2454, ECE=0.2242, MCE=0.6605
+  Vol-MSE=1.164556, Vol-MAE=0.620500
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0210, F1=0.2454, Samples=103797
+
+Epoch 4 (5m 58s) Validation: MCC=0.0108, Macro-F1=0.2536, ECE=0.2464, MCE=0.9378
+  Vol-MSE=1.214508, Vol-MAE=0.615386
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0108, F1=0.2536, Samples=103797
+
+Epoch 5 (5m 58s) Validation: MCC=0.0139, Macro-F1=0.2708, ECE=0.2627, MCE=0.6373
+✓ Reliability diagram saved to: /kaggle/reports/FARTCOINUSDT/reliability_diagram_epoch_5.png
+  Vol-MSE=1.348565, Vol-MAE=0.661770
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0139, F1=0.2708, Samples=103797
+
+Epoch 6 (5m 58s) Validation: MCC=0.0109, Macro-F1=0.2766, ECE=0.2789, MCE=0.7182
+  Vol-MSE=1.286353, Vol-MAE=0.647946
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0109, F1=0.2766, Samples=103797
+
+Epoch 7 (5m 59s) Validation: MCC=0.0210, Macro-F1=0.3016, ECE=0.2612, MCE=0.7230
+  Vol-MSE=1.505870, Vol-MAE=0.704209
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0210, F1=0.3016, Samples=103797
+
+Epoch 8 (5m 58s) Validation: MCC=0.0214, Macro-F1=0.3168, ECE=0.2444, MCE=0.8038
+  Vol-MSE=1.353148, Vol-MAE=0.667480
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0214, F1=0.3168, Samples=103797
+
+Epoch 9 (5m 58s) Validation: MCC=0.0227, Macro-F1=0.3139, ECE=0.2728, MCE=0.7810
+  Vol-MSE=1.370060, Vol-MAE=0.670022
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0227, F1=0.3139, Samples=103797
+
+Epoch 10 (10m 54s) Validation: MCC=0.0223, Macro-F1=0.3159, ECE=0.2754, MCE=0.8038
+✓ Reliability diagram saved to: /kaggle/reports/FARTCOINUSDT/reliability_diagram_epoch_10.png
+  Vol-MSE=1.262329, Vol-MAE=0.646975
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0223, F1=0.3159, Samples=103797
+✓ Logged 1000 embeddings to TensorBoard Projector
+
+Epoch 11 (5m 56s) Validation: MCC=0.0336, Macro-F1=0.3338, ECE=0.2471, MCE=0.7954
+  Vol-MSE=1.279240, Vol-MAE=0.658812
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0336, F1=0.3338, Samples=103797

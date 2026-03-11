@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 def get_activation(activation_type: str):
     """
@@ -55,6 +56,10 @@ class LOBPatching(nn.Module):
         # Различаем шаги времени 0..seq_len-1
         self.time_pos_emb = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
         
+        # Шаг 3: Attention Pooling (Задача 310-3)
+        # Слой для вычисления весов внимания для каждого уровня стакана
+        self.level_attention = nn.Linear(d_model, 1)
+        
         # 4. Финальная нормализация для стабильности
         self.norm = nn.LayerNorm(d_model)
 
@@ -92,9 +97,10 @@ class LOBPatching(nn.Module):
         x_patched = x_patched + self.level_pos_emb  # Broadcasting: (B, S, num_patches, d_model)
         
         # Шаг 3: Агрегация уровней в один "Snapshot Token" на каждый шаг времени.
-        # Сжимаем num_patches уровней в один вектор размерности D.
+        # Сжимаем num_patches уровней в один вектор размерности D через Attention Pooling (Задача 310-3).
         # (B, S, num_patches, d_model) -> (B, S, d_model)
-        x_snapshot = x_patched.mean(dim=2)
+        attn_weights = F.softmax(self.level_attention(x_patched), dim=2)  # (B, S, num_patches, 1)
+        x_snapshot = (x_patched * attn_weights).sum(dim=2)  # (B, S, d_model)
         
         # Шаг 4: Добавляем временные позиции (информация о порядке событий)
         # Динамически нарезаем позиционное кодирование под текущую длину последовательности

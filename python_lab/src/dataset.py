@@ -850,6 +850,9 @@ class LOBDataset(Dataset):
         lag = 100
         if len(log_p) > lag:
             self.past_ret_cache[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
+        
+        # Шаг 1: Диагностика до нормализации
+        print(f"[DEBUG] past_ret raw: min={self.past_ret_cache.min():.6f}, max={self.past_ret_cache.max():.6f}")
 
         # 4. Нормализация (ВАЖНО: проверяем, что в temp_df именно 1D массивы)
         temp_df_indicators = pl.DataFrame({
@@ -864,6 +867,10 @@ class LOBDataset(Dataset):
         
         self.vib_cache = transformed_indicators["feat_vib_val"].to_numpy().astype(np.float32)
         self.past_ret_cache = transformed_indicators["feat_past_ret_val"].to_numpy().astype(np.float32)
+        
+        # Шаг 1: Диагностика после нормализации
+        print(f"[DEBUG] past_ret normalized: min={self.past_ret_cache.min():.6f}, max={self.past_ret_cache.max():.6f}")
+        
         self.has_computed_features = True
 
         # 3. ПОДГОТОВКА И НОРМАЛИЗАЦИЯ ОСНОВНЫХ ДАННЫХ
@@ -1302,6 +1309,11 @@ class LOBDataset(Dataset):
             r_seq = self.past_ret_cache[idx : idx + self.seq_len]
             if r_seq.ndim > 1:
                 r_seq = r_seq[:, -1]
+            
+            # Задача 310: Диагностический вывод для первого сэмпла в батче
+            if idx == 0 and self.is_train:
+                print(f"[DEBUG] _process_sample past_ret: min={r_seq.min():.6f}, max={r_seq.max():.6f}")
+                
             pr_ch = torch.from_numpy(r_seq.copy()).float().unsqueeze(-1).repeat(1, 50)
         elif self.past_ret_indices:
             pr_idx = self.past_ret_indices[-1]
@@ -1315,8 +1327,8 @@ class LOBDataset(Dataset):
         # Собираем итоговый тензор (Seq, 6, 50)
         x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
         
-        # Задача 307: Замена Clamp на SymLog для сохранения динамического диапазона
-        x_final = symlog_transform(x_final)
+        # Шаг 2: Убрана финальная двойная symlog_transform(x_final)
+        # Так как imb_ch уже обработан, а остальные каналы приходят либо нормализованными, либо не требуют symlog
         
         return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
 
