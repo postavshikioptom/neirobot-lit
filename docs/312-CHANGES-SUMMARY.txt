@@ -1,0 +1,61 @@
+ЗАДАЧА 312: КРАТКИЙ СПИСОК ИЗМЕНЕНИЙ
+=====================================
+
+ФАЙЛ: python_lab/src/train.py
+
+СТРОКА 17:
++ from torch.profiler import profile, ProfilerActivity, schedule
+
+СТРОКИ 112-160:
++ Добавлен класс ProfilerCallback для профилирования
+
+СТРОКА 171:
+- def __init__(self, ..., use_curvature_reg=True, ...):
++ def __init__(self, ..., use_curvature_reg=False, ...):
+
+СТРОКА 1277:
+- parser.add_argument("--batch_size", type=int, default=128, ...)
++ parser.add_argument("--batch_size", type=int, default=64, ...)
+
+СТРОКА 1320:
+- parser.add_argument("--use_curvature_reg", action=argparse.BooleanOptionalAction, default=True, ...)
++ parser.add_argument("--use_curvature_reg", action=argparse.BooleanOptionalAction, default=False, ...)
+
+СТРОКИ 1335-1340:
++ parser.add_argument("--enable_profiler", action="store_true", ...)
++ parser.add_argument("--profiler_wait_steps", type=int, default=1, ...)
++ parser.add_argument("--profiler_warmup_steps", type=int, default=1, ...)
++ parser.add_argument("--profiler_active_steps", type=int, default=3, ...)
+
+СТРОКА 545:
+- if self.current_epoch % 5 == 0:
++ if self.current_epoch % 20 == 0:
+
+СТРОКА 560:
+- if self.current_epoch % 5 == 0:
++ if self.current_epoch % 20 == 0:
+
+СТРОКА 660:
+- if self.current_epoch % 10 == 0:
++ if self.current_epoch % 30 == 0:
+
+СТРОКИ 1921-1935:
++ Добавлен prefetch_factor=2 в train_loader, val_loader, test_loader
+
+СТРОКИ 2189-2200:
++ Добавлен ProfilerCallback в callbacks если --enable_profiler включен
+
+НОВЫЕ ФАЙЛЫ:
+- docs/312-IMPLEMENTATION-NOTES.md (подробная документация)
+- docs/312-COMPLETION-REPORT.md (отчет о завершении)
+- docs/312-CHANGES-SUMMARY.txt (этот файл)
+
+ОЖИДАЕМЫЙ РЕЗУЛЬТАТ:
+- Ускорение в 3-5x (с 25 минут до 5-8 минут на эпоху)
+- Curvature Regularization отключена по умолчанию (~2x ускорение)
+- TensorBoard визуализации реже (~1.1-1.15x ускорение)
+- DataLoader оптимизирован (~1.2-1.3x ускорение)
+- PyTorch Profiler готов к анализу узких мест
+
+ИСПОЛЬЗОВАНИЕ:
+python -m python_lab.src.train --symbol BTCUSDT --epochs 50 --batch_size 64 --enable_profiler

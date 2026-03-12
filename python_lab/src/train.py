@@ -14,6 +14,7 @@ from sklearn.metrics import classification_report, matthews_corrcoef
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
+from torch.profiler import profile, ProfilerActivity, schedule
 from torchmetrics.classification import (
     MulticlassAccuracy, 
     MulticlassF1Score,
@@ -109,12 +110,65 @@ python -m python_lab.src.train --symbol BTCUSDT --mode distill \\
 - Speedup и Compression ratio
 """
 
+class ProfilerCallback(pl.Callback):
+    """
+    PyTorch Profiler Callback для анализа производительности (Задача 312).
+    Профилирует CPU и CUDA операции для выявления узких мест.
+    """
+    def __init__(self, wait_steps=1, warmup_steps=1, active_steps=3, profiler_dir="profiler_logs"):
+        super().__init__()
+        self.wait_steps = wait_steps
+        self.warmup_steps = warmup_steps
+        self.active_steps = active_steps
+        self.profiler_dir = profiler_dir
+        self.profiler = None
+        self.step_count = 0
+        
+        # Создаем директорию для логов профилера
+        os.makedirs(profiler_dir, exist_ok=True)
+    
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        """Запускаем профилер на нужном шаге"""
+        if self.step_count == self.wait_steps:
+            # Создаем профилер с tensorboard handler
+            self.profiler = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=schedule(
+                    wait=0,  # Уже ждали
+                    warmup=self.warmup_steps,
+                    active=self.active_steps,
+                    repeat=1
+                ),
+                on_trace_ready=lambda p: p.export_chrome_trace(
+                    os.path.join(self.profiler_dir, f"trace_epoch_{trainer.current_epoch}.json")
+                ),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True
+            )
+            self.profiler.__enter__()
+            print(f"\n[PROFILER] Started profiling at step {self.step_count}")
+        
+        if self.profiler is not None:
+            self.profiler.step()
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Завершаем профилер после нужного количества шагов"""
+        self.step_count += 1
+        
+        if self.profiler is not None:
+            # Проверяем, завершено ли профилирование
+            if self.step_count > self.wait_steps + self.warmup_steps + self.active_steps:
+                self.profiler.__exit__(None, None, None)
+                self.profiler = None
+                print(f"\n[PROFILER] Profiling completed. Results saved to {self.profiler_dir}")
+
 class LiTModule(pl.LightningModule):
     """
     LightningModule для обучения модели LiT.
     Обертка над nn.Module, добавляющая логику обучения, валидации и оптимизации.
     """
-    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=True, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, **model_params):
+    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, **model_params):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
         self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, **model_params)
@@ -549,8 +603,8 @@ class LiTModule(pl.LightningModule):
                   f"Macro-F1={metrics['f1_macro']:.4f}, "
                   f"ECE={ece:.4f}, MCE={mce:.4f}")
             
-            # Сохраняем Reliability Diagram каждые 5 эпох
-            if self.current_epoch % 5 == 0:
+            # Сохраняем Reliability Diagram каждые 20 эпох
+            if self.current_epoch % 20 == 0:
                 # Получаем symbol из trainer (если доступен)
                 symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
                 base_path = Path(__file__).parent.parent.parent
@@ -575,8 +629,8 @@ class LiTModule(pl.LightningModule):
             if self.logger and hasattr(self.logger, 'experiment'):
                 writer = self.logger.experiment
                 
-                # Confusion Matrix через add_figure (каждые 5 эпох)
-                if self.current_epoch % 5 == 0:
+                # Confusion Matrix через add_figure (каждые 20 эпох)
+                if self.current_epoch % 20 == 0:
                     from .utils import plot_confusion_matrix_tensorboard, plot_pr_curves_tensorboard
                     
                     class_names = ["Flat", "Up", "Down"]
@@ -629,8 +683,8 @@ class LiTModule(pl.LightningModule):
             from .utils import log_gradient_norms
             log_gradient_norms(self.model, writer, self.current_epoch)
             
-            # Логируем embeddings для TensorBoard Projector (каждые 10 эпох)
-            if self.current_epoch % 10 == 0:
+            # Логируем embeddings для TensorBoard Projector (каждые 30 эпох)
+            if self.current_epoch % 30 == 0:
                 from .utils import log_embeddings
                 
                 # Получаем параметры из hparams
@@ -1220,7 +1274,7 @@ def train():
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
     parser.add_argument("--seq_len", type=int, default=100, help="Sequence length for the model")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=100, help="Maximum number of epochs")
     parser.add_argument("--horizon", type=int, default=100, help="Prediction horizon for labels (single horizon, deprecated)")
     parser.add_argument("--horizons", type=str, default=None, help="Comma-separated list of horizons for multi-horizon prediction (e.g., '10,50,100')")
@@ -1317,7 +1371,7 @@ def train():
     parser.add_argument("--trade_noise_filter_pct", type=float, default=0.05, help="Noise filter percentage (trades smaller than this % of median size are excluded)")
     
     # Параметры Curvature Regularization (Задача 238)
-    parser.add_argument("--use_curvature_reg", action=argparse.BooleanOptionalAction, default=True, help="Enable/disable curvature regularization penalty")
+    parser.add_argument("--use_curvature_reg", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable curvature regularization penalty")
     parser.add_argument("--curvature_lambda", type=float, default=1e-4, help="Curvature penalty coefficient (recommended: 1e-4 to 1e-3)")
     parser.add_argument("--input_noise_std", type=float, default=0.005, help="Standard deviation for input noise injection during training")
     
@@ -1330,6 +1384,12 @@ def train():
     parser.add_argument("--optuna_seq_len_search", action="store_true", help="Enable Optuna hyperparameter search for seq_len")
     parser.add_argument("--optuna_n_trials", type=int, default=10, help="Number of Optuna trials for seq_len search (default: 10)")
     parser.add_argument("--optuna_pruner", type=str, default="median", choices=["median", "hyperband", "patient"], help="Optuna pruner type")
+    
+    # Параметры PyTorch Profiler (Задача 312)
+    parser.add_argument("--enable_profiler", action="store_true", help="Enable PyTorch Profiler for performance analysis")
+    parser.add_argument("--profiler_wait_steps", type=int, default=1, help="Number of steps to wait before profiling starts")
+    parser.add_argument("--profiler_warmup_steps", type=int, default=1, help="Number of warmup steps for profiler")
+    parser.add_argument("--profiler_active_steps", type=int, default=3, help="Number of active profiling steps")
     
     args = parser.parse_args()
     
@@ -1924,6 +1984,7 @@ def train():
         shuffle=True,
         num_workers=num_workers, 
         pin_memory=True,
+        prefetch_factor=2,
         persistent_workers=True if num_workers > 0 else False,
         worker_init_fn=worker_init_fn
     )
@@ -1933,6 +1994,7 @@ def train():
         shuffle=False, 
         num_workers=num_workers, 
         pin_memory=True,
+        prefetch_factor=2,
         persistent_workers=True if num_workers > 0 else False,
         worker_init_fn=worker_init_fn
     )
@@ -1942,6 +2004,7 @@ def train():
         shuffle=False, 
         num_workers=num_workers, 
         pin_memory=True,
+        prefetch_factor=2,
         persistent_workers=True if num_workers > 0 else False,
         worker_init_fn=worker_init_fn
     )
@@ -2181,6 +2244,17 @@ def train():
         checkpoint_callback,
         LearningRateMonitor(logging_interval="epoch")
     ]
+    
+    # Добавляем PyTorch Profiler callback если включен (Задача 312)
+    if args.enable_profiler:
+        profiler_callback = ProfilerCallback(
+            wait_steps=args.profiler_wait_steps,
+            warmup_steps=args.profiler_warmup_steps,
+            active_steps=args.profiler_active_steps,
+            profiler_dir=f"profiler_logs/{args.symbol}"
+        )
+        callbacks.append(profiler_callback)
+        print(f"\n[PROFILER] PyTorch Profiler enabled. Results will be saved to profiler_logs/{args.symbol}")
     
     # Настройка TensorBoard logger с пользовательской директорией
     tb_dir = args.tb_dir if args.tb_dir else f"runs/{args.symbol}"
