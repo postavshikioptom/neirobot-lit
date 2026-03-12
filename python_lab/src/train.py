@@ -1894,13 +1894,13 @@ def train():
         #     
         #     # Для streaming вычисляем каналы вручную из сэмпла
         #     # Используем временный датасет для доступа к логике формирования каналов
-            temp_ds = LOBDataset(sample_df, seq_len=1, data_mode="memory", is_train=False)
-            sample_channels_df = temp_ds._compute_channels_for_normalization(list(range(len(sample_df))))
-            
-            normalizer.fit(sample_channels_df, winsor_limits=winsor_limits)
-            normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
-            update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
-            print(f"✓ Normalizer fitted on {len(sample_channels_df)} samples (streaming sample)")
+        #     temp_ds = LOBDataset(sample_df, seq_len=1, data_mode="memory", is_train=False)
+        #     sample_channels_df = temp_ds._compute_channels_for_normalization(list(range(len(sample_df))))
+        #     
+        #     normalizer.fit(sample_channels_df, winsor_limits=winsor_limits)
+        #     normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+        #     update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
+        #     print(f"✓ Normalizer fitted on {len(sample_channels_df)} samples (streaming sample)")
 
     # 8. Финальная нормализация всех данных
     # Примечание: глобальная нормализация удалена (Задача 311), так как теперь 

@@ -57,26 +57,17 @@ class FeatureEngineer:
             for c in ask_v_cols + bid_v_cols
         ]
 
-        # 5. Вычисляем OFI и VIB (Задача 306)
-        # OFI (Order Flow Imbalance) для лучшего уровня (depth 0)
-        # delta_bid = if bp0 > bp_prev { bv0 } else if bp0 < bp_prev { -bv_prev } else { bv0 - bv_prev }
-        # delta_ask = if ap0 < ap_prev { av0 } else if ap0 > ap_prev { -av_prev } else { av0 - av_prev }
-        # ofi = delta_bid - delta_ask
+        # 5. Вычисляем OFI и VIB (Задача 053, 306)
+        # OFI (Order Flow Imbalance) - Static Imbalance для лучшего уровня (depth 0)
+        # Формула: (V_bid_0 - V_ask_0) / (V_bid_0 + V_ask_0 + epsilon)
+        # Результат: скаляр в диапазоне [-1, 1] для каждого снапшота
         
-        ap0 = pl.col("ask_p_0")
-        av0 = pl.col("ask_v_0")
-        bp0 = pl.col("bid_p_0")
         bv0 = pl.col("bid_v_0")
+        av0 = pl.col("ask_v_0")
         
-        ap_prev = ap0.shift(1).fill_null(ap0)
-        av_prev = av0.shift(1).fill_null(av0)
-        bp_prev = bp0.shift(1).fill_null(bp0)
-        bv_prev = bv0.shift(1).fill_null(bv0)
-        
-        delta_bid = pl.when(bp0 > bp_prev).then(bv0).when(bp0 < bp_prev).then(-bv_prev).otherwise(bv0 - bv_prev)
-        delta_ask = pl.when(ap0 < ap_prev).then(av0).when(ap0 > ap_prev).then(-av_prev).otherwise(av0 - av_prev)
-        
-        ofi_expr = (delta_bid - delta_ask).cast(pl.Float32).alias("feat_ofi_100")
+        # Вычисляем static imbalance с защитой от деления на ноль
+        denom = bv0 + av0 + 1e-7
+        ofi_expr = ((bv0 - av0) / denom).clip(-1.0, 1.0).cast(pl.Float32).alias("feat_ofi_100")
         
         # VIB (Trade Imbalance) - если есть колонки сделок (Задача 212)
         if "feat_trade_volume" in df.columns and "feat_trade_side" in df.columns:

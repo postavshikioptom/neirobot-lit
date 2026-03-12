@@ -192,43 +192,44 @@ def compute_spread_zscore(ask_prices, bid_prices, window=1000):
 
 def compute_ofi(ask_prices, ask_volumes, bid_prices, bid_volumes, window=1000):
     """
-    Рассчитывает Order Flow Imbalance (OFI) - кумулятивный дисбаланс потока ордеров.
+    ОТКЛЮЧЕНО: Динамический OFI больше не используется.
     
-    OFI показывает агрессивность покупателей vs продавцов.
-    Положительный OFI = больше покупок, отрицательный = больше продаж.
+    Вместо этого используется compute_static_imbalance() для расчета
+    статического per-level imbalance согласно задаче 053.
+    
+    Старая реализация вычисляла кумулятивный дисбаланс потока ордеров,
+    который мог расти экспоненциально и достигать экстремальных значений.
+    """
+    raise NotImplementedError("Dynamic OFI is deprecated. Use compute_static_imbalance() instead.")
+
+
+def compute_static_imbalance(bid_v: np.ndarray, ask_v: np.ndarray) -> np.ndarray:
+    """
+    Статический per-level imbalance для каждого уровня стакана (Задача 053).
+    
+    Формула: Imbalance_i = (V_bid_i - V_ask_i) / (V_bid_i + V_ask_i + epsilon)
+    
+    Свойства:
+    - Диапазон: [-1, 1] (уже нормализован по природе формулы)
+    - Не требует дополнительной нормализации
+    - Стабилен и не растет экспоненциально
+    - Вычисляется для каждого уровня отдельно
     
     Args:
-        ask_prices: массив лучших цен ask
-        ask_volumes: массив объемов на лучшем ask
-        bid_prices: массив лучших цен bid
-        bid_volumes: массив объемов на лучшем bid
-        window: размер окна для кумулятивного расчета
+        bid_v: матрица объемов bid (N, 50), где N - количество сэмплов
+        ask_v: матрица объемов ask (N, 50)
     
     Returns:
-        np.ndarray: кумулятивный OFI
+        np.ndarray: матрица static imbalance (N, 50) с значениями в [-1, 1]
     """
-    n = len(ask_prices)
-    ofi = np.zeros(n)
+    # Вычисляем дисбаланс с защитой от деления на ноль
+    denom = bid_v + ask_v + 1e-7
+    imbalance = (bid_v - ask_v) / denom
     
-    for i in range(1, n):
-        # Изменение объема на bid стороне
-        if bid_prices[i] >= bid_prices[i-1]:
-            delta_bid = bid_volumes[i] - bid_volumes[i-1] if bid_prices[i] == bid_prices[i-1] else bid_volumes[i]
-        else:
-            delta_bid = -bid_volumes[i-1]
-        
-        # Изменение объема на ask стороне
-        if ask_prices[i] <= ask_prices[i-1]:
-            delta_ask = ask_volumes[i] - ask_volumes[i-1] if ask_prices[i] == ask_prices[i-1] else ask_volumes[i]
-        else:
-            delta_ask = -ask_volumes[i-1]
-        
-        # OFI = delta_bid - delta_ask (положительный = агрессивные покупки)
-        ofi[i] = delta_bid - delta_ask
+    # Убедимся, что результат в диапазоне [-1, 1]
+    imbalance = np.clip(imbalance, -1.0, 1.0)
     
-    # Кумулятивная сумма на окне
-    ofi_cumsum = pd.Series(ofi).rolling(window, min_periods=1).sum()
-    return ofi_cumsum.fillna(0).values
+    return imbalance.astype(np.float32)
 
 
 def compute_regime_features(df: pl.DataFrame, window: int = 1000) -> np.ndarray:
@@ -255,7 +256,13 @@ def compute_regime_features(df: pl.DataFrame, window: int = 1000) -> np.ndarray:
     intensity = compute_intensity(timestamps, window=window)
     volatility = compute_volatility(mid_prices, window=window)
     spread_zscore = compute_spread_zscore(ask_prices, bid_prices, window=window)
-    ofi = compute_ofi(ask_prices, ask_volumes, bid_prices, bid_volumes, window=window)
+    
+    # Задача 053: Вычисляем static imbalance для лучшего уровня (depth 0)
+    # Формула: (V_bid_0 - V_ask_0) / (V_bid_0 + V_ask_0 + epsilon)
+    # Результат: скаляр для каждого снапшота в диапазоне [-1, 1]
+    denom = bid_volumes + ask_volumes + 1e-7
+    ofi = (bid_volumes - ask_volumes) / denom
+    ofi = np.clip(ofi, -1.0, 1.0).astype(np.float32)
     
     # Объединяем в матрицу признаков
     features = np.column_stack([intensity, volatility, spread_zscore, ofi])
@@ -859,9 +866,18 @@ class LOBDataset(Dataset):
         if len(log_p) > lag:
             self.past_ret_cache[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
         
+        # 4. Расчет Static Imbalance (Задача 053) - замена динамического OFI
+        # Извлекаем bid_v и ask_v матрицы для всех 50 уровней
+        bid_v_matrix = df.select(bid_v_cols).to_numpy().astype(np.float64)  # (N, 50)
+        ask_v_matrix = df.select(ask_v_cols).to_numpy().astype(np.float64)  # (N, 50)
+        
+        # Вычисляем static imbalance для каждого уровня
+        self.imbalance_cache = compute_static_imbalance(bid_v_matrix, ask_v_matrix)  # (N, 50)
+        
         # Шаг 1: Диагностика сырых признаков (индикаторов)
         print(f"[DEBUG] past_ret raw: min={self.past_ret_cache.min():.6f}, max={self.past_ret_cache.max():.6f}")
         print(f"[DEBUG] vib raw: min={self.vib_cache.min():.6f}, max={self.vib_cache.max():.6f}")
+        print(f"[DEBUG] imbalance raw: min={self.imbalance_cache.min():.6f}, max={self.imbalance_cache.max():.6f}")
         
         self.has_computed_features = True
 
@@ -1283,11 +1299,11 @@ class LOBDataset(Dataset):
             bid_p = x_data[:, self.bid_p_indices]
             bid_v = x_data[:, self.bid_v_indices]
             
-            # Векторизованный расчет OFI/VIB/PastRet для сэмпла
+            # Векторизованный расчет Static Imbalance/VIB/PastRet для сэмпла
+            # ch[3]: Static Imbalance (Задача 053) - замена динамического OFI
             ofi_ch = np.zeros_like(ask_p)
-            if self.ofi_idx >= 0:
-                ofi_val = x_data[:, self.ofi_idx]
-                ofi_ch = np.repeat(ofi_val[:, np.newaxis], 50, axis=1)
+            if hasattr(self, 'imbalance_cache') and self.imbalance_cache is not None:
+                ofi_ch = self.imbalance_cache[data]  # (len(data), 50)
                 
             vib_ch = np.zeros_like(ask_p)
             if hasattr(self, 'vib_cache') and self.vib_cache is not None:
@@ -1308,12 +1324,8 @@ class LOBDataset(Dataset):
             ask_v = df_raw.select([f"feat_ask_v_{i}" for i in range(50)]).to_numpy()
             bid_v = df_raw.select([f"feat_bid_v_{i}" for i in range(50)]).to_numpy()
             
-            ofi_ch = np.zeros_like(ask_p)
-            if self.ofi_idx >= 0:
-                ofi_cols = [c for c in df_raw.columns if "ofi" in c.lower()]
-                if ofi_cols:
-                    ofi_val = df_raw.select(ofi_cols[0]).to_numpy()
-                    ofi_ch = np.repeat(ofi_val, 50, axis=1)
+            # ch[3]: Static Imbalance (Задача 053) - замена динамического OFI
+            ofi_ch = compute_static_imbalance(bid_v, ask_v)  # (N, 50)
             
             vib_ch = np.zeros_like(ask_p)
             past_ret_ch = np.zeros_like(ask_p)
@@ -1363,22 +1375,22 @@ class LOBDataset(Dataset):
         vol_ch = self.normalize_channel(vol_ch_raw, channel_idx=1)
         imb_ch = self.normalize_channel(imb_ch_raw, channel_idx=2)
         
-        # ch[3]: OFI (Order Flow Imbalance)
-        if self.ofi_idx >= 0:
-            ofi_raw = torch.from_numpy(x_raw[:, self.ofi_idx].copy()).float()
-        else:
-            # Fallback для совместимости
-            ap0, av0, bp0, bv0 = ask_p[:, 0], ask_v[:, 0], bid_p[:, 0], bid_v[:, 0]
-            bp_prev = torch.cat([bp0[:1], bp0[:-1]])
-            bv_prev = torch.cat([bv0[:1], bv0[:-1]])
-            ap_prev = torch.cat([ap0[:1], ap0[:-1]])
-            av_prev = torch.cat([av0[:1], av0[:-1]])
-            delta_bid = torch.where(bp0 > bp_prev, bv0, torch.where(bp0 < bp_prev, -bv_prev, bv0 - bv_prev))
-            delta_ask = torch.where(ap0 < ap_prev, av0, torch.where(ap0 > ap_prev, -av_prev, av0 - av_prev))
-            ofi_raw = (delta_bid - delta_ask).cumsum(dim=0)
+        # Задача 311.2.4: Клиппинг для Channel 0 (Price) - ограничение экстремальных значений
+        # Robust нормализация может создавать выбросы при маленьком IQR
+        # Ограничиваем диапазон [-5, 5] для стабильности
+        price_ch = torch.clamp(price_ch, -5.0, 5.0)
         
-        ofi_ch_raw = ofi_raw.unsqueeze(-1).repeat(1, 50)
-        ofi_ch = self.normalize_channel(ofi_ch_raw, channel_idx=3)
+        # ch[3]: Static Imbalance (Задача 053) - замена динамического OFI
+        # Используем imbalance_cache если доступен (для memory mode)
+        if idx is not None and hasattr(self, 'imbalance_cache') and self.imbalance_cache is not None:
+            imb_seq = self.imbalance_cache[idx : idx + self.seq_len]  # (seq_len, 50)
+            ofi_raw = torch.from_numpy(imb_seq.copy()).float()
+        else:
+            # Fallback: вычисляем static imbalance на лету из bid_v и ask_v
+            denom = bid_v + ask_v + 1e-8
+            ofi_raw = (bid_v - ask_v) / denom
+        
+        ofi_ch = self.normalize_channel(ofi_raw, channel_idx=3)
         
         # ch[4]: Trade Imbalance (VIB)
         if idx is not None and hasattr(self, 'vib_cache') and self.vib_cache is not None:

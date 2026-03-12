@@ -61,9 +61,11 @@ neirobot-lit/
 │   │	├── lit_model.py       # архитектура LiT: Transformer с patching, embedding, attention (PyTorch реализация)
 │   │	├── dataset.py         # загрузка parquet, preprocessing (event-time snapshots, normalization: z-score, (p-mid)/mid, log(vol))
 │   │	├── utils.py           # helpers: metrics (precision, recall, MCC), plotting loss, early stopping callback
+│   │	├── features.py        # используется только для предварительной обработки сырых данных (до загрузки в Dataset)
+│  	│	├── train.py           # обучение: argparse (--symbol, --data_dir, --epochs, --batch_size, --output_dir)
 │   │	└── types.py           # типы данных (если нужно: Snapshot, Label enums: up/down/flat)
 │	├── scripts/               # CLI-скрипты для запуска
-│   ├── train.py           # обучение: argparse (--symbol, --data_dir, --epochs, --batch_size, --output_dir)
+
 │   ├── export_onnx.py     # экспорт обученной модели в ONNX (--input_model bots/CAKE/model/lit.h5 --output bots/CAKEUSDT/model/lit.onnx)
 │   └── backtest.py        # бектест: симуляция на holdout данных (--symbol, --model_path, metrics: sharpe, drawdown, pnpl)
 │
