@@ -444,6 +444,35 @@ if __name__ == "__main__":
     test_channel_formation()
 ```
 
+## Дополнителньая Подзадача 311.6 - Отключение всех режимов кроме memory
+✅ Исправления завершены
+dataset.py Исправлена ошибка - удален дублированный код в конце _init_memory_mode (строка 942)
+
+Заменено len(self.features) на len(self.x_raw)
+Закомментированы режимы в __init__:
+
+elif data_mode == "streaming" → закомментировано
+elif data_mode == "memmap" → закомментировано
+Закомментированы методы:
+
+_init_streaming_mode() - весь метод
+_init_memmap_mode() - весь метод
+_getitem_streaming() - весь метод
+_build_row_offsets() - весь метод
+train.py
+Закомментирована функция _streaming_worker_init_fn()
+
+Изменены параметры argparse:
+
+--data_mode теперь только ["memory"]
+--cache_dir закомментирован
+Закомментированы все условия:
+
+if args.data_mode == "streaming" (6 мест)
+elif args.data_mode == "memmap" (3 места)
+Условия с num_workers и worker_init_fn для streaming
+
+
 
 ------------------------------------------
 ## ОЖИДАЕМЫЕ РЕЗУЛЬТАТЫ

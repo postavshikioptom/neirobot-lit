@@ -699,14 +699,18 @@ class LOBDataset(Dataset):
             self.num_horizons = 1
 
         # Mode-specific initialization
+        # ПРИМЕЧАНИЕ: Режимы "streaming" и "memmap" отключены для упрощения кода.
+        # Теперь используется только режим "memory" для загрузки данных в оперативную память.
         if data_mode == "memory":
             self._init_memory_mode(df)
-        elif data_mode == "streaming":
-            self._init_streaming_mode(df)
-        elif data_mode == "memmap":
-            self._init_memmap_mode(df)
+        # elif data_mode == "streaming":
+        #     # ОТКЛЮЧЕНО: Streaming режим больше не поддерживается
+        #     self._init_streaming_mode(df)
+        # elif data_mode == "memmap":
+        #     # ОТКЛЮЧЕНО: Memmap режим больше не поддерживается
+        #     self._init_memmap_mode(df)
         else:
-            raise ValueError(f"Unknown data_mode: {data_mode}")
+            raise ValueError(f"Unknown data_mode: {data_mode}. Only 'memory' mode is supported.")
 
         # Задача 307.6: Аудит целостности признаков и логирование первого сэмпла
         expected_cols = [f"feat_bid_p_{i}" for i in range(50)] + [f"feat_ask_p_{i}" for i in range(50)]
@@ -936,214 +940,209 @@ class LOBDataset(Dataset):
             regime_features = compute_regime_features(df, window=self.regime_window)
             self.regime_ids = self.regime_detector.predict_states(regime_features)[self.seq_len - 1:]
 
-        weight_labels = self.labels[self.seq_len-1:]
-        self.sample_weights = self._calculate_time_weights(self.timestamps[self.seq_len-1:], weight_labels)
-        
-        self.regime_ids = np.zeros(len(self.features) - self.seq_len + 1, dtype=np.int64)
-        if self.regime_detector and self.regime_detector.is_fitted:
-            regime_features = compute_regime_features(df, window=self.regime_window)
-            self.regime_ids = self.regime_detector.predict_states(regime_features)[self.seq_len - 1:]
+    # ОТКЛЮЧЕНО: Streaming режим больше не поддерживается для упрощения кода
+    # def _init_streaming_mode(self, df: Union[pl.DataFrame, pl.LazyFrame, str]):
+    #     if isinstance(df, str):
+    #         df = pl.scan_parquet(df, low_memory=True)
+    #     elif isinstance(df, pl.DataFrame):
+    #         df = df.lazy()
+    #     
+    #     schema = df.collect_schema()
+    #     
+    #     # Строго заданный порядок признаков LOB (Задача 304)
+    #     feat_cols = [f"feat_ask_p_{i}" for i in range(self.n_levels)] + \
+    #                 [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
+    #                 [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
+    #                 [f"feat_bid_v_{i}" for i in range(self.n_levels)]
+    #     
+    #     # Добавляем остальные признаки
+    #     all_feat_cols = [c for c in schema.names() if c.startswith("feat_")]
+    #     extra_feats = [c for c in all_feat_cols if c not in feat_cols]
+    #     feat_cols.extend(extra_feats)
+    #
+    #     if self.exclude_features:
+    #         feat_cols = [c for c in feat_cols if c not in self.exclude_features]
+    #     
+    #     # Защита от NaN в пайплайне Polars (Задача 094-2)
+    #     # Задача 306.2.1: Гарантируем наличие timestamp_ms
+    #     select_cols = [*feat_cols, *self.label_cols, "mid_price"]
+    #     if "timestamp_ms" in schema.names():
+    #         select_cols.append("timestamp_ms")
+    #     elif "timestamp" in schema.names():
+    #         df = df.rename({"timestamp": "timestamp_ms"})
+    #         select_cols.append("timestamp_ms")
+    #         
+    #     self.lazy_df = df.select(select_cols).fill_null(0.0)
+    #     
+    #     total_rows = self.lazy_df.select(pl.len()).collect(streaming=True).item()
+    #     self.total_samples = total_rows - self.seq_len + 1
+    #     
+    #     self.file_path = df if isinstance(df, str) else None
+    #     self.row_offsets = self._build_row_offsets(self.file_path, total_rows)
+    #     self.feat_cols = feat_cols
+    #     # Задача 306.2.2: Централизованная настройка индексов
+    #     self._setup_feature_indices()
+    #
+    #     
+    #     self._cache_batch = None
+    #     self._batch_size = 50000 
+    #     
+    #     mid_prices = self.lazy_df.select("mid_price").collect(streaming=True).to_series().to_numpy()
+    #     self.vols = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
+    #     
+    #     self.timestamps = self.lazy_df.select("timestamp_ms").slice(self.seq_len - 1).collect(streaming=True).to_series().to_numpy()
+    #     
+    #     # Загружаем метки для весов (первый горизонт)
+    #     weight_col = self.label_cols[0]
+    #     labels_for_weights = self.lazy_df.select(weight_col).slice(self.seq_len - 1).collect(streaming=True).to_series().to_numpy()
+    #     self.sample_weights = self._calculate_time_weights(self.timestamps, labels_for_weights)
+    #     self.regime_ids = np.zeros(self.total_samples, dtype=np.int64)
+    #     
+    #     # Задача 308: Инициализация кэшей для streaming режима (пока пустые, будут заполняться в _getitem_streaming)
+    #     self.vib_cache = None
+    #     self.past_ret_cache = None
 
-    def _init_streaming_mode(self, df: Union[pl.DataFrame, pl.LazyFrame, str]):
-        if isinstance(df, str):
-            df = pl.scan_parquet(df, low_memory=True)
-        elif isinstance(df, pl.DataFrame):
-            df = df.lazy()
-        
-        schema = df.collect_schema()
-        
-        # Строго заданный порядок признаков LOB (Задача 304)
-        feat_cols = [f"feat_ask_p_{i}" for i in range(self.n_levels)] + \
-                    [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
-                    [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
-                    [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-        
-        # Добавляем остальные признаки
-        all_feat_cols = [c for c in schema.names() if c.startswith("feat_")]
-        extra_feats = [c for c in all_feat_cols if c not in feat_cols]
-        feat_cols.extend(extra_feats)
+    # ОТКЛЮЧЕНО: Используется только для streaming режима
+    # def _build_row_offsets(self, file_path: Union[str, None], total_rows: int) -> np.ndarray:
+    #     if file_path and Path(file_path).exists():
+    #         try:
+    #             pf = pq.ParquetFile(file_path)
+    #             row_counts = [pf.row_group(i).num_rows for i in range(pf.num_row_groups)]
+    #             return np.cumsum(row_counts)
+    #         except: pass
+    #     num_groups = min(100, total_rows)
+    #     group_size = total_rows // num_groups
+    #     return np.arange(group_size, total_rows + group_size, group_size, dtype=np.int64)[:num_groups]
 
-        if self.exclude_features:
-            feat_cols = [c for c in feat_cols if c not in self.exclude_features]
-        
-        # Защита от NaN в пайплайне Polars (Задача 094-2)
-        # Задача 306.2.1: Гарантируем наличие timestamp_ms
-        select_cols = [*feat_cols, *self.label_cols, "mid_price"]
-        if "timestamp_ms" in schema.names():
-            select_cols.append("timestamp_ms")
-        elif "timestamp" in schema.names():
-            df = df.rename({"timestamp": "timestamp_ms"})
-            select_cols.append("timestamp_ms")
-            
-        self.lazy_df = df.select(select_cols).fill_null(0.0)
-        
-        total_rows = self.lazy_df.select(pl.len()).collect(streaming=True).item()
-        self.total_samples = total_rows - self.seq_len + 1
-        
-        self.file_path = df if isinstance(df, str) else None
-        self.row_offsets = self._build_row_offsets(self.file_path, total_rows)
-        self.feat_cols = feat_cols
-        # Задача 306.2.2: Централизованная настройка индексов
-        self._setup_feature_indices()
-
-        
-        self._cache_batch = None
-        self._batch_size = 50000 
-        
-        mid_prices = self.lazy_df.select("mid_price").collect(streaming=True).to_series().to_numpy()
-        self.vols = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
-        
-        self.timestamps = self.lazy_df.select("timestamp_ms").slice(self.seq_len - 1).collect(streaming=True).to_series().to_numpy()
-        
-        # Загружаем метки для весов (первый горизонт)
-        weight_col = self.label_cols[0]
-        labels_for_weights = self.lazy_df.select(weight_col).slice(self.seq_len - 1).collect(streaming=True).to_series().to_numpy()
-        self.sample_weights = self._calculate_time_weights(self.timestamps, labels_for_weights)
-        self.regime_ids = np.zeros(self.total_samples, dtype=np.int64)
-        
-        # Задача 308: Инициализация кэшей для streaming режима (пока пустые, будут заполняться в _getitem_streaming)
-        self.vib_cache = None
-        self.past_ret_cache = None
-
-    def _build_row_offsets(self, file_path: Union[str, None], total_rows: int) -> np.ndarray:
-        if file_path and Path(file_path).exists():
-            try:
-                pf = pq.ParquetFile(file_path)
-                row_counts = [pf.row_group(i).num_rows for i in range(pf.num_row_groups)]
-                return np.cumsum(row_counts)
-            except: pass
-        num_groups = min(100, total_rows)
-        group_size = total_rows // num_groups
-        return np.arange(group_size, total_rows + group_size, group_size, dtype=np.int64)[:num_groups]
-
-    def _init_memmap_mode(self, df: Union[pl.DataFrame, str]):
-        if not self.cache_dir: raise ValueError("cache_dir required")
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        meta_path = self.cache_dir / "metadata.json"
-        if meta_path.exists():
-            with open(meta_path, 'r') as f: meta = json.load(f)
-            # Проверка консистентности (Задача 094-2)
-            if meta.get('label_cols') == self.label_cols and meta.get('seq_len') == self.seq_len:
-                self.features_seq = np.memmap(self.cache_dir / "features.npy", dtype='float32', mode='r', shape=tuple(meta['features_shape']))
-                self.labels = np.memmap(self.cache_dir / "labels.npy", dtype='int64', mode='r', shape=tuple(meta['labels_shape']))
-                self.vols = np.memmap(self.cache_dir / "vols.npy", dtype='float32', mode='r', shape=(meta['n_samples'],))
-                self.timestamps = np.memmap(self.cache_dir / "timestamps.npy", dtype='int64', mode='r', shape=(meta['n_samples'],))
-                self.sample_weights = torch.from_numpy(np.memmap(self.cache_dir / "weights.npy", dtype='float32', mode='r', shape=(meta['n_samples'],)).copy())
-                self.regime_ids = np.zeros(meta['n_samples'], dtype=np.int64)
-                return
-
-        if isinstance(df, str): df = pl.read_parquet(df)
-        elif isinstance(df, pl.LazyFrame): df = df.collect()
-        
-        # Строго заданный порядок признаков LOB (Задача 304)
-        feat_cols = [f"feat_ask_p_{i}" for i in range(self.n_levels)] + \
-                    [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
-                    [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
-                    [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-        
-        # Добавляем остальные признаки
-        all_feat_cols = [c for c in df.columns if c.startswith("feat_")]
-        extra_feats = [c for c in all_feat_cols if c not in feat_cols]
-        feat_cols.extend(extra_feats)
-
-        if self.exclude_features: feat_cols = [c for c in feat_cols if c not in self.exclude_features]
-        
-        self.feat_cols = feat_cols
-        # Задача 306.2.2: Централизованная настройка индексов
-        self._setup_feature_indices()
-        
-        total_rows = len(df) - self.seq_len + 1
-        n_feats = len(feat_cols)
-        
-        f_map = np.memmap(self.cache_dir / "features.npy", dtype='float32', mode='w+', shape=(total_rows, self.seq_len, n_feats))
-        l_shape = (total_rows, self.num_horizons) if self.is_multi_horizon else (total_rows,)
-        l_map = np.memmap(self.cache_dir / "labels.npy", dtype='int64', mode='w+', shape=l_shape)
-        v_map = np.memmap(self.cache_dir / "vols.npy", dtype='float32', mode='w+', shape=(total_rows,))
-        t_map = np.memmap(self.cache_dir / "timestamps.npy", dtype='int64', mode='w+', shape=(total_rows,))
-        
-        mid_prices = df["mid_price"].to_numpy()
-        vols_arr = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
-        
-        has_ts = "timestamp_ms" in df.columns
-        if not has_ts and "timestamp" in df.columns:
-            df = df.rename({"timestamp": "timestamp_ms"})
-            has_ts = True
-
-        # Построчная запись (чанками)
-        for i in range(total_rows):
-            f_map[i] = df.select(feat_cols).slice(i, self.seq_len).to_numpy()
-            if self.is_multi_horizon:
-                l_map[i] = [df[lc][i + self.seq_len - 1] for lc in self.label_cols]
-            else:
-                l_map[i] = df["label"][i + self.seq_len - 1]
-            v_map[i] = vols_arr[i]
-            if has_ts:
-                t_map[i] = df["timestamp_ms"][i + self.seq_len - 1]
-            else:
-                t_map[i] = i + self.seq_len - 1
-
-        w_arr = self._calculate_time_weights(t_map[:], l_map[:]).numpy()
-        w_map = np.memmap(self.cache_dir / "weights.npy", dtype='float32', mode='w+', shape=(total_rows,))
-        w_map[:] = w_arr
-        
-        with open(meta_path, 'w') as f:
-            json.dump({'n_samples': total_rows, 'features_shape': [total_rows, self.seq_len, n_feats], 
-                      'labels_shape': list(l_shape), 'label_cols': self.label_cols, 'seq_len': self.seq_len}, f)
-        
-        f_map.flush(); l_map.flush(); v_map.flush(); t_map.flush(); w_map.flush()
-        self.features_seq, self.labels, self.vols, self.timestamps = f_map, l_map, v_map, t_map
-        self.sample_weights = torch.from_numpy(w_map[:])
-        self.regime_ids = np.zeros(total_rows, dtype=np.int64)
-        
-        # Задача 308: Инициализация кэшей для memmap режима
-        vib_path = self.cache_dir / "vib_cache.npy"
-        past_ret_path = self.cache_dir / "past_ret_cache.npy"
-        
-        if vib_path.exists() and past_ret_path.exists():
-            # Загружаем существующие кэши
-            self.vib_cache = np.memmap(vib_path, dtype='float32', mode='r', shape=(total_rows + self.seq_len - 1,))
-            self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='r', shape=(total_rows + self.seq_len - 1, len(self.past_returns_lags)))
-            print(f"[{self.__class__.__name__}] Loaded VIB/PastRet caches from memmap files")
-        else:
-            # Вычисляем и сохраняем кэши
-            print(f"[{self.__class__.__name__}] Memmap cache for VIB/PastRet not found. Computing...")
-            
-            bid_v_raw = df.select([f"feat_bid_v_{i}" for i in range(self.n_levels)]).to_numpy()
-            ask_v_raw = df.select([f"feat_ask_v_{i}" for i in range(self.n_levels)]).to_numpy()
-            mid_prices = df["mid_price"].to_numpy()
-            
-            vib_raw = compute_depth_imbalance_globally(bid_v_raw, ask_v_raw)
-            past_ret_raw = compute_past_returns_globally(mid_prices, lags=self.past_returns_lags)
-            
-            # Нормализация
-            temp_df = pl.DataFrame({
-                "feat_vib": vib_raw.astype(np.float32),
-                "feat_past_ret": past_ret_raw[:, -1].astype(np.float32)
-            })
-            
-            if temp_df.height > 0 and self.scaler_type in ("robust", "winsor_robust"):
-                norm_cache = Normalizer(output_path=None)
-                norm_cache.scaler_type = self.scaler_type
-                norm_cache.winsor_limits = self.winsor_limits
-                norm_cache.fit(temp_df)
-                temp_norm = norm_cache.transform(temp_df)
-                
-                # Создаем memmap файлы и записываем данные
-                self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
-                self.vib_cache[:] = temp_norm["feat_vib"].to_numpy().astype(np.float32)
-                
-                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=vib_raw.shape)
-                self.past_ret_cache[:] = temp_norm["feat_past_ret"].to_numpy().astype(np.float32)
-            else:
-                self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
-                self.vib_cache[:] = vib_raw.astype(np.float32)
-                self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=vib_raw.shape)
-                self.past_ret_cache[:] = past_ret_raw[:, -1].astype(np.float32)
-            
-            self.vib_cache.flush()
-            self.past_ret_cache.flush()
-            print(f"[{self.__class__.__name__}] VIB/PastRet caches created and saved to memmap files")
+    # ОТКЛЮЧЕНО: Memmap режим больше не поддерживается для упрощения кода
+    # def _init_memmap_mode(self, df: Union[pl.DataFrame, str]):
+    #     if not self.cache_dir: raise ValueError("cache_dir required")
+    #     self.cache_dir.mkdir(parents=True, exist_ok=True)
+    #     
+    #     meta_path = self.cache_dir / "metadata.json"
+    #     if meta_path.exists():
+    #         with open(meta_path, 'r') as f: meta = json.load(f)
+    #         # Проверка консистентности (Задача 094-2)
+    #         if meta.get('label_cols') == self.label_cols and meta.get('seq_len') == self.seq_len:
+    #             self.features_seq = np.memmap(self.cache_dir / "features.npy", dtype='float32', mode='r', shape=tuple(meta['features_shape']))
+    #             self.labels = np.memmap(self.cache_dir / "labels.npy", dtype='int64', mode='r', shape=tuple(meta['labels_shape']))
+    #             self.vols = np.memmap(self.cache_dir / "vols.npy", dtype='float32', mode='r', shape=(meta['n_samples'],))
+    #             self.timestamps = np.memmap(self.cache_dir / "timestamps.npy", dtype='int64', mode='r', shape=(meta['n_samples'],))
+    #             self.sample_weights = torch.from_numpy(np.memmap(self.cache_dir / "weights.npy", dtype='float32', mode='r', shape=(meta['n_samples'],)).copy())
+    #             self.regime_ids = np.zeros(meta['n_samples'], dtype=np.int64)
+    #             return
+    #
+    #     if isinstance(df, str): df = pl.read_parquet(df)
+    #     elif isinstance(df, pl.LazyFrame): df = df.collect()
+    #     
+    #     # Строго заданный порядок признаков LOB (Задача 304)
+    #     feat_cols = [f"feat_ask_p_{i}" for i in range(self.n_levels)] + \
+    #                 [f"feat_ask_v_{i}" for i in range(self.n_levels)] + \
+    #                 [f"feat_bid_p_{i}" for i in range(self.n_levels)] + \
+    #                 [f"feat_bid_v_{i}" for i in range(self.n_levels)]
+    #     
+    #     # Добавляем остальные признаки
+    #     all_feat_cols = [c for c in df.columns if c.startswith("feat_")]
+    #     extra_feats = [c for c in all_feat_cols if c not in feat_cols]
+    #     feat_cols.extend(extra_feats)
+    #
+    #     if self.exclude_features: feat_cols = [c for c in feat_cols if c not in self.exclude_features]
+    #     
+    #     self.feat_cols = feat_cols
+    #     # Задача 306.2.2: Централизованная настройка индексов
+    #     self._setup_feature_indices()
+    #     
+    #     total_rows = len(df) - self.seq_len + 1
+    #     n_feats = len(feat_cols)
+    #     
+    #     f_map = np.memmap(self.cache_dir / "features.npy", dtype='float32', mode='w+', shape=(total_rows, self.seq_len, n_feats))
+    #     l_shape = (total_rows, self.num_horizons) if self.is_multi_horizon else (total_rows,)
+    #     l_map = np.memmap(self.cache_dir / "labels.npy", dtype='int64', mode='w+', shape=l_shape)
+    #     v_map = np.memmap(self.cache_dir / "vols.npy", dtype='float32', mode='w+', shape=(total_rows,))
+    #     t_map = np.memmap(self.cache_dir / "timestamps.npy", dtype='int64', mode='w+', shape=(total_rows,))
+    #     
+    #     mid_prices = df["mid_price"].to_numpy()
+    #     vols_arr = compute_target_vol(mid_prices, window=self.vol_window)[self.seq_len - 1:]
+    #     
+    #     has_ts = "timestamp_ms" in df.columns
+    #     if not has_ts and "timestamp" in df.columns:
+    #         df = df.rename({"timestamp": "timestamp_ms"})
+    #         has_ts = True
+    #
+    #     # Построчная запись (чанками)
+    #     for i in range(total_rows):
+    #         f_map[i] = df.select(feat_cols).slice(i, self.seq_len).to_numpy()
+    #         if self.is_multi_horizon:
+    #             l_map[i] = [df[lc][i + self.seq_len - 1] for lc in self.label_cols]
+    #         else:
+    #             l_map[i] = df["label"][i + self.seq_len - 1]
+    #         v_map[i] = vols_arr[i]
+    #         if has_ts:
+    #             t_map[i] = df["timestamp_ms"][i + self.seq_len - 1]
+    #         else:
+    #             t_map[i] = i + self.seq_len - 1
+    #
+    #     w_arr = self._calculate_time_weights(t_map[:], l_map[:]).numpy()
+    #     w_map = np.memmap(self.cache_dir / "weights.npy", dtype='float32', mode='w+', shape=(total_rows,))
+    #     w_map[:] = w_arr
+    #     
+    #     with open(meta_path, 'w') as f:
+    #         json.dump({'n_samples': total_rows, 'features_shape': [total_rows, self.seq_len, n_feats], 
+    #                   'labels_shape': list(l_shape), 'label_cols': self.label_cols, 'seq_len': self.seq_len}, f)
+    #     
+    #     f_map.flush(); l_map.flush(); v_map.flush(); t_map.flush(); w_map.flush()
+    #     self.features_seq, self.labels, self.vols, self.timestamps = f_map, l_map, v_map, t_map
+    #     self.sample_weights = torch.from_numpy(w_map[:])
+    #     self.regime_ids = np.zeros(total_rows, dtype=np.int64)
+    #     
+    #     # Задача 308: Инициализация кэшей для memmap режима
+    #     vib_path = self.cache_dir / "vib_cache.npy"
+    #     past_ret_path = self.cache_dir / "past_ret_cache.npy"
+    #     
+    #     if vib_path.exists() and past_ret_path.exists():
+    #         # Загружаем существующие кэши
+    #         self.vib_cache = np.memmap(vib_path, dtype='float32', mode='r', shape=(total_rows + self.seq_len - 1,))
+    #         self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='r', shape=(total_rows + self.seq_len - 1, len(self.past_returns_lags)))
+    #         print(f"[{self.__class__.__name__}] Loaded VIB/PastRet caches from memmap files")
+    #     else:
+    #         # Вычисляем и сохраняем кэши
+    #         print(f"[{self.__class__.__name__}] Memmap cache for VIB/PastRet not found. Computing...")
+    #         
+    #         bid_v_raw = df.select([f"feat_bid_v_{i}" for i in range(self.n_levels)]).to_numpy()
+    #         ask_v_raw = df.select([f"feat_ask_v_{i}" for i in range(self.n_levels)]).to_numpy()
+    #         mid_prices = df["mid_price"].to_numpy()
+    #         
+    #         vib_raw = compute_depth_imbalance_globally(bid_v_raw, ask_v_raw)
+    #         past_ret_raw = compute_past_returns_globally(mid_prices, lags=self.past_returns_lags)
+    #         
+    #         # Нормализация
+    #         temp_df = pl.DataFrame({
+    #             "feat_vib": vib_raw.astype(np.float32),
+    #             "feat_past_ret": past_ret_raw[:, -1].astype(np.float32)
+    #         })
+    #         
+    #         if temp_df.height > 0 and self.scaler_type in ("robust", "winsor_robust"):
+    #             norm_cache = Normalizer(output_path=None)
+    #             norm_cache.scaler_type = self.scaler_type
+    #             norm_cache.winsor_limits = self.winsor_limits
+    #             norm_cache.fit(temp_df)
+    #             temp_norm = norm_cache.transform(temp_df)
+    #             
+    #             # Создаем memmap файлы и записываем данные
+    #             self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+    #             self.vib_cache[:] = temp_norm["feat_vib"].to_numpy().astype(np.float32)
+    #             
+    #             self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+    #             self.past_ret_cache[:] = temp_norm["feat_past_ret"].to_numpy().astype(np.float32)
+    #         else:
+    #             self.vib_cache = np.memmap(vib_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+    #             self.vib_cache[:] = vib_raw.astype(np.float32)
+    #             self.past_ret_cache = np.memmap(past_ret_path, dtype='float32', mode='w+', shape=vib_raw.shape)
+    #             self.past_ret_cache[:] = past_ret_raw[:, -1].astype(np.float32)
+    #         
+    #         self.vib_cache.flush()
+    #         self.past_ret_cache.flush()
+    #         print(f"[{self.__class__.__name__}] VIB/PastRet caches created and saved to memmap files")
 
 
 
@@ -1170,64 +1169,65 @@ class LOBDataset(Dataset):
         
         return self._process_sample(x_raw, y, v, w, regime_id, idx=idx)
 
-    def _getitem_streaming(self, idx):
-        if self._cache_batch is None or not (self._cache_start_idx <= idx < self._cache_end_idx):
-            start = idx
-            batch_df = self.lazy_df.slice(start, self._batch_size + self.seq_len - 1).collect(streaming=True)
-            
-            # Задача 308-4: Расчет индикаторов до нормализации в streaming моде
-            bid_cols = [f"feat_bid_v_{i}" for i in range(self.n_levels)]
-            ask_cols = [f"feat_ask_v_{i}" for i in range(self.n_levels)]
-            
-            raw_bid_sum = batch_df.select(pl.sum_horizontal(bid_cols)).to_numpy().flatten()
-            raw_ask_sum = batch_df.select(pl.sum_horizontal(ask_cols)).to_numpy().flatten()
-            denom = raw_bid_sum + raw_ask_sum
-            vib_raw = np.where(denom > 1e-9, (raw_bid_sum - raw_ask_sum) / (denom + 1e-9), 0.0).astype(np.float32)
-            
-            mid_prices = batch_df["mid_price"].to_numpy()
-            log_prices = np.log(np.maximum(mid_prices, 1e-9))
-            past_ret_raw = np.zeros(len(mid_prices), dtype=np.float32)
-            if len(log_prices) > self.seq_len: # Используем seq_len как лаг в streaming моде
-                past_ret_raw[self.seq_len:] = log_prices[self.seq_len:] - log_prices[:-self.seq_len]
-            
-            # Нормализация индикаторов
-            temp_df_ind = pl.DataFrame({"feat_vib_val": vib_raw, "feat_past_ret_val": past_ret_raw})
-            norm_temp = Normalizer(output_path=None, scale_multiplier=self.scale_multiplier)
-            norm_temp.scaler_type = self.scaler_type
-            norm_temp.winsor_limits = self.winsor_limits
-            norm_temp.fit(temp_df_ind)
-            transformed_ind = norm_temp.transform(temp_df_ind)
-            
-            self.vib_cache = transformed_ind["feat_vib_val"].to_numpy().astype(np.float32)
-            self.past_ret_cache = transformed_ind["feat_past_ret_val"].to_numpy().astype(np.float32)
-            
-            # Формирование последовательностей
-            feat_data = batch_df.select(self.feat_cols).to_numpy()
-            self._cache_batch = np.stack([feat_data[i:i+self.seq_len] for i in range(len(batch_df) - self.seq_len + 1)], axis=0)
-            
-            if self.is_multi_horizon:
-                l_lists = [batch_df.select(lc).slice(self.seq_len-1).to_series().to_numpy() for lc in self.label_cols]
-                self._cache_labels = np.stack(l_lists, axis=1)
-            else:
-                self._cache_labels = batch_df.select("label").slice(self.seq_len-1).to_series().to_numpy()
-            
-            self._cache_vols = self.vols[start : start + len(self._cache_labels)]
-            self._cache_start_idx, self._cache_end_idx = start, start + len(self._cache_labels)
-
-        off = idx - self._cache_start_idx
-        x_raw_current = self._cache_batch[off]
-        
-        # Update current cache indices
-        self._current_cache_off = off
-
-        return self._process_sample(
-            x_raw_current, 
-            self._cache_labels[off], 
-            self._cache_vols[off], 
-            self.sample_weights[idx], 
-            torch.tensor(self.regime_ids[idx]).long(), 
-            idx=off # Using offset because caches in streaming are batch-local
-        )
+    # ОТКЛЮЧЕНО: Используется только для streaming режима
+    # def _getitem_streaming(self, idx):
+    #     if self._cache_batch is None or not (self._cache_start_idx <= idx < self._cache_end_idx):
+    #         start = idx
+    #         batch_df = self.lazy_df.slice(start, self._batch_size + self.seq_len - 1).collect(streaming=True)
+    #         
+    #         # Задача 308-4: Расчет индикаторов до нормализации в streaming моде
+    #         bid_cols = [f"feat_bid_v_{i}" for i in range(self.n_levels)]
+    #         ask_cols = [f"feat_ask_v_{i}" for i in range(self.n_levels)]
+    #         
+    #         raw_bid_sum = batch_df.select(pl.sum_horizontal(bid_cols)).to_numpy().flatten()
+    #         raw_ask_sum = batch_df.select(pl.sum_horizontal(ask_cols)).to_numpy().flatten()
+    #         denom = raw_bid_sum + raw_ask_sum
+    #         vib_raw = np.where(denom > 1e-9, (raw_bid_sum - raw_ask_sum) / (denom + 1e-9), 0.0).astype(np.float32)
+    #         
+    #         mid_prices = batch_df["mid_price"].to_numpy()
+    #         log_prices = np.log(np.maximum(mid_prices, 1e-9))
+    #         past_ret_raw = np.zeros(len(mid_prices), dtype=np.float32)
+    #         if len(log_prices) > self.seq_len: # Используем seq_len как лаг в streaming моде
+    #             past_ret_raw[self.seq_len:] = log_prices[self.seq_len:] - log_prices[:-self.seq_len]
+    #         
+    #         # Нормализация индикаторов
+    #         temp_df_ind = pl.DataFrame({"feat_vib_val": vib_raw, "feat_past_ret_val": past_ret_raw})
+    #         norm_temp = Normalizer(output_path=None, scale_multiplier=self.scale_multiplier)
+    #         norm_temp.scaler_type = self.scaler_type
+    #         norm_temp.winsor_limits = self.winsor_limits
+    #         norm_temp.fit(temp_df_ind)
+    #         transformed_ind = norm_temp.transform(temp_df_ind)
+    #         
+    #         self.vib_cache = transformed_ind["feat_vib_val"].to_numpy().astype(np.float32)
+    #         self.past_ret_cache = transformed_ind["feat_past_ret_val"].to_numpy().astype(np.float32)
+    #         
+    #         # Формирование последовательностей
+    #         feat_data = batch_df.select(self.feat_cols).to_numpy()
+    #         self._cache_batch = np.stack([feat_data[i:i+self.seq_len] for i in range(len(batch_df) - self.seq_len + 1)], axis=0)
+    #         
+    #         if self.is_multi_horizon:
+    #             l_lists = [batch_df.select(lc).slice(self.seq_len-1).to_series().to_numpy() for lc in self.label_cols]
+    #             self._cache_labels = np.stack(l_lists, axis=1)
+    #         else:
+    #             self._cache_labels = batch_df.select("label").slice(self.seq_len-1).to_series().to_numpy()
+    #         
+    #         self._cache_vols = self.vols[start : start + len(self._cache_labels)]
+    #         self._cache_start_idx, self._cache_end_idx = start, start + len(self._cache_labels)
+    #
+    #     off = idx - self._cache_start_idx
+    #     x_raw_current = self._cache_batch[off]
+    #     
+    #     # Update current cache indices
+    #     self._current_cache_off = off
+    #
+    #     return self._process_sample(
+    #         x_raw_current, 
+    #         self._cache_labels[off], 
+    #         self._cache_vols[off], 
+    #         self.sample_weights[idx], 
+    #         torch.tensor(self.regime_ids[idx]).long(), 
+    #         idx=off # Using offset because caches in streaming are batch-local
+    #     )
 
     def normalize_channel(self, channel_data: torch.Tensor, channel_idx: int) -> torch.Tensor:
         """

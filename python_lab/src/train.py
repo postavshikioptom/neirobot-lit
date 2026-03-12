@@ -51,31 +51,32 @@ class TrainSubset(torch.utils.data.Subset):
 
 
 
-def _streaming_worker_init_fn(worker_id: int):
-    """
-    Worker initialization function for streaming mode DataLoader.
-    Each worker creates its own LazyFrame to avoid file descriptor conflicts.
-    
-    Args:
-        worker_id: ID of the current worker process
-    """
-    worker_info = torch.utils.data.get_worker_info()
-    if worker_info is None:
-        return
-    
-    dataset = worker_info.dataset
-    
-    # Если это streaming режим, создаем новый LazyFrame для воркера
-    if hasattr(dataset, 'data_mode') and dataset.data_mode == "streaming":
-        if hasattr(dataset, 'file_path') and dataset.file_path is not None:
-            # Каждый воркер создает свой собственный LazyFrame
-            import polars as pl
-            dataset.lazy_df = pl.scan_parquet(dataset.file_path, low_memory=True)
-            # Переинициализируем row_offsets для нового LazyFrame
-            if hasattr(dataset, '_build_row_offsets'):
-                total_rows = dataset.lazy_df.select(pl_pol.len()).collect(engine="streaming").item()
-                dataset.row_offsets = dataset._build_row_offsets(dataset.file_path, total_rows)
-            print(f"[Worker {worker_id}] Initialized private LazyFrame for streaming mode")
+# ОТКЛЮЧЕНО: Используется только для streaming режима
+# def _streaming_worker_init_fn(worker_id: int):
+#     """
+#     Worker initialization function for streaming mode DataLoader.
+#     Each worker creates its own LazyFrame to avoid file descriptor conflicts.
+#     
+#     Args:
+#         worker_id: ID of the current worker process
+#     """
+#     worker_info = torch.utils.data.get_worker_info()
+#     if worker_info is None:
+#         return
+#     
+#     dataset = worker_info.dataset
+#     
+#     # Если это streaming режим, создаем новый LazyFrame для воркера
+#     if hasattr(dataset, 'data_mode') and dataset.data_mode == "streaming":
+#         if hasattr(dataset, 'file_path') and dataset.file_path is not None:
+#             # Каждый воркер создает свой собственный LazyFrame
+#             import polars as pl
+#             dataset.lazy_df = pl.scan_parquet(dataset.file_path, low_memory=True)
+#             # Переинициализируем row_offsets для нового LazyFrame
+#             if hasattr(dataset, '_build_row_offsets'):
+#                 total_rows = dataset.lazy_df.select(pl_pol.len()).collect(engine="streaming").item()
+#                 dataset.row_offsets = dataset._build_row_offsets(dataset.file_path, total_rows)
+#             print(f"[Worker {worker_id}] Initialized private LazyFrame for streaming mode")
 
 """
 Knowledge Distillation Support (Задача 151):
@@ -902,62 +903,64 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
             }
         
         # Пересоздаем датасет с новой seq_len
-        if args.data_mode == "streaming":
-            trial_dataset = LOBDataset(
-                df,
-                seq_len=seq_len,
-                n_past_returns=len(past_returns_lags),
-                data_mode="streaming",
-                is_train=False,
-                augment_prob=args.augment_prob,
-                use_symmetric_flip=args.use_symmetric_flip,
-                volume_jitter_range=args.volume_jitter_range,
-                aug_seed=args.aug_seed,
-                regime_detector=regime_detector,
-                regime_window=1000,
-                scaler_type=args.scaler_type,
-                winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
-                normalizer=normalizer,
-                **time_weighting_params
-            )
-        elif args.data_mode == "memmap":
-            trial_dataset = LOBDataset(
-                df,
-                seq_len=seq_len,
-                n_past_returns=len(past_returns_lags),
-                data_mode="memmap",
-                cache_dir=cache_dir,
-                is_train=False,
-                augment_prob=args.augment_prob,
-                use_symmetric_flip=args.use_symmetric_flip,
-                volume_jitter_range=args.volume_jitter_range,
-                aug_seed=args.aug_seed,
-                regime_detector=regime_detector,
-                regime_window=1000,
-                scaler_type=args.scaler_type,
-                winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
-                normalizer=normalizer,
-                **time_weighting_params
-            )
-        else:
-            # Memory mode (по умолчанию)
-            trial_dataset = LOBDataset(
-                df,
-                seq_len=seq_len,
-                n_past_returns=len(past_returns_lags),
-                data_mode="memory",
-                is_train=False,
-                augment_prob=args.augment_prob,
-                use_symmetric_flip=args.use_symmetric_flip,
-                volume_jitter_range=args.volume_jitter_range,
-                aug_seed=args.aug_seed,
-                regime_detector=regime_detector,
-                regime_window=1000,
-                scaler_type=args.scaler_type,
-                winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
-                normalizer=normalizer,
-                **time_weighting_params
-            )
+        # ПРИМЕЧАНИЕ: Режимы "streaming" и "memmap" отключены для упрощения кода.
+        # Используется только режим "memory".
+        # if args.data_mode == "streaming":
+        #     trial_dataset = LOBDataset(
+        #         df,
+        #         seq_len=seq_len,
+        #         n_past_returns=len(past_returns_lags),
+        #         data_mode="streaming",
+        #         is_train=False,
+        #         augment_prob=args.augment_prob,
+        #         use_symmetric_flip=args.use_symmetric_flip,
+        #         volume_jitter_range=args.volume_jitter_range,
+        #         aug_seed=args.aug_seed,
+        #         regime_detector=regime_detector,
+        #         regime_window=1000,
+        #         scaler_type=args.scaler_type,
+        #         winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+        #         normalizer=normalizer,
+        #         **time_weighting_params
+        #     )
+        # elif args.data_mode == "memmap":
+        #     trial_dataset = LOBDataset(
+        #         df,
+        #         seq_len=seq_len,
+        #         n_past_returns=len(past_returns_lags),
+        #         data_mode="memmap",
+        #         cache_dir=cache_dir,
+        #         is_train=False,
+        #         augment_prob=args.augment_prob,
+        #         use_symmetric_flip=args.use_symmetric_flip,
+        #         volume_jitter_range=args.volume_jitter_range,
+        #         aug_seed=args.aug_seed,
+        #         regime_detector=regime_detector,
+        #         regime_window=1000,
+        #         scaler_type=args.scaler_type,
+        #         winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+        #         normalizer=normalizer,
+        #         **time_weighting_params
+        #     )
+        # else:
+        #     # Memory mode (по умолчанию)
+        trial_dataset = LOBDataset(
+            df,
+            seq_len=seq_len,
+            n_past_returns=len(past_returns_lags),
+            data_mode="memory",
+            is_train=False,
+            augment_prob=args.augment_prob,
+            use_symmetric_flip=args.use_symmetric_flip,
+            volume_jitter_range=args.volume_jitter_range,
+            aug_seed=args.aug_seed,
+            regime_detector=regime_detector,
+            regime_window=1000,
+            scaler_type=args.scaler_type,
+            winsor_limits=tuple([float(x.strip()) for x in args.winsor_limits.split(",")]),
+            normalizer=normalizer,
+            **time_weighting_params
+        )
         
         # Разделяем на train/val
         total_len = len(trial_dataset)
@@ -967,8 +970,11 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         trial_train_ds, trial_val_ds = random_split(trial_dataset, [train_size, val_size])
         
         # Создаем DataLoaders
-        num_workers = 2 if args.data_mode == "streaming" else 4
-        worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+        # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+        num_workers = 4  # Всегда 4 для memory режима
+        worker_init_fn = None  # Не требуется для memory режима
+        # num_workers = 2 if args.data_mode == "streaming" else 4
+        # worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
         
         trial_train_loader = DataLoader(
             trial_train_ds,
@@ -1235,8 +1241,10 @@ def train():
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     
     # Параметры загрузки данных (Задача 094)
-    parser.add_argument("--data_mode", type=str, default="memory", choices=["memory", "streaming", "memmap"], help="Data loading mode: memory (default), streaming (lazy), or memmap (binary cache)")
-    parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for memmap mode (required for memmap)")
+    # ПРИМЕЧАНИЕ: Режимы "streaming" и "memmap" отключены для упрощения кода.
+    # Теперь используется только режим "memory" для загрузки данных в оперативную память.
+    parser.add_argument("--data_mode", type=str, default="memory", choices=["memory"], help="Data loading mode: only 'memory' is supported (loads data into RAM)")
+    # parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for memmap mode (ОТКЛЮЧЕНО)")
     
     # Параметры LR Scheduler
     parser.add_argument("--scheduler", type=str, default="plateau", choices=["onecycle", "plateau", "cosine", "step", "none"], help="Learning rate scheduler type")
@@ -1368,51 +1376,53 @@ def train():
     checkpoint_dir = base_path / "bots" / args.symbol / "models" / "checkpoints"
     
     # Путь для кэша (если используется memmap)
-    if args.cache_dir:
-        cache_dir = Path(args.cache_dir)
-    else:
-        cache_dir = base_path / "bots" / args.symbol / "models" / "cache"
+    # ПРИМЕЧАНИЕ: Memmap режим отключен
+    # if args.cache_dir:
+    #     cache_dir = Path(args.cache_dir)
+    # else:
+    cache_dir = base_path / "bots" / args.symbol / "models" / "cache"
 
     # 3. Валидация ресурсов (Задача 094)
-    if args.data_mode == "memory":
-        # Проверяем доступную RAM
-        mem = psutil.virtual_memory()
-        available_ram_gb = mem.available / (1024 ** 3)
+    # ПРИМЕЧАНИЕ: Используется только memory режим
+    # if args.data_mode == "memory":
+    # Проверяем доступную RAM
+    mem = psutil.virtual_memory()
+    available_ram_gb = mem.available / (1024 ** 3)
+    
+    # Оцениваем размер датасета (грубая оценка)
+    pattern = f"{args.symbol}_*.parquet"
+    files = list(data_path.glob(pattern))
+    if files:
+        # Считаем размер файлов на диске
+        total_size_gb = sum(f.stat().st_size for f in files) / (1024 ** 3)
         
-        # Оцениваем размер датасета (грубая оценка)
-        pattern = f"{args.symbol}_*.parquet"
-        files = list(data_path.glob(pattern))
-        if files:
-            # Считаем размер файлов на диске
-            total_size_gb = sum(f.stat().st_size for f in files) / (1024 ** 3)
-            
-            # ИСПРАВЛЕНИЕ: Более точная оценка с учетом скользящего окна
-            # Parquet сжат примерно в 3-5 раз, поэтому в памяти будет больше
-            # Дополнительно учитываем seq_len для скользящего окна (дублирование данных)
-            # Формула: compressed_size * decompression_factor * window_overhead
-            decompression_factor = 4  # Parquet -> RAM
-            window_overhead = args.seq_len / 10  # Скользящее окно увеличивает размер
-            estimated_ram_gb = total_size_gb * decompression_factor * (1 + window_overhead / 100)
-            
-            if estimated_ram_gb > available_ram_gb * 0.7:
-                print(f"\n⚠️  WARNING: Dataset size (~{estimated_ram_gb:.2f} GB) may exceed available RAM ({available_ram_gb:.2f} GB)")
-                print(f"   Estimated breakdown:")
-                print(f"   - Compressed Parquet: {total_size_gb:.2f} GB")
-                print(f"   - Decompressed in RAM: {total_size_gb * decompression_factor:.2f} GB")
-                print(f"   - With sliding window (seq_len={args.seq_len}): {estimated_ram_gb:.2f} GB")
-                print(f"   Consider using --data_mode streaming or --data_mode memmap for large datasets")
-                print(f"   Continuing with 'memory' mode as requested...\n")
+        # ИСПРАВЛЕНИЕ: Более точная оценка с учетом скользящего окна
+        # Parquet сжат примерно в 3-5 раз, поэтому в памяти будет больше
+        # Дополнительно учитываем seq_len для скользящего окна (дублирование данных)
+        # Формула: compressed_size * decompression_factor * window_overhead
+        decompression_factor = 4  # Parquet -> RAM
+        window_overhead = args.seq_len / 10  # Скользящее окно увеличивает размер
+        estimated_ram_gb = total_size_gb * decompression_factor * (1 + window_overhead / 100)
+        
+        if estimated_ram_gb > available_ram_gb * 0.7:
+            print(f"\n⚠️  WARNING: Dataset size (~{estimated_ram_gb:.2f} GB) may exceed available RAM ({available_ram_gb:.2f} GB)")
+            print(f"   Estimated breakdown:")
+            print(f"   - Compressed Parquet: {total_size_gb:.2f} GB")
+            print(f"   - Decompressed in RAM: {total_size_gb * decompression_factor:.2f} GB")
+            print(f"   - With sliding window (seq_len={args.seq_len}): {estimated_ram_gb:.2f} GB")
+            print(f"   Continuing with 'memory' mode as requested...\n")
 
     # 4. Загрузка и подготовка данных
     print(f"Loading data for {args.symbol} from {data_path}...")
     loader = LOBDataLoader(str(data_path), args.symbol)
     
-    if args.data_mode == "streaming":
-        # Для streaming режима используем lazy загрузку
-        df = loader.load_data(lazy=True)
-    else:
-        # Для memory и memmap загружаем в память
-        df = loader.load_data(lazy=False)
+    # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+    # if args.data_mode == "streaming":
+    #     # Для streaming режима используем lazy загрузку
+    #     df = loader.load_data(lazy=True)
+    # else:
+    #     # Для memory и memmap загружаем в память
+    df = loader.load_data(lazy=False)
 
     # Задача 236: Загрузка публичных сделок и расчет trade imbalance — ОТЛОЖЕНО
     # Пока Trades не используем, всё обучение проходит только на Orderbook. 
@@ -1430,25 +1440,26 @@ def train():
         trade_imb_agg = args.trade_imb_agg
         trade_noise_filter_pct = args.trade_noise_filter_pct
         
-        if args.data_mode == "streaming":
-            # Для LazyFrame сначала собираем в память для compute_trade_imbalance
-            df_collected = df.collect()
-            df_collected = compute_trade_imbalance(
-                df_collected, 
-                df_trades, 
-                windows=trade_imb_windows,
-                agg_type=trade_imb_agg,
-                noise_filter_pct=trade_noise_filter_pct
-            )
-            df = df_collected.lazy()
-        else:
-            df = compute_trade_imbalance(
-                df, 
-                df_trades, 
-                windows=trade_imb_windows,
-                agg_type=trade_imb_agg,
-                noise_filter_pct=trade_noise_filter_pct
-            )
+        # ПРИМЕЧАНИЕ: Streaming режим отключен
+        # if args.data_mode == "streaming":
+        #     # Для LazyFrame сначала собираем в память для compute_trade_imbalance
+        #     df_collected = df.collect()
+        #     df_collected = compute_trade_imbalance(
+        #         df_collected, 
+        #         df_trades, 
+        #         windows=trade_imb_windows,
+        #         agg_type=trade_imb_agg,
+        #         noise_filter_pct=trade_noise_filter_pct
+        #     )
+        #     df = df_collected.lazy()
+        # else:
+        df = compute_trade_imbalance(
+            df, 
+            df_trades, 
+            windows=trade_imb_windows,
+            agg_type=trade_imb_agg,
+            noise_filter_pct=trade_noise_filter_pct
+        )
         print(f"Added {len(trade_imb_windows)} trade imbalance features")
     else:
         print("No trades data found, skipping trade imbalance features")
@@ -1458,11 +1469,12 @@ def train():
     print("Engineering features...")
     fe = FeatureEngineer(n_levels=50)
     
-    if args.data_mode == "streaming":
-        # Для LazyFrame применяем трансформации лениво
-        df = fe.transform(df)
-    else:
-        df = fe.transform(df)
+    # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+    # if args.data_mode == "streaming":
+    #     # Для LazyFrame применяем трансформации лениво
+    #     df = fe.transform(df)
+    # else:
+    df = fe.transform(df)
 
     # Разметка
     print("Adding labels...")
@@ -1498,10 +1510,11 @@ def train():
         dynamic_threshold=False  # Выключаем авто-подбор, переходим на ручное управление
     )
     
-    if args.data_mode == "streaming":
-        df = labeler.add_labels(df)
-    else:
-        df = labeler.add_labels(df)
+    # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+    # if args.data_mode == "streaming":
+    #     df = labeler.add_labels(df)
+    # else:
+    df = labeler.add_labels(df)
 
     # 5. Инициализация Normalizer (fit будет позже на train set)
     print("Initializing normalizer...")
@@ -1560,7 +1573,7 @@ def train():
 
     
     # 6. Создание Dataset и хронологическое разделение (70/15/15)
-    print(f"Creating dataset in '{args.data_mode}' mode (raw features)...")
+    print(f"Creating dataset in 'memory' mode (raw features)...")
     
     # Подготовка параметров для временного взвешивания
     time_weighting_params = {}
@@ -1579,75 +1592,77 @@ def train():
             'class_weights': None  # Не используем веса классов в датасете
         }
     
-    if args.data_mode == "streaming":
-        # Для streaming создаем один датасет и делим через Subset
-        full_dataset = LOBDataset(
-            df, 
-            seq_len=args.seq_len, 
-            n_past_returns=n_past_returns,
-            past_returns_lags=past_returns_lags,  # Задача 091
-            data_mode="streaming",
-            is_train=False,  # Будет переопределено для train_ds
-            augment_prob=args.augment_prob,
-            use_symmetric_flip=args.use_symmetric_flip,
-            volume_jitter_range=args.volume_jitter_range,
-            aug_seed=args.aug_seed,
-            regime_detector=regime_detector,
-            regime_window=1000,
-            scaler_type=args.scaler_type,  # Задача 240
-            winsor_limits=winsor_limits,  # Задача 240
-            scale_multiplier=args.scale_multiplier, # Задача 310.2.2
-            normalizer=normalizer,
-            **time_weighting_params
-        )
-    elif args.data_mode == "memmap":
-        # Для memmap создаем кэш
-        full_dataset = LOBDataset(
-            df,
-            seq_len=args.seq_len,
-            n_past_returns=n_past_returns,
-            past_returns_lags=past_returns_lags,  # Задача 091
-            data_mode="memmap",
-            cache_dir=cache_dir,
-            is_train=False,  # Будет переопределено для train_ds
-            augment_prob=args.augment_prob,
-            use_symmetric_flip=args.use_symmetric_flip,
-            volume_jitter_range=args.volume_jitter_range,
-            aug_seed=args.aug_seed,
-            regime_detector=regime_detector,
-            regime_window=1000,
-            scaler_type=args.scaler_type,  # Задача 240
-            winsor_limits=winsor_limits,  # Задача 240
-            scale_multiplier=args.scale_multiplier, # Задача 310.2.2
-            normalizer=normalizer,
-            **time_weighting_params
-        )
-    else:
-        # Memory mode (по умолчанию)
-        full_dataset = LOBDataset(
-            df, 
-            seq_len=args.seq_len, 
-            n_past_returns=n_past_returns,
-            past_returns_lags=past_returns_lags,  # Задача 091
-            data_mode="memory",
-            is_train=False,  # Будет переопределено для train_ds
-            augment_prob=args.augment_prob,
-            use_symmetric_flip=args.use_symmetric_flip,
-            volume_jitter_range=args.volume_jitter_range,
-            aug_seed=args.aug_seed,
-            regime_detector=regime_detector,
-            regime_window=1000,
-            scaler_type=args.scaler_type,  # Задача 240
-            winsor_limits=winsor_limits,  # Задача 240
-            scale_multiplier=args.scale_multiplier, # Задача 310.2.2
-            normalizer=normalizer,
-            **time_weighting_params
-        )
+    # ПРИМЕЧАНИЕ: Режимы "streaming" и "memmap" отключены для упрощения кода.
+    # Используется только режим "memory".
+    # if args.data_mode == "streaming":
+    #     # Для streaming создаем один датасет и делим через Subset
+    #     full_dataset = LOBDataset(
+    #         df, 
+    #         seq_len=args.seq_len, 
+    #         n_past_returns=n_past_returns,
+    #         past_returns_lags=past_returns_lags,  # Задача 091
+    #         data_mode="streaming",
+    #         is_train=False,  # Будет переопределено для train_ds
+    #         augment_prob=args.augment_prob,
+    #         use_symmetric_flip=args.use_symmetric_flip,
+    #         volume_jitter_range=args.volume_jitter_range,
+    #         aug_seed=args.aug_seed,
+    #         regime_detector=regime_detector,
+    #         regime_window=1000,
+    #         scaler_type=args.scaler_type,  # Задача 240
+    #         winsor_limits=winsor_limits,  # Задача 240
+    #         scale_multiplier=args.scale_multiplier, # Задача 310.2.2
+    #         normalizer=normalizer,
+    #         **time_weighting_params
+    #     )
+    # elif args.data_mode == "memmap":
+    #     # Для memmap создаем кэш
+    #     full_dataset = LOBDataset(
+    #         df,
+    #         seq_len=args.seq_len,
+    #         n_past_returns=n_past_returns,
+    #         past_returns_lags=past_returns_lags,  # Задача 091
+    #         data_mode="memmap",
+    #         cache_dir=cache_dir,
+    #         is_train=False,  # Будет переопределено для train_ds
+    #         augment_prob=args.augment_prob,
+    #         use_symmetric_flip=args.use_symmetric_flip,
+    #         volume_jitter_range=args.volume_jitter_range,
+    #         aug_seed=args.aug_seed,
+    #         regime_detector=regime_detector,
+    #         regime_window=1000,
+    #         scaler_type=args.scaler_type,  # Задача 240
+    #         winsor_limits=winsor_limits,  # Задача 240
+    #         scale_multiplier=args.scale_multiplier, # Задача 310.2.2
+    #         normalizer=normalizer,
+    #         **time_weighting_params
+    #     )
+    # else:
+    #     # Memory mode (по умолчанию)
+    full_dataset = LOBDataset(
+        df, 
+        seq_len=args.seq_len, 
+        n_past_returns=n_past_returns,
+        past_returns_lags=past_returns_lags,  # Задача 091
+        data_mode="memory",
+        is_train=False,  # Будет переопределено для train_ds
+        augment_prob=args.augment_prob,
+        use_symmetric_flip=args.use_symmetric_flip,
+        volume_jitter_range=args.volume_jitter_range,
+        aug_seed=args.aug_seed,
+        regime_detector=regime_detector,
+        regime_window=1000,
+        scaler_type=args.scaler_type,  # Задача 240
+        winsor_limits=winsor_limits,  # Задача 240
+        scale_multiplier=args.scale_multiplier, # Задача 310.2.2
+        normalizer=normalizer,
+        **time_weighting_params
+    )
     
     # Задача 306.2.4: Остановка обучения при обнаружении NaN во входных данных
-    if args.data_mode != "streaming":
-        if np.isnan(full_dataset.features).any():
-            raise ValueError("КРИТИЧНО: Входящие features содержат NaN строки для запуска обучения!")
+    # ПРИМЕЧАНИЕ: Проверка только для memory режима (streaming не поддерживается)
+    if np.isnan(full_dataset.x_raw).any():
+        raise ValueError("КРИТИЧНО: Входящие features содержат NaN строки для запуска обучения!")
     
     # Проверка данных на NaN перед обучением (Sample-based check)
     print("\nПроверка данных на NaN (sampling)...")
@@ -1859,25 +1874,26 @@ def train():
 
     else:
         # Если балансировка не используется, обучаем нормализатор на обычном тренировочном наборе
-        if args.data_mode != "streaming":
-            print("\nFitting normalizer on original training set (channels-based)...")
-            train_indices = train_ds.indices
-            
-            # Задача 311: Извлечь каналы для тренировочных индексов
-            train_channels_df = full_dataset._compute_channels_for_normalization(train_indices)
-            
-            print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
-            normalizer.fit(train_channels_df, winsor_limits=winsor_limits)
-            normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
-            update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
-            print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
-        else:
-            # Для streaming обучаем на сэмпе
-            print("\nFitting normalizer on streaming sample (channels-based)...")
-            sample_df = df.head(100000).collect(engine="streaming")
-            
-            # Для streaming вычисляем каналы вручную из сэмпла
-            # Используем временный датасет для доступа к логике формирования каналов
+        # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+        # if args.data_mode != "streaming":
+        print("\nFitting normalizer on original training set (channels-based)...")
+        train_indices = train_ds.indices
+        
+        # Задача 311: Извлечь каналы для тренировочных индексов
+        train_channels_df = full_dataset._compute_channels_for_normalization(train_indices)
+        
+        print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
+        normalizer.fit(train_channels_df, winsor_limits=winsor_limits)
+        normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+        update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
+        print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
+        # else:
+        #     # Для streaming обучаем на сэмпе (ОТКЛЮЧЕНО)
+        #     print("\nFitting normalizer on streaming sample (channels-based)...")
+        #     sample_df = df.head(100000).collect(engine="streaming")
+        #     
+        #     # Для streaming вычисляем каналы вручную из сэмпла
+        #     # Используем временный датасет для доступа к логике формирования каналов
             temp_ds = LOBDataset(sample_df, seq_len=1, data_mode="memory", is_train=False)
             sample_channels_df = temp_ds._compute_channels_for_normalization(list(range(len(sample_df))))
             
@@ -1894,11 +1910,13 @@ def train():
         print(f"Augmentation enabled for training: flip={args.use_symmetric_flip}, jitter={args.volume_jitter_range}, prob={args.augment_prob}")
 
     # 8. DataLoaders
-    # Для streaming режима используем меньше воркеров для thread safety
-    num_workers = 2 if args.data_mode == "streaming" else 4
+    # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+    num_workers = 4  # Всегда 4 для memory режима
+    # num_workers = 2 if args.data_mode == "streaming" else 4
     
-    # Функция инициализации воркеров для streaming режима
-    worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+    # Функция инициализации воркеров для streaming режима (ОТКЛЮЧЕНО)
+    worker_init_fn = None  # Не требуется для memory режима
+    # worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
     
     train_loader = DataLoader(
         train_ds, 
@@ -1932,35 +1950,36 @@ def train():
     print("Calculating class weights from training set...")
     
     # ИСПРАВЛЕНИЕ: Используем get_class_distribution вместо цикла по всем элементам
-    if args.data_mode == "streaming":
-        # Для streaming режима нужно считать только на тренировочной части
-        # Создаем временный LazyFrame только для тренировочной части
-        train_lazy_df = full_dataset.lazy_df.slice(0, train_size + full_dataset.seq_len - 1)
-        
-        # Считаем распределение классов через Polars
-        label_counts = (
-            train_lazy_df
-            .select(pl_pol.col("label"))
-            .slice(full_dataset.seq_len - 1, train_size)
-            .group_by("label")
-            .agg(pl_pol.len().alias("count"))
-            .collect(engine="streaming")
-        )
-        
-        counts = np.zeros(3, dtype=np.int64)
-        for row in label_counts.iter_rows():
-            label, count = row
-            if 0 <= label < 3:
-                counts[int(label)] = count
-    else:
-        # Для memory и memmap режимов используем прямой доступ к меткам
-        train_labels = full_dataset.labels[train_ds.indices]
-        classes, counts_list = np.unique(train_labels, return_counts=True)
-        
-        counts = np.zeros(3, dtype=np.int64)
-        for cls, count in zip(classes, counts_list):
-            if 0 <= cls < 3:
-                counts[int(cls)] = count
+    # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+    # if args.data_mode == "streaming":
+    #     # Для streaming режима нужно считать только на тренировочной части
+    #     # Создаем временный LazyFrame только для тренировочной части
+    #     train_lazy_df = full_dataset.lazy_df.slice(0, train_size + full_dataset.seq_len - 1)
+    #     
+    #     # Считаем распределение классов через Polars
+    #     label_counts = (
+    #         train_lazy_df
+    #         .select(pl_pol.col("label"))
+    #         .slice(full_dataset.seq_len - 1, train_size)
+    #         .group_by("label")
+    #         .agg(pl_pol.len().alias("count"))
+    #         .collect(engine="streaming")
+    #     )
+    #     
+    #     counts = np.zeros(3, dtype=np.int64)
+    #     for row in label_counts.iter_rows():
+    #         label, count = row
+    #         if 0 <= label < 3:
+    #             counts[int(label)] = count
+    # else:
+    #     # Для memory и memmap режимов используем прямой доступ к меткам
+    train_labels = full_dataset.labels[train_ds.indices]
+    classes, counts_list = np.unique(train_labels, return_counts=True)
+    
+    counts = np.zeros(3, dtype=np.int64)
+    for cls, count in zip(classes, counts_list):
+        if 0 <= cls < 3:
+            counts[int(cls)] = count
     
     total_samples = np.sum(counts)
     smoothing = args.class_weight_smooth
@@ -2307,61 +2326,63 @@ def train():
                 'class_weights': None
             }
         
-        if args.data_mode == "streaming":
-            full_dataset = LOBDataset(
-                df,
-                seq_len=args.seq_len,
-                n_past_returns=n_past_returns,
-                past_returns_lags=past_returns_lags,  # Задача 091
-                data_mode="streaming",
-                is_train=False,
-                augment_prob=args.augment_prob,
-                use_symmetric_flip=args.use_symmetric_flip,
-                volume_jitter_range=args.volume_jitter_range,
-                aug_seed=args.aug_seed,
-                regime_detector=regime_detector,
-                regime_window=1000,
-                scaler_type=args.scaler_type,
-                winsor_limits=winsor_limits,
-                **time_weighting_params_final
-            )
-        elif args.data_mode == "memmap":
-            full_dataset = LOBDataset(
-                df,
-                seq_len=args.seq_len,
-                n_past_returns=n_past_returns,
-                past_returns_lags=past_returns_lags,  # Задача 091
-                data_mode="memmap",
-                cache_dir=cache_dir,
-                is_train=False,
-                augment_prob=args.augment_prob,
-                use_symmetric_flip=args.use_symmetric_flip,
-                volume_jitter_range=args.volume_jitter_range,
-                aug_seed=args.aug_seed,
-                regime_detector=regime_detector,
-                regime_window=1000,
-                scaler_type=args.scaler_type,
-                winsor_limits=winsor_limits,
-                **time_weighting_params_final
-            )
-        else:
-            full_dataset = LOBDataset(
-                df,
-                seq_len=args.seq_len,
-                n_past_returns=n_past_returns,
-                past_returns_lags=past_returns_lags,  # Задача 091
-                data_mode="memory",
-                is_train=False,
-                augment_prob=args.augment_prob,
-                use_symmetric_flip=args.use_symmetric_flip,
-                volume_jitter_range=args.volume_jitter_range,
-                aug_seed=args.aug_seed,
-                regime_detector=regime_detector,
-                regime_window=1000,
-                scaler_type=args.scaler_type,
-                winsor_limits=winsor_limits,
-                **time_weighting_params_final
-            )
+        # ПРИМЕЧАНИЕ: Режимы "streaming" и "memmap" отключены для упрощения кода.
+        # Используется только режим "memory".
+        # if args.data_mode == "streaming":
+        #     full_dataset = LOBDataset(
+        #         df,
+        #         seq_len=args.seq_len,
+        #         n_past_returns=n_past_returns,
+        #         past_returns_lags=past_returns_lags,  # Задача 091
+        #         data_mode="streaming",
+        #         is_train=False,
+        #         augment_prob=args.augment_prob,
+        #         use_symmetric_flip=args.use_symmetric_flip,
+        #         volume_jitter_range=args.volume_jitter_range,
+        #         aug_seed=args.aug_seed,
+        #         regime_detector=regime_detector,
+        #         regime_window=1000,
+        #         scaler_type=args.scaler_type,
+        #         winsor_limits=winsor_limits,
+        #         **time_weighting_params_final
+        #     )
+        # elif args.data_mode == "memmap":
+        #     full_dataset = LOBDataset(
+        #         df,
+        #         seq_len=args.seq_len,
+        #         n_past_returns=n_past_returns,
+        #         past_returns_lags=past_returns_lags,  # Задача 091
+        #         data_mode="memmap",
+        #         cache_dir=cache_dir,
+        #         is_train=False,
+        #         augment_prob=args.augment_prob,
+        #         use_symmetric_flip=args.use_symmetric_flip,
+        #         volume_jitter_range=args.volume_jitter_range,
+        #         aug_seed=args.aug_seed,
+        #         regime_detector=regime_detector,
+        #         regime_window=1000,
+        #         scaler_type=args.scaler_type,
+        #         winsor_limits=winsor_limits,
+        #         **time_weighting_params_final
+        #     )
+        # else:
+        full_dataset = LOBDataset(
+            df,
+            seq_len=args.seq_len,
+            n_past_returns=n_past_returns,
+            past_returns_lags=past_returns_lags,  # Задача 091
+            data_mode="memory",
+            is_train=False,
+            augment_prob=args.augment_prob,
+            use_symmetric_flip=args.use_symmetric_flip,
+            volume_jitter_range=args.volume_jitter_range,
+            aug_seed=args.aug_seed,
+            regime_detector=regime_detector,
+            regime_window=1000,
+            scaler_type=args.scaler_type,
+            winsor_limits=winsor_limits,
+            **time_weighting_params_final
+        )
         
         # Пересоздаем train/val разделение (80/20)
         total_len = len(full_dataset)
@@ -2371,7 +2392,8 @@ def train():
         train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
         
         # Пересоздаем DataLoaders
-        worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+        # ПРИМЕЧАНИЕ: Streaming режим отключен
+        worker_init_fn = None  # _streaming_worker_init_fn if args.data_mode == "streaming" else None
         
         train_loader = DataLoader(
             train_ds,
@@ -2422,12 +2444,13 @@ def train():
         cv_timestamps = timestamps[:cv_size]
         
         # Получаем метки для статистики
-        if args.data_mode != "streaming":
-            cv_labels = full_dataset.labels[:cv_size]
-        else:
-            # Для streaming загружаем метки
-            cv_labels_df = full_dataset.lazy_df.select(pl_pol.col("label")).slice(full_dataset.seq_len - 1, cv_size).collect(engine="streaming")
-            cv_labels = cv_labels_df.to_series().to_numpy()
+        # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+        # if args.data_mode != "streaming":
+        cv_labels = full_dataset.labels[:cv_size]
+        # else:
+        #     # Для streaming загружаем метки (ОТКЛЮЧЕНО)
+        #     cv_labels_df = full_dataset.lazy_df.select(pl_pol.col("label")).slice(full_dataset.seq_len - 1, cv_size).collect(engine="streaming")
+        #     cv_labels = cv_labels_df.to_series().to_numpy()
         
         # Список для сбора MCC по фолдам
         fold_mccs = []
@@ -2453,8 +2476,11 @@ def train():
             fold_val_ds = Subset(full_dataset, val_idx)
             
             # Создаем DataLoaders для фолда
-            num_workers = 2 if args.data_mode == "streaming" else 4
-            worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
+            # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
+            num_workers = 4  # Всегда 4 для memory режима
+            worker_init_fn = None  # Не требуется для memory режима
+            # num_workers = 2 if args.data_mode == "streaming" else 4
+            # worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
             
             fold_train_loader = DataLoader(
                 fold_train_ds,
