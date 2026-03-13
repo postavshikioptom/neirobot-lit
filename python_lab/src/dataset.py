@@ -683,7 +683,7 @@ class LOBDataset(Dataset):
         normalizer: Union[Normalizer, None] = None,
         regime_window: int = 1000,
         exclude_features: Union[List[str], None] = None,
-        scaler_type: str = "zscore",
+        scaler_type: str = "robust",  # Задача 313: Используем только RobustScaler (синхронизация с train.py)
         winsor_limits: tuple[float, float] = (0.01, 0.99),
         scale_multiplier: float = 1.0
     ):

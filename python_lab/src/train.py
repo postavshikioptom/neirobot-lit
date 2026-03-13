@@ -814,22 +814,24 @@ class LiTModule(pl.LightningModule):
             }
         
         else:  # "plateau" (default)
-            # ReduceLROnPlateau - адаптивное снижение при стагнации
+            # ReduceLROnPlateau - адаптивное снижение при стагнации Loss
+            # Мониторим val_loss в режиме min (Loss-based Adaptive LR, Задача 313)
             factor = self.hparams.get("plateau_factor", 0.5)
-            patience = self.hparams.get("plateau_patience", 5)
+            patience = self.hparams.get("plateau_patience", 2)
             
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                mode="max",
+                mode="min",
                 factor=factor,
-                patience=patience
+                patience=patience,
+                verbose=True
             )
             
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
-                    "monitor": "val_mcc",
+                    "monitor": "val_loss",
                     "interval": "epoch"
                 }
             }
@@ -1306,7 +1308,7 @@ def train():
     parser.add_argument("--final_div_factor", type=float, default=10000.0, help="Final LR divisor for OneCycle")
     parser.add_argument("--pct_start", type=float, default=0.3, help="Percentage of cycle spent increasing LR in OneCycle")
     parser.add_argument("--plateau_factor", type=float, default=0.5, help="Factor for ReduceLROnPlateau")
-    parser.add_argument("--plateau_patience", type=int, default=5, help="Patience for ReduceLROnPlateau")
+    parser.add_argument("--plateau_patience", type=int, default=2, help="Patience for ReduceLROnPlateau (Задача 313: Loss-based Adaptive LR)")
     parser.add_argument("--step_size", type=int, default=10, help="Step size for StepLR scheduler")
     parser.add_argument("--gamma", type=float, default=0.5, help="Gamma for StepLR scheduler")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay for AdamW optimizer")

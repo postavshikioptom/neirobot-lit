@@ -1,0 +1,9 @@
+{
+  "specType": "feature",
+  "workflowType": "design-first",
+  "featureName": "lob-labeling-calibration",
+  "displayName": "Улучшение качества лабелирования и калибровки LiT модели",
+  "description": "Реализация адаптивного threshold на основе волатильности, улучшенного взвешивания классов, аугментации LOB данных и Temperature Scaling для калибровки вероятностей",
+  "createdAt": "2026-03-13",
+  "status": "in_progress"
+}
