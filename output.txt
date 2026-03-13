@@ -1,10 +1,10 @@
-ПОСЛЕ ЗАДАЧИ 311-2
+ПОСЛЕ ЗАДАЧИ 312
 
-[Labeler] Labels distribution:
-  [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: 0.000400 (0.04%)
-  Horizons: [100], Threshold: 0.0004
-  single: {'label': [0, 1, 2], 'count': [220882, 74020, 75977]} | Masked: 0
-Initializing normalizer...
+Проблема скорости обучения в эпохах, которую решали в Задаче 312 вообще не решена. Все так же 25 мин. обучается одна эпоха вместо 5 мин, котоые были раньше. Нужно провести снова глубокий анали и понять, почему так долго идет обучение каждой эпохи.
+Только не думай, что это из-за режима memory, я всегда memory запускал.
+Вот следующая ошибка при запуске обучения на python train. напиши пока, почему эта ошибка и как можно решить.
+А так же, в какой задаче из docs/000-tasks_list.md списка задач мы реализовывали этот конкретный код ,что допустили эту ошибку
+
 Creating dataset in 'memory' mode (raw features)...
 [LOBDataset] Computing features from RAW data...
 [DEBUG] past_ret raw: min=-0.009051, max=0.014819
@@ -19,29 +19,7 @@ Creating dataset in 'memory' mode (raw features)...
   Channel 4 (VIB): min=-0.0111, max=0.0322, mean=0.0082
   Channel 5 (PastRet): min=-0.0003, max=0.0006, mean=0.0003
 [LOBDataset] Loaded 370680 samples. Data mode: memory
-
-Проверка данных на NaN (sampling)...
-Sample Normalized Tensor (first 5 features of channel 0): tensor([[-4.9826e-08,  1.0024e-04,  1.6711e-04,  2.3402e-04,  3.0088e-04,
-          3.6775e-04,  4.3461e-04,  5.0147e-04,  5.6838e-04,  6.3525e-04,
-          7.0211e-04,  7.6897e-04,  8.3584e-04,  9.0270e-04,  9.6961e-04,
-          1.0365e-03,  1.1033e-03,  1.1702e-03,  1.2371e-03,  1.3040e-03,
-          1.3708e-03,  1.4377e-03,  1.5046e-03,  1.5714e-03,  1.6383e-03,
-          1.7052e-03,  1.7721e-03,  1.8389e-03,  1.9058e-03,  1.9727e-03,
-          2.0395e-03,  2.1064e-03,  2.1733e-03,  2.2402e-03,  2.3070e-03,
-          2.3739e-03,  2.4407e-03,  2.5077e-03,  2.5745e-03,  2.6414e-03,
-
 .....
-
-
- ✓ Normalizer fitted on 259475 samples
-Dataset split (Chronological): Train=259475, Val=55602, Test=55603
-Augmentation enabled for training: flip=False, jitter=0.1, prob=0.5
-Calculating class weights from training set...
-Effective class weights: [Flat: 0.47, Up: 1.27, Down: 1.25]
-Initializing model with loss: focal (gamma=2.0), activation: gelu_exact, scheduler: plateau
-Gradient clipping: mode=none, threshold=0.01
-
- 
 [ДИАГНОСТИКА] Статистика каналов ПОСЛЕ нормализации:
   Channel 0 (Price): min=-4.9942, max=5.0000, mean=0.1834, std=1.1216
   Channel 1 (Vol): min=-8.0442, max=2.5764, mean=-0.0929, std=0.8320
@@ -49,16 +27,18 @@ Gradient clipping: mode=none, threshold=0.01
   Channel 3 (OFI): min=-8.9519, max=8.6557, mean=0.0045, std=0.9640
   Channel 4 (VIB): min=-2.8073, max=3.9537, mean=0.0166, std=0.8111
   Channel 5 (PastRet): min=-4.6731, max=7.5534, mean=0.0285, std=1.1435
-  
-Дополнителньая проблема, не знаю, что пменяли, но раньше Эпоха была 5 мин, а теперь 25 мин, это огроменное время и я так все 50 эпох никогд не пройду.
- Только не думай, что это из-за режима memory, я всегда memory запускал. Изучи в коде, что в обучение или расчетах изменилось, возможно какойто параметр тысячи разлишний разпересчитываем
- 
- Epoch 1 (22m 20s) Validation: MCC=-0.0030, Macro-F1=0.2126, ECE=0.2628, MCE=0.8685
-  Vol-MSE=3.304562, Vol-MAE=1.199462
+
+Epoch 0 (23m 31s) Validation: MCC=0.0055, Macro-F1=0.1509, ECE=0.2847, MCE=0.5465
+✓ Reliability diagram saved to: /kaggle/reports/FARTCOINUSDT/reliability_diagram_epoch_0.png
+  Vol-MSE=1.678653, Vol-MAE=0.663543
 
 Metrics by Market Regime:
-  Regime 0: MCC=-0.0030, F1=0.2126, Samples=55602
+  Regime 0: MCC=0.0055, F1=0.1509, Samples=55602
+warning: Embedding dir exists, did you set global_step for add_embedding()?
+✓ Logged 1000 embeddings to TensorBoard Projector
 
-Epoch 2 (22m 18s) Validation: MCC=0.0093, Macro-F1=0.2484, ECE=0.2762, MCE=0.9352
-  Vol-MSE=2.864979, Vol-MAE=1.109995
-  
+Epoch 1 (22m 24s) Validation: MCC=-0.0070, Macro-F1=0.2085, ECE=0.2646, MCE=0.8746
+  Vol-MSE=3.239111, Vol-MAE=1.185001
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0070, F1=0.2085, Samples=55602
