@@ -10,7 +10,7 @@ import os
 import datetime
 from datetime import UTC
 from tqdm import tqdm
-from sklearn.metrics import classification_report, matthews_corrcoef
+from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
@@ -260,6 +260,8 @@ class LiTModule(pl.LightningModule):
         self.val_logits = []  # Для расчета ECE/MCE
         self.val_vol_true = []
         self.val_vol_pred = []
+        self.val_f_ret = []    # Для расчета Theoretical Edge (Задача 313.4)
+        self.val_imbalance = [] # Для LOB Imbalance Alignment (Задача 313.4)
         
         # Для логирования метрик по режимам
         self.val_regime_ids = []
@@ -311,10 +313,10 @@ class LiTModule(pl.LightningModule):
             return
         
         # Распаковываем батч: x, y, vol, weights, regime_id
-        if len(batch) == 5:
-            x, y, vol_target, weights, regime_id = batch
+        if len(batch) >= 5:
+            x, y, vol_target, weights, regime_id, *other = batch
         else:
-            x, y, vol_target, weights = batch
+            x, y, vol_target, weights, *other = batch
             
         # x: (Batch, Seq, Channels, Levels)
         channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
@@ -339,12 +341,14 @@ class LiTModule(pl.LightningModule):
                     writer.add_scalar(f"Stats_train/{ch_name}_Std", ch_data.std(), self.global_step)
 
     def training_step(self, batch, batch_idx):
-        # Распаковываем батч: x, y, vol, weights, regime_id
-        if len(batch) == 5:
+        # Распаковываем батч: x, y, vol, weights, regime_id, f_ret (Задача 313.4)
+        if len(batch) == 6:
+            x, y, vol_target, weights, regime_id, f_ret = batch
+        elif len(batch) == 5:
             x, y, vol_target, weights, regime_id = batch
         else:
             # Обратная совместимость: если regime_id нет, используем None
-            x, y, vol_target, weights = batch
+            x, y, vol_target, weights, *other = batch
             regime_id = None
         
         # Логируем статистику каналов для первого батча первой эпохи
@@ -469,11 +473,16 @@ class LiTModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        if len(batch) == 5:
+        # Распаковываем батч (Задача 313.4)
+        if len(batch) == 6:
+            x, y, vol_target, _, regime_id, f_ret = batch
+        elif len(batch) == 5:
             x, y, vol_target, _, regime_id = batch
+            f_ret = torch.zeros_like(y).float()
         else:
-            x, y, vol_target, _ = batch
+            x, y, vol_target, _, *other = batch
             regime_id = None
+            f_ret = torch.zeros_like(y).float()
         
         logits, vol_pred = self(x, regime_id=regime_id)
         vol_pred = vol_pred.squeeze(-1)
@@ -498,16 +507,22 @@ class LiTModule(pl.LightningModule):
             # logits: (B, 3) -> preds: (B,)
             preds = torch.argmax(logits, dim=1)
         
-        # Накапливаем данные для sklearn
+        # Накапливаем данные для sklearn и расширенной аналитики (Задача 313.4)
         self.val_y_true.append(y.detach().cpu().numpy())
-        
-        # Накапливаем regime_ids для логирования метрик по режимам
-        if regime_id is not None:
-            self.val_regime_ids.append(regime_id.detach().cpu().numpy())
         self.val_y_pred.append(preds.detach().cpu().numpy())
         self.val_logits.append(logits.detach().cpu())
         self.val_vol_true.append(vol_target.detach().cpu().numpy())
         self.val_vol_pred.append(vol_pred.detach().cpu().numpy())
+        self.val_f_ret.append(f_ret.detach().cpu().numpy())
+        
+        # Извлекаем текущий дисбаланс (Channel 2, Level 0, Last step)
+        # x shape: (B, Seq, Chan, Level)
+        current_imbalance = x[:, -1, 2, 0].detach().cpu().numpy()
+        self.val_imbalance.append(current_imbalance)
+        
+        # Накапливаем regime_ids для логирования метрик по режимам
+        if regime_id is not None:
+            self.val_regime_ids.append(regime_id.detach().cpu().numpy())
         
         # Логируем основные метрики
         self.log("val_loss", loss_cls, prog_bar=True, on_step=False, on_epoch=True)
@@ -532,6 +547,12 @@ class LiTModule(pl.LightningModule):
         y_true = np.concatenate(self.val_y_true)
         y_pred = np.concatenate(self.val_y_pred)
         logits = torch.cat(self.val_logits, dim=0)
+        
+        # Расширенная аналитика (Задача 313.4)
+        if not self.is_multi_horizon:
+            f_ret = np.concatenate(self.val_f_ret)
+            imbalance = np.concatenate(self.val_imbalance)
+            self._log_extended_analytics(y_true, y_pred, logits, f_ret, imbalance)
         
         # 2. Вычисляем метрики в зависимости от режима (single/multi-horizon)
         if self.is_multi_horizon:
@@ -704,6 +725,8 @@ class LiTModule(pl.LightningModule):
         self.val_logits.clear()
         self.val_vol_true.clear()
         self.val_vol_pred.clear()
+        self.val_f_ret.clear()
+        self.val_imbalance.clear()
         self.val_regime_ids.clear()
         self.acc.reset()
         self.f1_macro.reset()
@@ -711,7 +734,102 @@ class LiTModule(pl.LightningModule):
         self.precision_per_class.reset()
         self.recall_per_class.reset()
         self.conf_matrix.reset()
+        self.val_f_ret.clear()
+        self.val_imbalance.clear()
 
+    def _log_extended_analytics(self, y_true, y_pred, logits, f_ret, imbalance):
+        """
+        Расширенное логирование и аналитика по классам (Задача 313.4).
+        Рассчитывает метрики, специфичные для LOB и скальпинга.
+        """
+        import numpy as np
+        from sklearn.metrics import confusion_matrix
+        
+        # 1. Распределение предсказаний (Prediction Distribution)
+        total = len(y_pred)
+        if total == 0:
+            return
+            
+        dist = {
+            "Flat": np.sum(y_pred == 0) / total * 100,
+            "Up": np.sum(y_pred == 1) / total * 100,
+            "Down": np.sum(y_pred == 2) / total * 100
+        }
+        
+        # 2. Точность по классам (Hit Rate / Precision)
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
+        
+        # Precision = TP / (TP + FP)
+        prec_flat = cm[0, 0] / np.sum(cm[:, 0]) if np.sum(cm[:, 0]) > 0 else 0
+        prec_up = cm[1, 1] / np.sum(cm[:, 1]) if np.sum(cm[:, 1]) > 0 else 0
+        prec_down = cm[2, 2] / np.sum(cm[:, 2]) if np.sum(cm[:, 2]) > 0 else 0
+        
+        # 3. Детали матрицы ошибок (Confusion Matrix Details)
+        # % случаев, когда Up/Down был предсказан как Flat (Пропущенные возможности)
+        missed_up = cm[1, 0] / np.sum(cm[1, :]) * 100 if np.sum(cm[1, :]) > 0 else 0
+        missed_down = cm[2, 0] / np.sum(cm[2, :]) * 100 if np.sum(cm[2, :]) > 0 else 0
+        
+        # % случаев, когда Flat был предсказан как Up/Down (Ложные входы - самое опасное)
+        false_up = cm[0, 1] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0
+        false_down = cm[0, 2] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0
+        
+        # 4. Теоретическое преимущество (Theoretical Edge)
+        # Среднее изменение цены через k шагов после сигнала
+        edge_up = np.mean(f_ret[y_pred == 1]) if np.sum(y_pred == 1) > 0 else 0
+        edge_down = np.mean(f_ret[y_pred == 2]) if np.sum(y_pred == 2) > 0 else 0
+        
+        # 5. Анализ уверенности сигналов (Signal Confidence Analysis)
+        probs = torch.softmax(logits, dim=1).numpy()
+        correct_mask = (y_true == y_pred)
+        wrong_mask = (y_true != y_pred)
+        
+        conf_correct = np.mean(np.max(probs[correct_mask], axis=1)) if np.sum(correct_mask) > 0 else 0
+        conf_wrong = np.mean(np.max(probs[wrong_mask], axis=1)) if np.sum(wrong_mask) > 0 else 0
+        
+        # 6. Directional Accuracy (DA) - точность без учета Flat
+        dir_mask = (y_pred != 0)
+        da = np.mean(y_true[dir_mask] == y_pred[dir_mask]) if np.sum(dir_mask) > 0 else 0
+        
+        # 7. Соответствие дисбалансу LOB (LOB Imbalance Alignment)
+        # Корреляция между предсказанием (numeric signal) и текущим Imbalance
+        # Сигнал: Up=1, Flat=0, Down=-1
+        sig_num = np.zeros_like(y_pred)
+        sig_num[y_pred == 1] = 1
+        sig_num[y_pred == 2] = -1
+        
+        if np.std(sig_num) > 0 and np.std(imbalance) > 0:
+            imb_corr = np.corrcoef(sig_num, imbalance)[0, 1]
+        else:
+            imb_corr = 0.0
+            
+        # ВЫВОД В КОНСОЛЬ (Таблица)
+        print("\n" + "="*85)
+        print(f"{'LOB-SPECIFIC CLASS ANALYTICS (Validation)':^85}")
+        print("="*85)
+        print(f"{'Metric':<30} | {'Flat (0)':<15} | {'Up (1)':<15} | {'Down (2)':<15}")
+        print("-" * 85)
+        print(f"{'Prediction Distribution (%)':<30} | {dist['Flat']:<15.2f} | {dist['Up']:<15.2f} | {dist['Down']:<15.2f}")
+        print(f"{'Hit Rate (Precision)':<30} | {prec_flat:<15.4f} | {prec_up:<15.4f} | {prec_down:<15.4f}")
+        print(f"{'Missed Opportunities (%)':<30} | {'-':<15} | {missed_up:<15.2f} | {missed_down:<15.2f}")
+        print(f"{'False Entries (Danger!) (%)':<30} | {'-':<15} | {false_up:<15.2f} | {false_down:<15.2f}")
+        print("-" * 85)
+        print(f"{'Theoretical Edge (Future Ret)':<30} | {'-':<15} | {edge_up:<15.6f} | {edge_down:<15.6f}")
+        print(f"{'Directional Accuracy (DA)':<30} | {da:<15.4f} (Accuracy where pred != Flat)")
+        print(f"{'Signal Confidence (C/W)':<30} | Correct: {conf_correct:.4f} | Wrong: {conf_wrong:.4f} | Gap: {conf_correct-conf_wrong:.4f}")
+        print(f"{'LOB Imbalance Correlation':<30} | {imb_corr:<15.4f} (Corr with Signal -1/0/1)")
+        print("="*85 + "\n")
+        
+        # ЛОГИРОВАНИЕ В WANDB/TENSORBOARD
+        self.log("val_da", da, logger=True)
+        self.log("val_edge_up", edge_up, logger=True)
+        self.log("val_edge_down", edge_down, logger=True)
+        self.log("val_imb_corr", imb_corr, logger=True)
+        self.log("val_conf_gap", conf_correct - conf_wrong, logger=True)
+        
+        # Поклассовое распределение в WandB
+        for cls_name, val in dist.items():
+            self.log(f"val_dist/pred_{cls_name}", val, logger=True)
+        
     def configure_optimizers(self):
         lr = self.hparams.get("lr", 1e-4)
         weight_decay = self.hparams.get("weight_decay", 1e-5)
@@ -2690,9 +2808,9 @@ def train():
                 with torch.no_grad():
                     for batch in fold_val_loader:
                         if args.balance_method != "none" or args.use_time_weighting:
-                            x, y, _, _ = batch
+                            x, y, _, _, *other = batch
                         else:
-                            x, y, _, _ = batch
+                            x, y, _, _, *other = batch
                         
                         x = x.to(device)
                         logits, _ = best_fold_model(x)
@@ -2784,9 +2902,9 @@ def train():
         with torch.no_grad():
             for batch in test_loader:
                 if args.balance_method != "none" or args.use_time_weighting:
-                    x, y, _, _ = batch
+                    x, y, _, _, *other = batch
                 else:
-                    x, y, _, _ = batch
+                    x, y, _, _, *other = batch
                 
                 x = x.to(device)
                 logits, _ = best_model(x)
@@ -2888,10 +3006,10 @@ def train():
                 
                 with torch.no_grad():
                     for batch in tqdm(val_loader, desc=f"Pass {mc_pass+1}/{n_mc_passes}", leave=False):
-                        if len(batch) == 5:
-                            x, y, _, _, regime_id = batch
+                        if len(batch) >= 5:
+                            x, y, _, _, regime_id, *other = batch
                         else:
-                            x, y, _, _ = batch
+                            x, y, _, _, *other = batch
                             regime_id = None
                         
                         x = x.to(next(model.parameters()).device)
@@ -3130,9 +3248,9 @@ def train():
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
                 for batch in tqdm(test_loader, desc="Testing"):
                     if args.balance_method != "none" or args.use_time_weighting:
-                        x, y, vol_target, _ = batch  # Игнорируем веса на тесте
+                        x, y, vol_target, _, *other = batch  # Игнорируем веса на тесте
                     else:
-                        x, y, vol_target, _ = batch
+                        x, y, vol_target, _, *other = batch
                     
                     logits, _ = best_model(x.to(device))
                     preds = torch.argmax(logits, dim=1)
@@ -3171,9 +3289,9 @@ def train():
                 with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
                     for batch in tqdm(test_loader, desc="Testing Teacher"):
                         if args.balance_method != "none" or args.use_time_weighting:
-                            x, y, vol_target, _ = batch
+                            x, y, vol_target, _, *other = batch
                         else:
-                            x, y, vol_target, _ = batch
+                            x, y, vol_target, _, *other = batch
                         
                         teacher_logits, _ = teacher_model(x.to(device))
                         preds = torch.argmax(teacher_logits, dim=1)

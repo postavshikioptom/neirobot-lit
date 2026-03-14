@@ -949,6 +949,17 @@ class LOBDataset(Dataset):
         
         # Нам все еще нужны labels и timestamps
         select_cols = self.label_cols[:]
+        
+        # Добавляем future_return для расширенной аналитики (Задача 313.4)
+        future_ret_cols = [c for c in df.columns if c.startswith("future_return_h")]
+        if not future_ret_cols and "future_return" in df.columns:
+            future_ret_cols = ["future_return"]
+        
+        for fr_col in future_ret_cols:
+            if fr_col not in select_cols:
+                select_cols.append(fr_col)
+        self.future_ret_cols = future_ret_cols
+            
         if "timestamp_ms" in df.columns:
             select_cols.append("timestamp_ms")
         elif "timestamp" in df.columns:
@@ -964,8 +975,21 @@ class LOBDataset(Dataset):
         if self.is_multi_horizon:
             labels_list = [aux_df.select(pl.col(lc)).to_series().to_numpy() for lc in self.label_cols]
             self.labels = np.stack(labels_list, axis=1)
+            
+            # Сохраняем future_returns для аналитики
+            if self.future_ret_cols:
+                f_ret_list = [aux_df.select(pl.col(fc)).to_series().to_numpy() for fc in self.future_ret_cols]
+                self.future_returns = np.stack(f_ret_list, axis=1)
+            else:
+                self.future_returns = np.zeros_like(self.labels, dtype=np.float32)
         else:
             self.labels = aux_df.select(pl.col("label")).to_series().to_numpy()
+            
+            # Сохраняем future_returns для аналитики
+            if self.future_ret_cols:
+                self.future_returns = aux_df.select(pl.col(self.future_ret_cols[0])).to_series().to_numpy()
+            else:
+                self.future_returns = np.zeros_like(self.labels, dtype=np.float32)
         
         if "timestamp_ms" in aux_df.columns:
             self.timestamps = aux_df.select(pl.col("timestamp_ms")).to_series().to_numpy()
@@ -1214,7 +1238,13 @@ class LOBDataset(Dataset):
         w = self.sample_weights[idx]
         regime_id = torch.tensor(self.regime_ids[idx]).long()
         
-        return self._process_sample(x_raw, y, v, w, regime_id, idx=idx)
+        # Извлекаем future_return для расширенной аналитики (Задача 313.4)
+        if hasattr(self, 'future_returns') and self.future_returns is not None:
+            f_ret = self.future_returns[idx + self.seq_len - 1]
+        else:
+            f_ret = 0.0
+        
+        return self._process_sample(x_raw, y, v, w, regime_id, idx=idx, f_ret=f_ret)
 
     # ОТКЛЮЧЕНО: Используется только для streaming режима
     # def _getitem_streaming(self, idx):
@@ -1383,7 +1413,7 @@ class LOBDataset(Dataset):
         channels = np.concatenate([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, past_ret_ch], axis=1)
         return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(300)])
 
-    def _process_sample(self, x_raw, y, v, w, regime_id, idx=None):
+    def _process_sample(self, x_raw, y, v, w, regime_id, idx=None, f_ret=None):
         from .normalization import symlog_transform
         # NaN protection (Задача 094-2)
         x_raw = np.nan_to_num(x_raw, nan=0.0)
@@ -1478,7 +1508,16 @@ class LOBDataset(Dataset):
         # Собираем итоговый тензор (Seq, 6, 50)
         x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
         
-        return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id
+        # Извлекаем future_return для аналитики (Задача 313.4)
+        if f_ret is None:
+            if self.is_multi_horizon:
+                f_ret = torch.zeros(self.num_horizons)
+            else:
+                f_ret = torch.tensor(0.0)
+        else:
+            f_ret = torch.tensor(f_ret).float()
+        
+        return x_final, torch.tensor(y).long(), torch.tensor(v).float(), w, regime_id, f_ret
 
     def get_class_distribution(self) -> np.ndarray:
         if self.data_mode == "streaming":
