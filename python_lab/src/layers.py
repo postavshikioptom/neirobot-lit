@@ -60,6 +60,9 @@ class LOBPatching(nn.Module):
         # Слой для вычисления весов внимания для каждого уровня стакана
         self.level_attention = nn.Linear(d_model, 1)
         
+        # Задача 314.6: Дополнительная нормализация перед aggregation
+        self.pre_attn_norm = nn.LayerNorm(d_model)
+        
         # 4. Финальная нормализация для стабильности
         self.norm = nn.LayerNorm(d_model)
 
@@ -99,8 +102,11 @@ class LOBPatching(nn.Module):
         # Шаг 3: Агрегация уровней в один "Snapshot Token" на каждый шаг времени.
         # Сжимаем num_patches уровней в один вектор размерности D через Attention Pooling (Задача 310-3).
         # (B, S, num_patches, d_model) -> (B, S, d_model)
-        attn_weights = F.softmax(self.level_attention(x_patched), dim=2)  # (B, S, num_patches, 1)
-        x_snapshot = (x_patched * attn_weights).sum(dim=2)  # (B, S, d_model)
+        
+        # Задача 314.6: Применяем нормализацию перед attention pooling
+        x_patched_norm = self.pre_attn_norm(x_patched)  # (B, S, num_patches, d_model)
+        attn_weights = F.softmax(self.level_attention(x_patched_norm), dim=2)  # (B, S, num_patches, 1)
+        x_snapshot = (x_patched_norm * attn_weights).sum(dim=2)  # (B, S, d_model)
         
         # Шаг 4: Добавляем временные позиции (информация о порядке событий)
         # Динамически нарезаем позиционное кодирование под текущую длину последовательности

@@ -163,6 +163,77 @@ class ProfilerCallback(pl.Callback):
                 self.profiler = None
                 print(f"\n[PROFILER] Profiling completed. Results saved to {self.profiler_dir}")
 
+def compute_hft_metrics(all_preds, all_labels, all_logits, all_f_rets, all_imbalances):
+    """
+    Вычисляет расширенные HFT-метрики для анализа качества сигналов (Задача 313.4/5).
+    """
+    import numpy as np
+    from sklearn.metrics import confusion_matrix
+    
+    total = len(all_preds)
+    if total == 0:
+        return {}
+        
+    # 1. Распределение предсказаний
+    dist = {
+        "dist_flat": np.sum(all_preds == 0) / total * 100,
+        "dist_up": np.sum(all_preds == 1) / total * 100,
+        "dist_down": np.sum(all_preds == 2) / total * 100
+    }
+    
+    # 2. Точность по классам
+    cm = confusion_matrix(all_labels, all_preds, labels=[0, 1, 2])
+    hit_rates = {
+        "hit_rate_flat": cm[0, 0] / np.sum(cm[:, 0]) if np.sum(cm[:, 0]) > 0 else 0,
+        "hit_rate_up": cm[1, 1] / np.sum(cm[:, 1]) if np.sum(cm[:, 1]) > 0 else 0,
+        "hit_rate_down": cm[2, 2] / np.sum(cm[:, 2]) if np.sum(cm[:, 2]) > 0 else 0
+    }
+    
+    # 3. Детали матрицы ошибок
+    error_details = {
+        "missed_up": cm[1, 0] / np.sum(cm[1, :]) * 100 if np.sum(cm[1, :]) > 0 else 0,
+        "missed_down": cm[2, 0] / np.sum(cm[2, :]) * 100 if np.sum(cm[2, :]) > 0 else 0,
+        "false_up": cm[0, 1] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0,
+        "false_down": cm[0, 2] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0
+    }
+    
+    # 4. Theoretical Edge
+    edge_up = np.mean(all_f_rets[all_preds == 1]) if np.sum(all_preds == 1) > 0 else 0
+    edge_down = np.mean(all_f_rets[all_preds == 2]) if np.sum(all_preds == 2) > 0 else 0
+    
+    # 5. Анализ уверенности (Signal Confidence)
+    from torch.nn.functional import softmax
+    import torch
+    probs = softmax(torch.from_numpy(all_logits), dim=1).numpy()
+    correct_mask = (all_labels == all_preds)
+    wrong_mask = (all_labels != all_preds)
+    
+    conf_correct = np.mean(np.max(probs[correct_mask], axis=1)) if np.sum(correct_mask) > 0 else 0
+    conf_wrong = np.mean(np.max(probs[wrong_mask], axis=1)) if np.sum(wrong_mask) > 0 else 0
+    
+    # 6. Directional Accuracy (DA)
+    dir_mask = (all_preds != 0)
+    da = np.mean(all_labels[dir_mask] == all_preds[dir_mask]) if np.sum(dir_mask) > 0 else 0
+    
+    # 7. Imbalance Alignment
+    sig_num = np.zeros_like(all_preds)
+    sig_num[all_preds == 1] = 1
+    sig_num[all_preds == 2] = -1
+    
+    if np.std(sig_num) > 0 and np.std(all_imbalances) > 0:
+        imb_corr = np.corrcoef(sig_num, all_imbalances)[0, 1]
+    else:
+        imb_corr = 0.0
+        
+    return {
+        **dist, **hit_rates, **error_details,
+        "edge_up": edge_up, "edge_down": edge_down,
+        "conf_correct": conf_correct, "conf_wrong": conf_wrong,
+        "conf_gap": conf_correct - conf_wrong,
+        "da": da, "imb_corr": imb_corr
+    }
+
+
 class LiTModule(pl.LightningModule):
     """
     LightningModule для обучения модели LiT.
@@ -312,12 +383,9 @@ class LiTModule(pl.LightningModule):
         if batch_idx != 0:
             return
         
-        # Распаковываем батч: x, y, vol, weights, regime_id
-        if len(batch) >= 5:
-            x, y, vol_target, weights, regime_id, *other = batch
-        else:
-            x, y, vol_target, weights, *other = batch
-            
+        # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
+        x, y, ts, mid, label, extra_data = batch
+        
         # x: (Batch, Seq, Channels, Levels)
         channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
         
@@ -341,15 +409,13 @@ class LiTModule(pl.LightningModule):
                     writer.add_scalar(f"Stats_train/{ch_name}_Std", ch_data.std(), self.global_step)
 
     def training_step(self, batch, batch_idx):
-        # Распаковываем батч: x, y, vol, weights, regime_id, f_ret (Задача 313.4)
-        if len(batch) == 6:
-            x, y, vol_target, weights, regime_id, f_ret = batch
-        elif len(batch) == 5:
-            x, y, vol_target, weights, regime_id = batch
-        else:
-            # Обратная совместимость: если regime_id нет, используем None
-            x, y, vol_target, weights, *other = batch
-            regime_id = None
+        # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
+        x, y, ts, mid, label, extra_data = batch
+        
+        # Извлекаем данные из extra_data
+        vol_target = extra_data["vol"]
+        weights = extra_data["weight"]
+        regime_id = extra_data["regime_id"]
         
         # Логируем статистику каналов для первого батча первой эпохи
         if self.current_epoch == 0 and batch_idx == 0:
@@ -473,16 +539,13 @@ class LiTModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        # Распаковываем батч (Задача 313.4)
-        if len(batch) == 6:
-            x, y, vol_target, _, regime_id, f_ret = batch
-        elif len(batch) == 5:
-            x, y, vol_target, _, regime_id = batch
-            f_ret = torch.zeros_like(y).float()
-        else:
-            x, y, vol_target, _, *other = batch
-            regime_id = None
-            f_ret = torch.zeros_like(y).float()
+        # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
+        x, y, ts, mid, label, extra_data = batch
+        
+        # Извлекаем данные из extra_data
+        vol_target = extra_data["vol"]
+        regime_id = extra_data["regime_id"]
+        f_ret = extra_data["f_ret"]
         
         logits, vol_pred = self(x, regime_id=regime_id)
         vol_pred = vol_pred.squeeze(-1)
@@ -740,95 +803,36 @@ class LiTModule(pl.LightningModule):
     def _log_extended_analytics(self, y_true, y_pred, logits, f_ret, imbalance):
         """
         Расширенное логирование и аналитика по классам (Задача 313.4).
-        Рассчитывает метрики, специфичные для LOB и скальпинга.
+        Использует compute_hft_metrics для расчета и выводит таблицу.
         """
         import numpy as np
-        from sklearn.metrics import confusion_matrix
         
-        # 1. Распределение предсказаний (Prediction Distribution)
-        total = len(y_pred)
-        if total == 0:
+        # 1. Вычисляем метрики
+        hft_metrics = compute_hft_metrics(y_pred, y_true, logits.numpy(), f_ret, imbalance)
+        if not hft_metrics:
             return
             
-        dist = {
-            "Flat": np.sum(y_pred == 0) / total * 100,
-            "Up": np.sum(y_pred == 1) / total * 100,
-            "Down": np.sum(y_pred == 2) / total * 100
-        }
-        
-        # 2. Точность по классам (Hit Rate / Precision)
-        cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
-        
-        # Precision = TP / (TP + FP)
-        prec_flat = cm[0, 0] / np.sum(cm[:, 0]) if np.sum(cm[:, 0]) > 0 else 0
-        prec_up = cm[1, 1] / np.sum(cm[:, 1]) if np.sum(cm[:, 1]) > 0 else 0
-        prec_down = cm[2, 2] / np.sum(cm[:, 2]) if np.sum(cm[:, 2]) > 0 else 0
-        
-        # 3. Детали матрицы ошибок (Confusion Matrix Details)
-        # % случаев, когда Up/Down был предсказан как Flat (Пропущенные возможности)
-        missed_up = cm[1, 0] / np.sum(cm[1, :]) * 100 if np.sum(cm[1, :]) > 0 else 0
-        missed_down = cm[2, 0] / np.sum(cm[2, :]) * 100 if np.sum(cm[2, :]) > 0 else 0
-        
-        # % случаев, когда Flat был предсказан как Up/Down (Ложные входы - самое опасное)
-        false_up = cm[0, 1] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0
-        false_down = cm[0, 2] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0
-        
-        # 4. Теоретическое преимущество (Theoretical Edge)
-        # Среднее изменение цены через k шагов после сигнала
-        edge_up = np.mean(f_ret[y_pred == 1]) if np.sum(y_pred == 1) > 0 else 0
-        edge_down = np.mean(f_ret[y_pred == 2]) if np.sum(y_pred == 2) > 0 else 0
-        
-        # 5. Анализ уверенности сигналов (Signal Confidence Analysis)
-        probs = torch.softmax(logits, dim=1).numpy()
-        correct_mask = (y_true == y_pred)
-        wrong_mask = (y_true != y_pred)
-        
-        conf_correct = np.mean(np.max(probs[correct_mask], axis=1)) if np.sum(correct_mask) > 0 else 0
-        conf_wrong = np.mean(np.max(probs[wrong_mask], axis=1)) if np.sum(wrong_mask) > 0 else 0
-        
-        # 6. Directional Accuracy (DA) - точность без учета Flat
-        dir_mask = (y_pred != 0)
-        da = np.mean(y_true[dir_mask] == y_pred[dir_mask]) if np.sum(dir_mask) > 0 else 0
-        
-        # 7. Соответствие дисбалансу LOB (LOB Imbalance Alignment)
-        # Корреляция между предсказанием (numeric signal) и текущим Imbalance
-        # Сигнал: Up=1, Flat=0, Down=-1
-        sig_num = np.zeros_like(y_pred)
-        sig_num[y_pred == 1] = 1
-        sig_num[y_pred == 2] = -1
-        
-        if np.std(sig_num) > 0 and np.std(imbalance) > 0:
-            imb_corr = np.corrcoef(sig_num, imbalance)[0, 1]
-        else:
-            imb_corr = 0.0
-            
-        # ВЫВОД В КОНСОЛЬ (Таблица)
+        # 2. ВЫВОД В КОНСОЛЬ (Таблица)
         print("\n" + "="*85)
         print(f"{'LOB-SPECIFIC CLASS ANALYTICS (Validation)':^85}")
         print("="*85)
         print(f"{'Metric':<30} | {'Flat (0)':<15} | {'Up (1)':<15} | {'Down (2)':<15}")
         print("-" * 85)
-        print(f"{'Prediction Distribution (%)':<30} | {dist['Flat']:<15.2f} | {dist['Up']:<15.2f} | {dist['Down']:<15.2f}")
-        print(f"{'Hit Rate (Precision)':<30} | {prec_flat:<15.4f} | {prec_up:<15.4f} | {prec_down:<15.4f}")
-        print(f"{'Missed Opportunities (%)':<30} | {'-':<15} | {missed_up:<15.2f} | {missed_down:<15.2f}")
-        print(f"{'False Entries (Danger!) (%)':<30} | {'-':<15} | {false_up:<15.2f} | {false_down:<15.2f}")
+        print(f"{'Процент предсказаний (%)':<30} | {hft_metrics['dist_flat']:<15.2f} | {hft_metrics['dist_up']:<15.2f} | {hft_metrics['dist_down']:<15.2f}")
+        print(f"{'Hit Rate (Точность)':<30} | {hft_metrics['hit_rate_flat']:<15.4f} | {hft_metrics['hit_rate_up']:<15.4f} | {hft_metrics['hit_rate_down']:<15.4f}")
+        print(f"{'Процент пропущенных сигналов (%)':<30} | {'-':<15} | {hft_metrics['missed_up']:<15.2f} | {hft_metrics['missed_down']:<15.2f}")
+        print(f"{'Ложные входы (%)':<30} | {'-':<15} | {hft_metrics['false_up']:<15.2f} | {hft_metrics['false_down']:<15.2f}")
         print("-" * 85)
-        print(f"{'Theoretical Edge (Future Ret)':<30} | {'-':<15} | {edge_up:<15.6f} | {edge_down:<15.6f}")
-        print(f"{'Directional Accuracy (DA)':<30} | {da:<15.4f} (Accuracy where pred != Flat)")
-        print(f"{'Signal Confidence (C/W)':<30} | Correct: {conf_correct:.4f} | Wrong: {conf_wrong:.4f} | Gap: {conf_correct-conf_wrong:.4f}")
-        print(f"{'LOB Imbalance Correlation':<30} | {imb_corr:<15.4f} (Corr with Signal -1/0/1)")
+        print(f"{'Теоретический Edge (Future Ret)':<30} | {'-':<15} | {hft_metrics['edge_up']:<15.6f} | {hft_metrics['edge_down']:<15.6f}")
+        print(f"{'Directional Accuracy (DA) без Flat':<30} | {hft_metrics['da']:<15.4f} (Accuracy where pred != Flat)")
+        print(f"{'Средняя Уверенность (C/W)':<30} | Уверенность при правильном: {hft_metrics['conf_correct']:.4f} | Уверенности при ложном: {hft_metrics['conf_wrong']:.4f} | Разница уверенности: {hft_metrics['conf_gap']:.4f}")
+        print(f"{'Корреляция с LOB Imbalance':<30} | {hft_metrics['imb_corr']:<15.4f} (Corr with Signal -1/0/1)")
         print("="*85 + "\n")
         
-        # ЛОГИРОВАНИЕ В WANDB/TENSORBOARD
-        self.log("val_da", da, logger=True)
-        self.log("val_edge_up", edge_up, logger=True)
-        self.log("val_edge_down", edge_down, logger=True)
-        self.log("val_imb_corr", imb_corr, logger=True)
-        self.log("val_conf_gap", conf_correct - conf_wrong, logger=True)
-        
-        # Поклассовое распределение в WandB
-        for cls_name, val in dist.items():
-            self.log(f"val_dist/pred_{cls_name}", val, logger=True)
+        # 3. ЛОГИРОВАНИЕ В WANDB/TENSORBOARD
+        # Используем префикс class_stats/ согласно плану
+        for name, val in hft_metrics.items():
+            self.log(f"class_stats/{name}", val, logger=True)
         
     def configure_optimizers(self):
         lr = self.hparams.get("lr", 1e-4)
@@ -863,12 +867,13 @@ class LiTModule(pl.LightningModule):
                 max_momentum=0.95
             )
             
-            # Логируем LR и momentum на каждом шаге
+            # Логируем LR и momentum раз в эпоху
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
-                    "interval": "step",  # OneCycleLR работает на уровне шагов
+                    "monitor": "val_loss", # Обязательно для Plateau
+                    "interval": "epoch",  # OneCycleLR работает на уровне эпох
                     "frequency": 1
                 }
             }
@@ -907,7 +912,7 @@ class LiTModule(pl.LightningModule):
                 "optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
-                    "interval": "step",
+                    "interval": "epoch",
                     "frequency": 1
                 }
             }
@@ -941,8 +946,7 @@ class LiTModule(pl.LightningModule):
                 optimizer,
                 mode="min",
                 factor=factor,
-                patience=patience,
-                verbose=True
+                patience=patience
             )
             
             return {
@@ -1281,9 +1285,11 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     
     with torch.no_grad():
         for batch in trial_val_loader:
-            x = batch[0].to(device)
-            y = batch[1].to(device)
-            regime_id = batch[4].to(device) if len(batch) > 4 else None
+            x, y, ts, mid, label, extra_data = batch
+            device = next(trial_model.parameters()).device
+            x = x.to(device)
+            y = y.to(device)
+            regime_id = extra_data["regime_id"].to(device) if extra_data["regime_id"] is not None else None
             
             # Вызываем forward() модели
             output = trial_model(x, regime_id=regime_id)
@@ -1322,8 +1328,10 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     trial_model.eval()
     with torch.no_grad():
         for batch in trial_val_loader:
-            x = batch[0].to(device)
-            regime_id = batch[4].to(device) if len(batch) > 4 else None
+            x, y, ts, mid, label, extra_data = batch
+            device = next(trial_model.parameters()).device
+            x = x.to(device)
+            regime_id = extra_data["regime_id"].to(device) if extra_data["regime_id"] is not None else None
             
             output = trial_model(x, regime_id=regime_id)
             if isinstance(output, tuple):
@@ -2807,13 +2815,12 @@ def train():
                 
                 with torch.no_grad():
                     for batch in fold_val_loader:
-                        if args.balance_method != "none" or args.use_time_weighting:
-                            x, y, _, _, *other = batch
-                        else:
-                            x, y, _, _, *other = batch
+                        x, y, ts, mid, label, extra_data = batch
+                        regime_id = extra_data["regime_id"]
                         
                         x = x.to(device)
-                        logits, _ = best_fold_model(x)
+                        r_id = regime_id.to(device) if regime_id is not None else None
+                        logits, _ = best_fold_model(x, regime_id=r_id)
                         preds = torch.argmax(logits, dim=1)
                         
                         fold_y_true.extend(y.cpu().numpy())
@@ -2901,13 +2908,12 @@ def train():
         
         with torch.no_grad():
             for batch in test_loader:
-                if args.balance_method != "none" or args.use_time_weighting:
-                    x, y, _, _, *other = batch
-                else:
-                    x, y, _, _, *other = batch
+                x, y, ts, mid, label, extra_data = batch
+                regime_id = extra_data["regime_id"]
                 
                 x = x.to(device)
-                logits, _ = best_model(x)
+                r_id = regime_id.to(device) if regime_id is not None else None
+                logits, _ = best_model(x, regime_id=r_id)
                 preds = torch.argmax(logits, dim=1)
                 
                 y_true.extend(y.cpu().numpy())
@@ -3006,19 +3012,15 @@ def train():
                 
                 with torch.no_grad():
                     for batch in tqdm(val_loader, desc=f"Pass {mc_pass+1}/{n_mc_passes}", leave=False):
-                        if len(batch) >= 5:
-                            x, y, _, _, regime_id, *other = batch
-                        else:
-                            x, y, _, _, *other = batch
-                            regime_id = None
+                        x, y, ts, mid, label, extra_data = batch
+                        regime_id = extra_data["regime_id"]
                         
-                        x = x.to(next(model.parameters()).device)
-                        y = y.to(next(model.parameters()).device)
+                        device = next(model.parameters()).device
+                        x = x.to(device)
+                        y = y.to(device)
                         
-                        if regime_id is not None:
-                            regime_id = regime_id.to(next(model.parameters()).device)
-                        
-                        logits, _ = model(x, regime_id=regime_id)
+                        r_id = regime_id.to(device) if regime_id is not None else None
+                        logits, _ = model(x, regime_id=r_id)
                         pass_logits.append(logits.cpu())
                         pass_labels.append(y.cpu())
                 
@@ -3102,12 +3104,15 @@ def train():
             
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc="Computing baseline MCC"):
-                    # Батч всегда содержит 5 элементов: x, y, vol, weight, regime_id
-                    x = batch[0].to(model.device)
-                    y = batch[1].to(model.device)
-                    regime_id = batch[4].to(model.device) if len(batch) > 4 else None
+                    x, y, ts, mid, label, extra_data = batch
+                    regime_id = extra_data["regime_id"]
                     
-                    logits_cls, _ = model(x, regime_id=regime_id)
+                    device = model.device
+                    x = x.to(device)
+                    y = y.to(device)
+                    r_id = regime_id.to(device) if regime_id is not None else None
+                    
+                    logits_cls, _ = model(x, regime_id=r_id)
                     preds = torch.argmax(logits_cls, dim=1)
                     
                     all_preds.append(preds.cpu())
@@ -3164,12 +3169,15 @@ def train():
                 
                 with torch.no_grad():
                     for batch in tqdm(val_loader, desc=f"Evaluating iteration {iteration}"):
-                        # Батч всегда содержит 5 элементов: x, y, vol, weight, regime_id
-                        x = batch[0].to(model.device)
-                        y = batch[1].to(model.device)
-                        regime_id = batch[4].to(model.device) if len(batch) > 4 else None
+                        x, y, ts, mid, label, extra_data = batch
+                        regime_id = extra_data["regime_id"]
                         
-                        logits_cls, _ = model(x, regime_id=regime_id)
+                        device = model.device
+                        x = x.to(device)
+                        y = y.to(device)
+                        r_id = regime_id.to(device) if regime_id is not None else None
+                        
+                        logits_cls, _ = model(x, regime_id=r_id)
                         preds = torch.argmax(logits_cls, dim=1)
                         
                         all_preds.append(preds.cpu())
@@ -3247,12 +3255,12 @@ def train():
         with torch.no_grad():
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
                 for batch in tqdm(test_loader, desc="Testing"):
-                    if args.balance_method != "none" or args.use_time_weighting:
-                        x, y, vol_target, _, *other = batch  # Игнорируем веса на тесте
-                    else:
-                        x, y, vol_target, _, *other = batch
+                    x, y, ts, mid, label, extra_data = batch
+                    regime_id = extra_data["regime_id"]
                     
-                    logits, _ = best_model(x.to(device))
+                    x = x.to(device)
+                    r_id = regime_id.to(device) if regime_id is not None else None
+                    logits, _ = best_model(x, regime_id=r_id)
                     preds = torch.argmax(logits, dim=1)
                     y_true.append(y.numpy())
                     y_pred.append(preds.cpu().numpy())
@@ -3288,12 +3296,11 @@ def train():
             with torch.no_grad():
                 with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
                     for batch in tqdm(test_loader, desc="Testing Teacher"):
-                        if args.balance_method != "none" or args.use_time_weighting:
-                            x, y, vol_target, _, *other = batch
-                        else:
-                            x, y, vol_target, _, *other = batch
+                        x, y, ts, mid, label, extra_data = batch
+                        regime_id = extra_data["regime_id"]
                         
-                        teacher_logits, _ = teacher_model(x.to(device))
+                        r_id = regime_id.to(device) if regime_id is not None else None
+                        teacher_logits, _ = teacher_model(x.to(device), regime_id=r_id)
                         preds = torch.argmax(teacher_logits, dim=1)
                         y_pred_teacher.append(preds.cpu().numpy())
             

@@ -1472,12 +1472,21 @@ def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embe
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
-            # Распаковываем батч
-            if len(batch) == 5:
-                x, y, _, _, regime_id = batch
-            else:
-                x, y, _, _ = batch
-                regime_id = None
+            # Распаковываем батч безопасно (Задача 313.4 - поддержка расширенного логирования)
+            x = batch[0]
+            y = batch[1]
+            regime_id = None
+            
+            # В новом формате (6 элементов) regime_id может быть в extra_data
+            if len(batch) == 6:
+                extra_data = batch[5]
+                if isinstance(extra_data, dict):
+                    regime_id = extra_data.get('regime_id')
+                else:
+                    regime_id = None
+            # В старом формате (5 элементов) regime_id был 5-м элементом
+            elif len(batch) == 5:
+                regime_id = batch[4]
             
             # Получаем embeddings после патчинга
             # Используем forward hook для извлечения
