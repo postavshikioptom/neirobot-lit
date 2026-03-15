@@ -804,7 +804,7 @@ class LOBDataset(Dataset):
         
         if len(self) > 0:
             sample_x = self[0][0]
-            print(f"[{self.__class__.__name__}] First Sample Statistics (SymLog applied):")
+            print(f"[{self.__class__.__name__}] First Sample Statistics (z-score normalized, clipped [-5,5]):")
             channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
             for i in range(sample_x.shape[1]):
                 chan = sample_x[:, i, :]
@@ -923,13 +923,13 @@ class LOBDataset(Dataset):
         price_col = "mid_price" if "mid_price" in df.columns else df.columns[0]
         
         # 1. Извлекаем логарифмированные объемы и восстанавливаем сырые данные
-        # Задача 315: Восстановление сырых объемов перед расчетом VIB
-        log_bid_sum = df.select(pl.sum_horizontal(bid_v_cols)).to_series().to_numpy().astype(np.float64)
-        log_ask_sum = df.select(pl.sum_horizontal(ask_v_cols)).to_series().to_numpy().astype(np.float64)
-        
-        # Восстанавливаем сырые объемы из логарифмов
-        raw_bid_sum = np.exp(log_bid_sum) - 1.0
-        raw_ask_sum = np.exp(log_ask_sum) - 1.0
+        # Задача 315-3 fix: сначала восстанавливаем каждый уровень, потом суммируем
+        # БЫЛО (неверно): exp(sum(log(1+v))) = product(1+v) - 1
+        # СТАЛО (верно):  sum(exp(v_i) - 1) = сумма сырых объемов по уровням
+        bid_v_matrix = df.select(bid_v_cols).to_numpy().astype(np.float64)  # (N, 50)
+        ask_v_matrix = df.select(ask_v_cols).to_numpy().astype(np.float64)  # (N, 50)
+        raw_bid_sum = (np.exp(bid_v_matrix) - 1.0).sum(axis=1)  # (N,)
+        raw_ask_sum = (np.exp(ask_v_matrix) - 1.0).sum(axis=1)  # (N,)
         raw_prices = df[price_col].to_numpy().astype(np.float64)
 
         # 2. Расчет VIB из СЫРЫХ объемов (Задача 315)
@@ -946,10 +946,7 @@ class LOBDataset(Dataset):
             self.past_ret_cache[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
         
         # 4. Расчет Static Imbalance (Задача 053) - замена динамического OFI
-        # Извлекаем bid_v и ask_v матрицы для всех 50 уровней
-        bid_v_matrix = df.select(bid_v_cols).to_numpy().astype(np.float64)  # (N, 50)
-        ask_v_matrix = df.select(ask_v_cols).to_numpy().astype(np.float64)  # (N, 50)
-        
+        # bid_v_matrix и ask_v_matrix уже вычислены выше (для VIB)
         # Вычисляем static imbalance для каждого уровня
         self.imbalance_cache = compute_static_imbalance(bid_v_matrix, ask_v_matrix)  # (N, 50)
         
@@ -1456,22 +1453,38 @@ class LOBDataset(Dataset):
             # ch[3]: Delta Imbalance (Задача 314.1.4) - изменение дисбаланса по времени
             ofi_ch = compute_delta_imbalance(bid_v, ask_v)  # (N, 50)
             
-            vib_ch = np.zeros_like(ask_p)
+            # ch[4]: VIB - вычисляем из сырых объемов (восстанавливаем из логарифмов)
+            # Задача 315-3 fix: не заполняем нулями, иначе нормализатор обучится на нулях
+            ask_v_raw_norm = np.exp(ask_v) - 1.0  # (N, 50)
+            bid_v_raw_norm = np.exp(bid_v) - 1.0  # (N, 50)
+            bv_sum = bid_v_raw_norm.sum(axis=1)   # (N,)
+            av_sum = ask_v_raw_norm.sum(axis=1)   # (N,)
+            vib_val = (bv_sum - av_sum) / (bv_sum + av_sum + 1e-8)  # (N,)
+            vib_ch = np.repeat(vib_val[:, np.newaxis], 50, axis=1)  # (N, 50)
+            
+            # ch[5]: PastRet - вычисляем из mid_price если доступен
+            # Задача 315-3 fix: не заполняем нулями
             past_ret_ch = np.zeros_like(ask_p)
+            if "mid_price" in df_raw.columns:
+                mid_p = df_raw["mid_price"].to_numpy().astype(np.float64)
+                log_p = np.log(np.maximum(mid_p, 1e-9))
+                lag = 100
+                past_ret = np.zeros(len(log_p), dtype=np.float32)
+                if len(log_p) > lag:
+                    past_ret[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
+                past_ret_ch = np.repeat(past_ret[:, np.newaxis], 50, axis=1)
 
         # Формируем каналы (как в Rust)
         price_ch = (ask_p + bid_p) / 2.0
         
-        # Подзадача 4: Восстанавливаем сырые объемы перед расчетом каналов
-        # ask_v и bid_v уже логарифмированы в features.py, нужно восстановить
+        # Задача 315-3: ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ - используем логарифмы НАПРЯМУЮ
+        # Синхронизировано с _process_sample
+        # ask_v и bid_v уже логарифмированы в features.py, восстановление не нужно
+        vol_ch = (ask_v + bid_v) / 2.0  # Среднее логарифмов, диапазон [2.4, 11.9]
+        
+        # Вычисляем дисбаланс из сырых объемов (imbalance оставляем с восстановлением)
         ask_v_raw = np.exp(ask_v) - 1.0
         bid_v_raw = np.exp(bid_v) - 1.0
-        
-        # Суммируем сырые объемы и применяем логарифм
-        vol_sum = ask_v_raw + bid_v_raw
-        vol_ch = np.log1p(vol_sum)
-        
-        # Вычисляем дисбаланс из сырых объемов
         denom = bid_v_raw + ask_v_raw + 1e-8
         imb_ch = (bid_v_raw - ask_v_raw) / denom
         
@@ -1479,7 +1492,6 @@ class LOBDataset(Dataset):
         return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(300)])
 
     def _process_sample(self, x_raw, y, v, w, regime_id, ts, mid, idx=None, f_ret=None):
-        from .normalization import symlog_transform
         # NaN protection (Задача 094-2)
         x_raw = np.nan_to_num(x_raw, nan=0.0)
         
@@ -1507,30 +1519,79 @@ class LOBDataset(Dataset):
         # ch[0-2]: Базовые LOB каналы
         price_ch_raw = (ask_p + bid_p) / 2.0
         
-        # Подзадача 1: Восстанавливаем сырые объемы перед суммированием
-        # ask_v и bid_v уже логарифмированы в features.py, нужно восстановить
+        # Задача 315-2: Детальная диагностика исходных данных
+        # ИСПРАВЛЕНИЕ: idx смещается на max_lag в __getitem__, поэтому проверяем диапазон
+        if idx is not None and 100 <= idx <= 105:
+            print(f"\n[ЗАДАЧА 315-2] ДИАГНОСТИКА ИСХОДНЫХ ДАННЫХ (idx={idx}):")
+            print(f"  ask_v (логарифмы из features.py):")
+            print(f"    min={ask_v.min():.4f}, max={ask_v.max():.4f}, mean={ask_v.mean():.4f}, std={ask_v.std():.4f}")
+            print(f"  bid_v (логарифмы из features.py):")
+            print(f"    min={bid_v.min():.4f}, max={bid_v.max():.4f}, mean={bid_v.mean():.4f}, std={bid_v.std():.4f}")
+        
+        # Восстанавливаем сырые объемы для расчета Imbalance (Channel 2)
+        # Для Volume (Channel 1) восстановление больше не нужно (Задача 315-3)
         ask_v_raw = torch.exp(ask_v) - 1.0
         bid_v_raw = torch.exp(bid_v) - 1.0
         
-        # Суммируем сырые объемы и применяем логарифм
-        vol_sum = ask_v_raw + bid_v_raw
-        vol_ch_raw = torch.log1p(vol_sum)
+        # Задача 315-2: Диагностика восстановленных данных (для imbalance)
+        if idx is not None and 100 <= idx <= 105:
+            print(f"\n[ЗАДАЧА 315-2] ДИАГНОСТИКА ВОССТАНОВЛЕННЫХ ДАННЫХ (для imbalance):")
+            print(f"  ask_v_raw (после exp(v)-1):")
+            print(f"    min={ask_v_raw.min():.4f}, max={ask_v_raw.max():.4f}, mean={ask_v_raw.mean():.4f}, std={ask_v_raw.std():.4f}")
+            print(f"  bid_v_raw (после exp(v)-1):")
+            print(f"    min={bid_v_raw.min():.4f}, max={bid_v_raw.max():.4f}, mean={bid_v_raw.mean():.4f}, std={bid_v_raw.std():.4f}")
+        
+        # Задача 315-3: ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ - используем логарифмы НАПРЯМУЮ
+        # СТАРЫЙ КОД (315-2, восстановление + log1p):
+        # vol_mean = (ask_v_raw + bid_v_raw) / 2.0
+        # vol_ch_raw = torch.log1p(vol_mean)
+        
+        # НОВЫЙ КОД: Среднее логарифмов (ask_v и bid_v уже логарифмированы в features.py)
+        # Интерпретация: log(√(v_ask × v_bid)) ≈ геометрическое среднее объемов
+        vol_ch_raw = (ask_v + bid_v) / 2.0  # (seq_len, 50) - диапазон [2.4, 11.9]
+        
+        # Задача 315-3: Диагностика Volume channel
+        if idx is not None and 100 <= idx <= 105:
+            print(f"\n[ЗАДАЧА 315-3] ДИАГНОСТИКА VOLUME CHANNEL:")
+            print(f"  vol_ch_raw (среднее логарифмов, без восстановления):")
+            print(f"    min={vol_ch_raw.min():.4f}, max={vol_ch_raw.max():.4f}, mean={vol_ch_raw.mean():.4f}, std={vol_ch_raw.std():.4f}")
         
         # Подзадача 2: Вычисляем дисбаланс из сырых объемов
         denom = bid_v_raw + ask_v_raw + 1e-8
         imb_ch_raw = (bid_v_raw - ask_v_raw) / denom
+        
+        # Задача 315-2: Диагностика Imbalance channel
+        if idx is not None and 100 <= idx <= 105:
+            print(f"\n[ЗАДАЧА 315-2] ДИАГНОСТИКА IMBALANCE CHANNEL:")
+            print(f"  denom (bid_v_raw + ask_v_raw):")
+            print(f"    min={denom.min():.4f}, max={denom.max():.4f}, mean={denom.mean():.4f}, std={denom.std():.4f}")
+            print(f"  imb_ch_raw:")
+            print(f"    min={imb_ch_raw.min():.4f}, max={imb_ch_raw.max():.4f}, mean={imb_ch_raw.mean():.4f}, std={imb_ch_raw.std():.4f}")
         
         # Применяем нормализацию к КАНАЛАМ (Задача 311)
         price_ch = self.normalize_channel(price_ch_raw, channel_idx=0)
         vol_ch = self.normalize_channel(vol_ch_raw, channel_idx=1)
         imb_ch = self.normalize_channel(imb_ch_raw, channel_idx=2)
         
-        # Подзадача 6: Диагностика каналов ДО нормализации
-        if idx is not None and idx == 0:
-            print(f"[ДИАГНОСТИКА] Статистика каналов ДО нормализации (idx={idx}):")
+        # Задача 315-3: Диагностика каналов ДО и ПОСЛЕ нормализации + параметры нормализации
+        if idx is not None and 100 <= idx <= 105:
+            print(f"\n[ЗАДАЧА 315-3] СТАТИСТИКА КАНАЛОВ ДО НОРМАЛИЗАЦИИ:")
             print(f"  Channel 0 (Price): min={price_ch_raw.min():.4f}, max={price_ch_raw.max():.4f}, mean={price_ch_raw.mean():.4f}, std={price_ch_raw.std():.4f}")
             print(f"  Channel 1 (Vol): min={vol_ch_raw.min():.4f}, max={vol_ch_raw.max():.4f}, mean={vol_ch_raw.mean():.4f}, std={vol_ch_raw.std():.4f}")
             print(f"  Channel 2 (Imb): min={imb_ch_raw.min():.4f}, max={imb_ch_raw.max():.4f}, mean={imb_ch_raw.mean():.4f}, std={imb_ch_raw.std():.4f}")
+            print(f"\n[ЗАДАЧА 315-3] ПАРАМЕТРЫ НОРМАЛИЗАЦИИ Channel 1 (Vol):")
+            for level in range(5):
+                feat_idx = 50 + level  # Channel 1 начинается с feat_50
+                param_key = f"feat_{feat_idx}"
+                if self.normalizer and hasattr(self.normalizer, 'params') and self.normalizer.params:
+                    params = self.normalizer.params.get(param_key, {})
+                    mean_val = params.get("mean", params.get("median", 0.0))
+                    std_val = params.get("std", params.get("iqr", 1.0))
+                    print(f"  Level {level} ({param_key}): mean/median={mean_val:.4f}, std/iqr={std_val:.4f}")
+            print(f"\n[ЗАДАЧА 315-3] СТАТИСТИКА КАНАЛОВ ПОСЛЕ НОРМАЛИЗАЦИИ:")
+            print(f"  Channel 0 (Price): min={price_ch.min():.4f}, max={price_ch.max():.4f}, mean={price_ch.mean():.4f}, std={price_ch.std():.4f}")
+            print(f"  Channel 1 (Vol): min={vol_ch.min():.4f}, max={vol_ch.max():.4f}, mean={vol_ch.mean():.4f}, std={vol_ch.std():.4f}")
+            print(f"  Channel 2 (Imb): min={imb_ch.min():.4f}, max={imb_ch.max():.4f}, mean={imb_ch.mean():.4f}, std={imb_ch.std():.4f}")
         
         # ch[3]: Delta OFI (Задача 314.1) - изменение дисбаланса по времени
         # Отличается от статического imbalance (Channel 2)
@@ -1550,14 +1611,22 @@ class LOBDataset(Dataset):
             # Вычисляем imbalance из сырых объемов
             denom_fb = bid_v_raw_ofi + ask_v_raw_ofi + 1e-8
             imb_fb = (bid_v_raw_ofi - ask_v_raw_ofi) / denom_fb  # (seq_len, 50)
+            
+            # Задача 315-2: Диагностика imbalance для OFI
+            if idx is not None and 100 <= idx <= 105:
+                print(f"\n[ЗАДАЧА 315-2] ДИАГНОСТИКА OFI CALCULATION:")
+                print(f"  imb_fb (imbalance для OFI):")
+                print(f"    min={imb_fb.min():.4f}, max={imb_fb.max():.4f}, mean={imb_fb.mean():.4f}, std={imb_fb.std():.4f}")
+            
             # Используем torch.diff для эффективности
             ofi_raw = torch.diff(imb_fb, dim=0, prepend=imb_fb[:1])  # (seq_len, 50)
         
         ofi_ch = self.normalize_channel(ofi_raw, channel_idx=3)
         
         # Подзадача 6: Диагностика OFI ДО нормализации
-        if idx is not None and idx == 0:
+        if idx is not None and 100 <= idx <= 105:
             print(f"  Channel 3 (OFI): min={ofi_raw.min():.4f}, max={ofi_raw.max():.4f}, mean={ofi_raw.mean():.4f}, std={ofi_raw.std():.4f}")
+            print(f"\n[ЗАДАЧА 315-2] ДИАГНОСТИКА ЗАВЕРШЕНА\n")
         
         # ch[4]: Trade Imbalance (VIB)
         if idx is not None and hasattr(self, 'vib_cache') and self.vib_cache is not None:
@@ -1566,11 +1635,11 @@ class LOBDataset(Dataset):
         elif self.vib_idx >= 0:
             vib_raw = torch.from_numpy(x_raw[:, self.vib_idx].copy()).float()
         else:
-            # Fallback на расчет на лету (Задача 315: используем восстановленные сырые объемы)
-            bv_sum = bid_v_raw.sum(dim=1)
-            av_sum = ask_v_raw.sum(dim=1)
-            v_val = (bv_sum[-1] - av_sum[-1]) / (bv_sum[-1] + av_sum[-1] + 1e-8)
-            vib_raw = torch.full((x_raw.shape[0],), v_val.item(), dtype=torch.float32)
+            # Fallback: вычисляем VIB для каждого тика последовательности
+            # Задача 315-3 fix: было только последнее значение, теперь вся динамика
+            bv_seq = bid_v_raw.sum(dim=1)  # (seq_len,)
+            av_seq = ask_v_raw.sum(dim=1)  # (seq_len,)
+            vib_raw = (bv_seq - av_seq) / (bv_seq + av_seq + 1e-8)  # (seq_len,)
         
         vib_ch_raw = vib_raw.unsqueeze(-1).repeat(1, 50)
         vib_ch = self.normalize_channel(vib_ch_raw, channel_idx=4)

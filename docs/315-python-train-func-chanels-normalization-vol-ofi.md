@@ -8,7 +8,7 @@
 
 ---
 
-# ПЛАН ИСПРАВЛЕНИЯ: Задача 315 - Устранение двойной нормализации в пайплайне LOB данных
+# ПЛАН ИСПРАВЛЕНИЯ: Задача 315 - Устранение двойной нормализации в пайплайне LOB данных - ЗАВЕРШЕНО
 
 ## 🎯 ГЛАВНАЯ ПРОБЛЕМА
 
@@ -245,6 +245,272 @@ log(a) + log(b) = log(a × b)  ≠  log(a + b)
 ---
 
 Этот план решает ОДНУ конкретную, но критическую проблему - двойную нормализацию, которая полностью уничтожает сигнал в данных. После исправления модель сможет обучаться на правильных данных и показатели должны значительно улучшиться.
+
+========================================
+# Задача 315-2: Исправление Volume Channel (константа 5.0)  - ЗАВЕРШЕНО
+
+## 🎯 ПРОБЛЕМА
+
+После исправлений в Задаче 315 каналы имеют неправильную статистику:
+
+```
+Channel 1 (Vol): min=5.0000, max=5.0000, mean=5.0000  ← КОНСТАНТА!
+Channel 3 (OFI): std=2.8575                            ← Должен быть ~1.0
+Channel 2 (Imb): std=0.6738                            ← Должен быть ~1.0
+```
+
+## 🔍 КОРНЕВАЯ ПРИЧИНА
+
+**Volume Channel стал константой из-за неправильной агрегации:**
+
+1. В `features.py` объемы логарифмируются: `log(1 + volume)`
+2. В `dataset.py` происходило:
+   - Восстановление: `exp(v) - 1` → получаем сырые объемы
+   - **СУММИРОВАНИЕ 50 уровней**: `vol_sum = ask_v_raw + bid_v_raw` 
+   - Логарифмирование: `log1p(vol_sum)`
+
+3. **Проблема**: Если все исходные объемы примерно одинаковые (например, 3.5), то:
+   - После суммирования 50 уровней: `50 × 3.5 = 175`
+   - После `log1p(175)` ≈ `5.17`
+   - Результат: **константа для всех тиков!**
+
+## ✅ РЕШЕНИЕ
+
+### Изменение 1: Volume Channel - СРЕДНЕЕ вместо СУММЫ
+
+**Было (НЕПРАВИЛЬНО):**
+```python
+vol_sum = ask_v_raw + bid_v_raw  # (seq_len, 50)
+vol_ch_raw = torch.log1p(vol_sum)  # Суммирование убивает вариативность
+```
+
+**Стало (ПРАВИЛЬНО):**
+```python
+vol_mean = (ask_v_raw + bid_v_raw) / 2.0  # (seq_len, 50)
+vol_ch_raw = torch.log1p(vol_mean)  # Среднее сохраняет вариативность
+```
+
+**Обоснование:**
+- Суммирование 50 уровней убивает вариативность между уровнями
+- Среднее сохраняет различия между уровнями
+- Каждый уровень LOB теперь вносит свой вклад в канал
+
+### Изменение 2: Детальная диагностика
+
+Добавлена диагностика на каждом этапе обработки:
+1. Исходные данные (логарифмы из features.py)
+2. Восстановленные сырые объемы
+3. Volume channel после агрегации
+4. Imbalance channel
+5. OFI calculation
+
+### Изменение 3: Синхронизация функций
+
+Обе функции используют одинаковую логику:
+- `_process_sample` - для обработки данных во время обучения
+- `_compute_channels_for_normalization` - для расчета параметров нормализации
+
+## 📝 ИЗМЕНЕННЫЕ ФАЙЛЫ
+
+- `python_lab/src/dataset.py`:
+  - Функция `_process_sample` (строки ~1500-1520)
+  - Функция `_compute_channels_for_normalization` (строки ~1470-1480)
+
+================================
+# ПРОБЛЕМЫ ПОСЛЕ ЗАДАЧИ 315 и 315-2
+
+✅ Задача 315-3: Найдена корневая причина!
+Я проанализировал логи диагностики и нашёл проблему!
+
+🔍 Корневая причина:
+Volume Channel ДО нормализации:
+
+vol_ch_raw: min=7.42, max=11.87, mean=9.78, std=0.87  ← НОРМАЛЬНО!
+Volume Channel ПОСЛЕ нормализации:
+
+Channel 1 (Vol): min=5.0, max=5.0, mean=5.0  ← КОНСТАНТА!
+Проблема: Восстановление через exp(v)-1 создаёт ОГРОМНЫЕ числа (до 144567!). Параметры нормализации не справляются с такими данными, все z-scores получаются >> 5 и клипятся до 5.0.
+
+✅ Решение:
+УБРАТЬ восстановление объемов! Использовать логарифмы напрямую:
+
+# БЫЛО (НЕПРАВИЛЬНО):
+ask_v_raw = torch.exp(ask_v) - 1.0  # Огромные числа!
+bid_v_raw = torch.exp(bid_v) - 1.0
+vol_mean = (ask_v_raw + bid_v_raw) / 2.0
+vol_ch_raw = torch.log1p(vol_mean)
+
+# СТАЛО (ПРАВИЛЬНО):
+vol_ch_raw = (ask_v + bid_v) / 2.0  # Среднее логарифмов
+Обоснование:
+
+Среднее логарифмов = геометрическое среднее (валидный признак для ML)
+Диапазон [2.4, 11.9] удобен для нормализации
+Не нужно восстанавливать, чтобы снова логарифмировать!
+============================
+
+# ЗАДАЧА 315-3 ПЛАН РЕАЛИЗАЦИИ:
+### Шаг 1: Добавить диагностику параметров нормализации
+
+Добавить вывод параметров (mean, std) для Channel 1 в `_process_sample`:
+
+```python
+# После normalize_channel
+if idx is not None and 100 <= idx <= 105:
+    print(f"\n[ЗАДАЧА 315-3] ПАРАМЕТРЫ НОРМАЛИЗАЦИИ Channel 1:")
+    # Извлекаем параметры для первых 5 уровней
+    for level in range(5):
+        feat_idx = 1 * 50 + level  # Channel 1, level
+        param_key = f"feat_{feat_idx}"
+        if self.normalizer and self.normalizer.params:
+            params = self.normalizer.params.get(param_key, {})
+            mean_val = params.get("mean", 0.0)
+            std_val = params.get("std", 1.0)
+            print(f"  Level {level}: mean={mean_val:.4f}, std={std_val:.4f}")
+    
+    print(f"\n[ЗАДАЧА 315-3] ПОСЛЕ НОРМАЛИЗАЦИИ Channel 1:")
+    print(f"  vol_ch: min={vol_ch.min():.4f}, max={vol_ch.max():.4f}, mean={vol_ch.mean():.4f}, std={vol_ch.std():.4f}")
+```
+
+### Шаг 2: Проверить, откуда берутся параметры нормализации
+
+Проверить, вызывается ли `_compute_channels_for_normalization` при инициализации датасета:
+
+```python
+# В _init_memory_mode или _init_streaming_mode
+print(f"[DEBUG] Computing normalization parameters...")
+channels_df = self._compute_channels_for_normalization(sample_indices)
+print(f"[DEBUG] Channels DF shape: {channels_df.shape}")
+print(f"[DEBUG] Channel 1 (Vol) stats: min={channels_df['feat_50'].min():.4f}, max={channels_df['feat_50'].max():.4f}")
+```
+
+### Шаг 3: ГЛАВНОЕ ИСПРАВЛЕНИЕ - Убрать восстановление объемов
+
+**Проблема:** Восстановление через `exp(v)-1` создаёт огромные числа (до 144567!), что усложняет нормализацию.
+
+**Решение:** Использовать логарифмы НАПРЯМУЮ, без восстановления:
+
+```python
+# СТАРЫЙ КОД (НЕПРАВИЛЬНО):
+ask_v_raw = torch.exp(ask_v) - 1.0
+bid_v_raw = torch.exp(bid_v) - 1.0
+vol_mean = (ask_v_raw + bid_v_raw) / 2.0
+vol_ch_raw = torch.log1p(vol_mean)
+
+# НОВЫЙ КОД (ПРАВИЛЬНО):
+# ask_v и bid_v уже логарифмированы в features.py
+# Просто берём среднее логарифмов
+vol_ch_raw = (ask_v + bid_v) / 2.0  # Среднее логарифмов
+```
+
+**Обоснование:**
+1. `log(a) + log(b) ≠ log(a+b)`, НО для нашей задачи среднее логарифмов - это валидный признак
+2. Логарифмы уже в разумном диапазоне [2.4, 11.9], не нужно восстанавливать
+3. Проще, быстрее, стабильнее для нормализации
+
+### Шаг 4: Аналогично исправить Imbalance и OFI
+
+**Imbalance Channel:**
+```python
+# СТАРЫЙ КОД (восстановление):
+ask_v_raw = torch.exp(ask_v) - 1.0
+bid_v_raw = torch.exp(bid_v) - 1.0
+denom = bid_v_raw + ask_v_raw + 1e-8
+imb_ch_raw = (bid_v_raw - ask_v_raw) / denom
+
+# НОВЫЙ КОД (использовать логарифмы):
+# Для imbalance нужны СЫРЫЕ объемы, но можно использовать приближение
+# Или оставить как есть, если imbalance работает нормально (std=0.54)
+```
+
+**OFI Channel:**
+```python
+# OFI = diff(imbalance)
+# Если imbalance правильный, то OFI тоже будет правильным
+```
+
+### Шаг 5: Синхронизировать _compute_channels_for_normalization
+
+Применить те же изменения в `_compute_channels_for_normalization`:
+
+```python
+# НОВЫЙ КОД:
+vol_ch = (ask_v + bid_v) / 2.0  # Среднее логарифмов, без восстановления
+```
+
+### Шаг 6: Удалить symlog_transform (если используется)
+
+Если `symlog_transform` применяется где-то в коде, удалить его. Обычная z-score нормализация достаточна.
+
+### Шаг 7: Проверить clipping
+
+Убедиться, что clipping [-5, 5] применяется ПОСЛЕ нормализации:
+
+```python
+# В _process_sample
+x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
+x_final = torch.clamp(x_final, -5.0, 5.0)  # Clipping ПОСЛЕ нормализации
+```
+
+## 📝 ИЗМЕНЕННЫЕ ФАЙЛЫ
+
+### 1. `python_lab/src/dataset.py` - функция `_process_sample`
+
+**Изменение 1: Упростить расчет Volume Channel**
+```python
+# Строки ~1520-1540
+# БЫЛО:
+ask_v_raw = torch.exp(ask_v) - 1.0
+bid_v_raw = torch.exp(bid_v) - 1.0
+vol_mean = (ask_v_raw + bid_v_raw) / 2.0
+vol_ch_raw = torch.log1p(vol_mean)
+
+# СТАЛО:
+vol_ch_raw = (ask_v + bid_v) / 2.0  # Среднее логарифмов
+```
+
+**Изменение 2: Добавить диагностику параметров нормализации**
+```python
+# После vol_ch = self.normalize_channel(vol_ch_raw, channel_idx=1)
+if idx is not None and 100 <= idx <= 105:
+    print(f"\n[ЗАДАЧА 315-3] ПАРАМЕТРЫ НОРМАЛИЗАЦИИ Channel 1:")
+    for level in range(5):
+        feat_idx = 50 + level
+        param_key = f"feat_{feat_idx}"
+        if self.normalizer and self.normalizer.params:
+            params = self.normalizer.params.get(param_key, {})
+            print(f"  Level {level}: mean={params.get('mean', 0.0):.4f}, std={params.get('std', 1.0):.4f}")
+    print(f"  vol_ch ПОСЛЕ нормализации: min={vol_ch.min():.4f}, max={vol_ch.max():.4f}, mean={vol_ch.mean():.4f}, std={vol_ch.std():.4f}")
+```
+
+**Изменение 3: Упростить Imbalance (опционально)**
+```python
+# Если imbalance работает нормально (std=0.54), можно оставить как есть
+# Или упростить, если нужно
+```
+
+### 2. `python_lab/src/dataset.py` - функция `_compute_channels_for_normalization`
+
+**Изменение: Синхронизировать с _process_sample**
+```python
+# Строки ~1470-1475
+# БЫЛО:
+ask_v_raw = np.exp(ask_v) - 1.0
+bid_v_raw = np.exp(bid_v) - 1.0
+vol_mean = (ask_v_raw + bid_v_raw) / 2.0
+vol_ch = np.log1p(vol_mean)
+
+# СТАЛО:
+vol_ch = (ask_v + bid_v) / 2.0  # Среднее логарифмов
+```
+
+
+
+
+
+
+
+
 
 
 
