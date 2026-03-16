@@ -1909,6 +1909,19 @@ def train():
     val_ds = Subset(full_dataset, val_indices)
     test_ds = Subset(full_dataset, test_indices)
 
+    # Задача 315-4: Перенос обучения нормализатора в самое начало
+    # Это гарантирует, что все проверки (NaN check) и логирование сэмплов будут использовать 
+    # актуальные параметры нормализации, а не сырые данные.
+    print("\nFitting normalizer on original training set (channels-based)...")
+    train_indices_for_fit = train_ds.indices
+    train_channels_df = full_dataset._compute_channels_for_normalization(train_indices_for_fit)
+    
+    print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
+    normalizer.fit(train_channels_df, winsor_limits=winsor_limits)
+    normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
+    update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
+    print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
+
     # Верификация разделения
     print(f"\nChronological split verification:")
     print(f"  Train: indices {train_indices[0]}-{train_indices[-1]} ({len(train_ds)} samples, {len(train_ds)/total_len*100:.1f}%)")
@@ -2061,20 +2074,8 @@ def train():
             print(f"✓ Training set balanced and normalized: {len(train_labels_all)} -> {len(train_ds)} samples")
 
     else:
-        # Если балансировка не используется, обучаем нормализатор на обычном тренировочном наборе
-        # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
-        # if args.data_mode != "streaming":
-        print("\nFitting normalizer on original training set (channels-based)...")
-        train_indices = train_ds.indices
-        
-        # Задача 311: Извлечь каналы для тренировочных индексов
-        train_channels_df = full_dataset._compute_channels_for_normalization(train_indices)
-        
-        print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
-        normalizer.fit(train_channels_df, winsor_limits=winsor_limits)
-        normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
-        update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
-        print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
+        # Если балансировка не используется, параметры нормализации уже рассчитаны в начале
+        pass
         # else:
         #     # Для streaming обучаем на сэмпе (ОТКЛЮЧЕНО)
         #     print("\nFitting normalizer on streaming sample (channels-based)...")
