@@ -386,8 +386,8 @@ class LiTModule(pl.LightningModule):
         # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
         x, y, ts, mid, label, extra_data = batch
         
-        # x: (Batch, Seq, Channels, Levels)
-        channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
+        # x: (Batch, Seq, Channels, Levels) — 7 каналов после Задача 316
+        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "PastRet", "Spread"]
         
         print("\n[ДИАГНОСТИКА] Статистика каналов ПОСЛЕ нормализации:")
         for ch_idx, ch_name in enumerate(channel_names):
@@ -1546,12 +1546,12 @@ def train():
     # Парсим лаги из строки
     past_returns_lags = [int(x.strip()) for x in args.past_returns_lags.split(",")]
     n_past_returns = len(past_returns_lags)
-    
-    # В плане 306 итоговая структура x_final всегда 6 каналов
-    in_channels = 6
-    
+
+    # Задача 316: 7 каналов (MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread)
+    in_channels = 7
+
     print(f"Using past returns lags: {past_returns_lags}")
-    print(f"Total input channels: {in_channels} (Price, Vol, Imb, OFI, VIB, PastRet)")
+    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread)")
     print(f"Data loading mode: {args.data_mode}")
 
     # 1. Фиксируем seed для воспроизводимости
@@ -1833,7 +1833,7 @@ def train():
         n_past_returns=n_past_returns,
         past_returns_lags=past_returns_lags,  # Задача 091
         data_mode="memory",
-        is_train=False,  # Будет переопределено для train_ds
+        is_train=True,  # Задача 316: ДОЛЖНО БЫТЬ True для fit() в конструкторе
         augment_prob=args.augment_prob,
         use_symmetric_flip=args.use_symmetric_flip,
         volume_jitter_range=args.volume_jitter_range,

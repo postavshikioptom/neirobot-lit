@@ -1,0 +1,503 @@
+ПОСЛЕ ЗАДАЧИ 315-4
+--- Обучение - Начало (добавил Threshold Статичный указывать здесь) ---
+Scaler configuration: type=robust, winsor_limits=(0.01, 0.99)
+Using past returns lags: [10, 50, 100]
+Total input channels: 6 (Price, Vol, Imb, OFI, VIB, PastRet)
+Data loading mode: memory
+Seed set to 42
+Loading data for FARTCOINUSDT from /kaggle/bots/FARTCOINUSDT/data/raw...
+Engineering features...
+Adding labels...
+Using single horizon prediction: 100
+
+[Labeler] Labels distribution:
+  [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: 0.000500 (0.05%)
+  Horizons: [100], Threshold: 0.0005
+  single: {'label': [0, 1, 2], 'count': [247615, 60952, 62312]} | Masked: 0
+Initializing normalizer...
+Creating dataset in 'memory' mode (raw features)...
+[LOBDataset] Computing features from RAW data...
+[DEBUG] past_ret raw: min=-0.009051, max=0.014819
+[DEBUG] vib raw: min=-0.641032, max=0.802446
+[LOBDataset] Training normalizer on CHANNELS...
+[LOBDataset] Feature Map Verified: 6 channels, 50 levels. Total features: 300. Status: OK
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000009, std=0.0000000328 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.961174, std=0.984958
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.8009, max=3.0223, mean=0.4354, std=0.8858
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.0462, max=3.7161, mean=0.0782, std=0.9054
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0037, std=0.8037
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.4001, max=1.1064, mean=0.3229, std=0.4028
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.0003, max=0.0006, mean=0.0003, std=0.0003
+[LOBDataset] First Sample Statistics (z-score normalized, clipped [-5,5]):
+  Channel 0 (Price): min=-0.0000, max=0.0033, mean=0.0017
+  Channel 1 (Vol): min=-2.8009, max=3.0223, mean=0.4354
+  Channel 2 (Imb): min=-2.0462, max=3.7161, mean=0.0782
+  Channel 3 (OFI): min=-5.0000, max=5.0000, mean=0.0037
+  Channel 4 (VIB): min=-0.4001, max=1.1064, mean=0.3229
+  Channel 5 (PastRet): min=-0.0003, max=0.0006, mean=0.0003
+[LOBDataset] Loaded 370680 samples. Data mode: memory
+
+Проверка данных на NaN (sampling)...
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000009, std=0.0000000328 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.961174, std=0.984958
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.8009, max=3.0223, mean=0.4354, std=0.8858
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.0462, max=3.7161, mean=0.0782, std=0.9054
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0037, std=0.8037
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.4001, max=1.1064, mean=0.3229, std=0.4028
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.0003, max=0.0006, mean=0.0003, std=0.0003
+......
+Epoch 1 (4m 19s) Validation: MCC=-0.0181, Macro-F1=0.1311, ECE=0.3219, MCE=0.8304
+  Vol-MSE=1.812438, Vol-MAE=0.710772
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0181, F1=0.1311, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.1927, max=2.5879, mean=0.5254, std=0.7167
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6200, max=3.8449, mean=0.0457, std=0.5703
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 7.78            | 64.99           | 27.24          
+Hit Rate (Точность)            | 0.8324          | 0.0992          | 0.1321         
+Процент пропущенных сигналов (%) | -               | 6.39            | 5.49           
+Ложные входы (%)               | -               | 65.29           | 26.40          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000014       | -0.000011      
+Directional Accuracy (DA) без Flat | 0.1089          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.4796 | Уверенности при ложном: 0.5120 | Разница уверенности: -0.0323
+Корреляция с LOB Imbalance     | 0.0719          (Corr with Signal -1/0/1)
+=====================================================================================
+.....
+Epoch 2 (4m 21s) Validation: MCC=0.0141, Macro-F1=0.1688, ECE=0.3415, MCE=0.8745
+  Vol-MSE=2.050521, Vol-MAE=0.849655
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0141, F1=0.1688, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.6088, max=1.7154, mean=-0.1518, std=0.6443
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6013, max=3.7674, mean=0.0454, std=0.5541
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 9.44            | 45.70           | 44.86          
+Hit Rate (Точность)            | 0.7701          | 0.0859          | 0.1171         
+Процент пропущенных сигналов (%) | -               | 10.67           | 9.11           
+Ложные входы (%)               | -               | 46.44           | 44.23          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000035       | 0.000003       
+Directional Accuracy (DA) без Flat | 0.1013          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5034 | Уверенности при ложном: 0.5461 | Разница уверенности: -0.0427
+Корреляция с LOB Imbalance     | 0.0750          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 3 (4m 19s) Validation: MCC=-0.0195, Macro-F1=0.1640, ECE=0.3746, MCE=0.7610
+  Vol-MSE=1.895123, Vol-MAE=0.808634
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0195, F1=0.1640, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 21.11           | 45.10           | 33.79          
+Hit Rate (Точность)            | 0.7725          | 0.0898          | 0.1296         
+Процент пропущенных сигналов (%) | -               | 22.51           | 21.09          
+Ложные входы (%)               | -               | 46.23           | 32.84          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000021       | -0.000013      
+Directional Accuracy (DA) без Flat | 0.1068          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5381 | Уверенности при ложном: 0.5923 | Разница уверенности: -0.0542
+Корреляция с LOB Imbalance     | 0.0607          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 4 (4m 19s) Validation: MCC=-0.0067, Macro-F1=0.2225, ECE=0.3316, MCE=0.9432
+  Vol-MSE=2.212743, Vol-MAE=0.902936
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0067, F1=0.2225, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-1.7897, max=3.4330, mean=1.1805, std=0.7924
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6380, max=3.9125, mean=0.0475, std=0.5861
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.5066, max=1.9298, mean=0.0146, std=0.6616
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6059, max=3.7872, mean=0.0454, std=0.5581
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 30.07           | 35.25           | 34.68          
+Hit Rate (Точность)            | 0.8024          | 0.0872          | 0.1371         
+Процент пропущенных сигналов (%) | -               | 28.41           | 25.62          
+Ложные входы (%)               | -               | 36.01           | 33.02          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000025       | -0.000014      
+Directional Accuracy (DA) без Flat | 0.1120          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5684 | Уверенности при ложном: 0.6079 | Разница уверенности: -0.0394
+Корреляция с LOB Imbalance     | 0.0256          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 5 (4m 19s) Validation: MCC=0.0164, Macro-F1=0.2621, ECE=0.2757, MCE=0.8368
+  Vol-MSE=1.897934, Vol-MAE=0.784640
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0164, F1=0.2621, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.2332, max=2.5032, mean=0.4596, std=0.7094
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6182, max=3.8377, mean=0.0457, std=0.5687
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 37.92           | 31.01           | 31.07          
+Hit Rate (Точность)            | 0.7760          | 0.0811          | 0.1224         
+Процент пропущенных сигналов (%) | -               | 39.61           | 37.45          
+Ложные входы (%)               | -               | 31.88           | 30.35          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000031       | -0.000000      
+Directional Accuracy (DA) без Flat | 0.1018          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5995 | Уверенности при ложном: 0.6327 | Разница уверенности: -0.0332
+Корреляция с LOB Imbalance     | 0.0318          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 6 (4m 19s) Validation: MCC=-0.0133, Macro-F1=0.2690, ECE=0.2634, MCE=0.7438
+  Vol-MSE=2.142669, Vol-MAE=0.864075
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0133, F1=0.2690, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.1093, max=2.7629, mean=0.6612, std=0.7318
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6237, max=3.8595, mean=0.0457, std=0.5735
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3434, max=2.2719, mean=0.2794, std=0.6914
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6132, max=3.8178, mean=0.0471, std=0.5647
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 39.92           | 25.24           | 34.84          
+Hit Rate (Точность)            | 0.7833          | 0.0861          | 0.1240         
+Процент пропущенных сигналов (%) | -               | 39.72           | 38.68          
+Ложные входы (%)               | -               | 25.76           | 34.10          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000024       | -0.000009      
+Directional Accuracy (DA) без Flat | 0.1081          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6182 | Уверенности при ложном: 0.6494 | Разница уверенности: -0.0312
+Корреляция с LOB Imbalance     | 0.0281          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 7 (4m 20s) Validation: MCC=-0.0012, Macro-F1=0.2794, ECE=0.2605, MCE=0.6522
+  Vol-MSE=2.263958, Vol-MAE=0.883931
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0012, F1=0.2794, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.5532, max=1.8320, mean=-0.0613, std=0.6537
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6038, max=3.7782, mean=0.0454, std=0.5563
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 48.35           | 24.51           | 27.13          
+Hit Rate (Точность)            | 0.7855          | 0.0928          | 0.1419         
+Процент пропущенных сигналов (%) | -               | 48.30           | 45.81          
+Ложные входы (%)               | -               | 25.19           | 26.06          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000009       | -0.000023      
+Directional Accuracy (DA) без Flat | 0.1186          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6422 | Уверенности при ложном: 0.6445 | Разница уверенности: -0.0023
+Корреляция с LOB Imbalance     | 0.0187          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 8 (4m 20s) Validation: MCC=0.0147, Macro-F1=0.3100, ECE=0.2024, MCE=0.4430
+  Vol-MSE=1.930447, Vol-MAE=0.796940
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0147, F1=0.3100, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.0180, max=2.9542, mean=0.8097, std=0.7485
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6278, max=3.8751, mean=0.0458, std=0.5771
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 44.52           | 27.50           | 27.98          
+Hit Rate (Точность)            | 0.7813          | 0.0894          | 0.1297         
+Процент пропущенных сигналов (%) | -               | 44.34           | 43.85          
+Ложные входы (%)               | -               | 28.20           | 27.15          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000012       | -0.000016      
+Directional Accuracy (DA) без Flat | 0.1097          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6496 | Уверенности при ложном: 0.6609 | Разница уверенности: -0.0113
+Корреляция с LOB Imbalance     | 0.0304          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 9 (4m 19s) Validation: MCC=0.0011, Macro-F1=0.2935, ECE=0.2480, MCE=0.5483
+  Vol-MSE=2.023528, Vol-MAE=0.813450
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0011, F1=0.2935, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3309, max=2.2981, mean=0.3005, std=0.6921
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6138, max=3.8201, mean=0.0456, std=0.5649
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 49.96           | 26.21           | 23.82          
+Hit Rate (Точность)            | 0.7834          | 0.0915          | 0.1349         
+Процент пропущенных сигналов (%) | -               | 47.75           | 50.03          
+Ложные входы (%)               | -               | 27.04           | 22.72          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000006       | -0.000013      
+Directional Accuracy (DA) без Flat | 0.1122          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6658 | Уверенности при ложном: 0.6679 | Разница уверенности: -0.0021
+Корреляция с LOB Imbalance     | 0.0298          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 10 (6m 17s) Validation: MCC=0.0068, Macro-F1=0.3080, ECE=0.2197, MCE=0.5126
+  Vol-MSE=1.924058, Vol-MAE=0.801053
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0068, F1=0.3080, Samples=55602
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.1589, max=2.6590, mean=0.5805, std=0.7228
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6215, max=3.8509, mean=0.0457, std=0.5716
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0210, std=2.7904
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    Price: mean=0.0000000008, std=0.0000000329 (normalization SKIPPED - raw relative prices)
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (Price) ПОСЛЕ CLAMP: min=-0.0000, max=0.0033, mean=0.0017, std=0.0010
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.0160, std=2.7949
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (PastRet) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 51.55           | 24.59           | 23.86          
+Hit Rate (Точность)            | 0.7829          | 0.0884          | 0.1255         
+Процент пропущенных сигналов (%) | -               | 50.04           | 51.19          
+Ложные входы (%)               | -               | 25.14           | 23.06          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000020       | 0.000005       
+Directional Accuracy (DA) без Flat | 0.1067          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6786 | Уверенности при ложном: 0.6803 | Разница уверенности: -0.0017
+Корреляция с LOB Imbalance     | 0.0395          (Corr with Signal -1/0/1)
+=====================================================================================

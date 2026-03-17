@@ -694,14 +694,14 @@ class LOBDataset(Dataset):
         expected_cols = [f"feat_bid_p_{i}" for i in range(50)] + [f"feat_ask_p_{i}" for i in range(50)]
         actual_cols = self.feat_cols if hasattr(self, 'feat_cols') else []
         missing = [c for c in expected_cols if c not in actual_cols]
-        
+
         if not missing:
-            print(f"[{self.__class__.__name__}] Feature Map Verified: 6 channels, 50 levels. Total features: 300. Status: OK")
-        
+            print(f"[{self.__class__.__name__}] Feature Map Verified: 7 channels, 50 levels. Total features: 350. Status: OK")
+
         if len(self) > 0:
             sample_x = self[0][0]
             print(f"[{self.__class__.__name__}] First Sample Statistics (z-score normalized, clipped [-5,5]):")
-            channel_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
+            channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "PastRet", "Spread"]
             for i in range(sample_x.shape[1]):
                 chan = sample_x[:, i, :]
                 print(f"  Channel {i} ({channel_names[i]}): min={chan.min():.4f}, max={chan.max():.4f}, mean={chan.mean():.4f}")
@@ -824,15 +824,17 @@ class LOBDataset(Dataset):
         # СТАЛО (верно):  sum(exp(v_i) - 1) = сумма сырых объемов по уровням
         bid_v_matrix = df.select(bid_v_cols).to_numpy().astype(np.float64)  # (N, 50)
         ask_v_matrix = df.select(ask_v_cols).to_numpy().astype(np.float64)  # (N, 50)
-        raw_bid_sum = (np.exp(bid_v_matrix) - 1.0).sum(axis=1)  # (N,)
-        raw_ask_sum = (np.exp(ask_v_matrix) - 1.0).sum(axis=1)  # (N,)
+        # Clamp to prevent float64 overflow (consistent with _calculate_6_channels_raw)
+        raw_bid_sum = (np.exp(np.clip(bid_v_matrix, None, 20.0)) - 1.0).sum(axis=1)  # (N,)
+        raw_ask_sum = (np.exp(np.clip(ask_v_matrix, None, 20.0)) - 1.0).sum(axis=1)  # (N,)
         raw_prices = df[price_col].to_numpy().astype(np.float64)
 
         # 2. Расчет VIB из СЫРЫХ объемов (Задача 315)
         denom = raw_bid_sum + raw_ask_sum
         # Используем маску, чтобы не делить на ноль, и считаем разницу
         v_diff = raw_bid_sum - raw_ask_sum
-        self.vib_cache = np.where(denom > 1e-6, v_diff / (denom + 1e-6), 0.0).astype(np.float32)
+        # Use same epsilon and logic as _calculate_6_channels_raw
+        self.vib_cache = (v_diff / (denom + 1e-8)).clip(-1.0, 1.0).astype(np.float32)
 
         # 3. Расчет PastRet
         log_p = np.log(np.maximum(raw_prices, 1e-9))
@@ -841,15 +843,9 @@ class LOBDataset(Dataset):
         if len(log_p) > lag:
             self.past_ret_cache[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
         
-        # 4. Расчет Static Imbalance (Задача 053) - замена динамического OFI
-        # bid_v_matrix и ask_v_matrix уже вычислены выше (для VIB)
-        # Вычисляем static imbalance для каждого уровня
-        self.imbalance_cache = compute_static_imbalance(bid_v_matrix, ask_v_matrix)  # (N, 50)
-        
         # Шаг 1: Диагностика сырых признаков (индикаторов)
         print(f"[DEBUG] past_ret raw: min={self.past_ret_cache.min():.6f}, max={self.past_ret_cache.max():.6f}")
         print(f"[DEBUG] vib raw: min={self.vib_cache.min():.6f}, max={self.vib_cache.max():.6f}")
-        print(f"[DEBUG] imbalance raw: min={self.imbalance_cache.min():.6f}, max={self.imbalance_cache.max():.6f}")
         
         self.has_computed_features = True
 
@@ -1255,10 +1251,10 @@ class LOBDataset(Dataset):
         """
         Нормализует канал используя статистики из normalizer.
         Векторизованная версия (Задача 312.2.1).
-        
-        ИСПРАВЛЕНИЕ (Задача 315-4): 
-        - Если channel_idx == 0 (Price), пропускаем нормализацию, так как 
-          цены уже отнормированы к mid_price в features.py.
+
+        ИСПРАВЛЕНИЕ (Задача 315-4 / Задача 316):
+        - Если channel_idx == 0 (MicropriceDev), пропускаем нормализацию, так как
+          значения уже относительны к mid (отклонение microprice от mid).
         """
         if self.normalizer is None or channel_idx == 0:
             return channel_data
@@ -1299,44 +1295,95 @@ class LOBDataset(Dataset):
 
     def _calculate_6_channels_raw(self, ask_p, ask_v, bid_p, bid_v, vib_raw=None, pr_raw=None):
         """
-        Единый метод формирования 6 каналов LOB (Задача 315-4).
+        Единый метод формирования 7 каналов LOB (Задача 316).
         Вход: torch.Tensors (seq_len, 50).
+
+        Каналы:
+        ch[0]: Microprice Deviation — предсказательное отклонение microprice от mid
+        ch[1]: Volume — среднее логарифмов объемов
+        ch[2]: Static Imbalance — дисбаланс объемов [-1, 1]
+        ch[3]: Delta OFI — изменение дисбаланса по времени
+        ch[4]: VIB — Volume Imbalance (суммарный дисбаланс по всем уровням)
+        ch[5]: Past Returns — среднее лог-возвратов на лагах [10, 50, 100]
+        ch[6]: Spread — нормализованный спред (ask_0 - bid_0) / mid
         """
-        # ch[0]: Price - (ask + bid)/2. Уже в % от mid_price.
-        price_ch_raw = (ask_p + bid_p) / 2.0
-        
-        # ch[1]: Volume - среднее логарифмов.
-        vol_ch_raw = (ask_v + bid_v) / 2.0
-        
+        eps = 1e-8
+
         # Восстанавливаем сырые объемы для дисбалансов
-        ask_v_raw = torch.exp(ask_v) - 1.0
-        bid_v_raw = torch.exp(bid_v) - 1.0
-        
+        # Clamp to prevent float32 overflow (exp(20) ≈ 485M is safe)
+        ask_v_raw = torch.exp(torch.clamp(ask_v, max=20.0)) - 1.0
+        bid_v_raw = torch.exp(torch.clamp(bid_v, max=20.0)) - 1.0
+
+        # Сырые цены лучшего уровня (относительные: price/mid - 1)
+        ask_p_0 = ask_p[:, 0]  # (seq_len,)
+        bid_p_0 = bid_p[:, 0]  # (seq_len,)
+        ask_v_0 = ask_v_raw[:, 0]  # (seq_len,)
+        bid_v_0 = bid_v_raw[:, 0]  # (seq_len,)
+
+        # ch[0]: Microprice Deviation (Задача 316)
+        # microprice = (bid_p * ask_v + ask_p * bid_v) / (ask_v + bid_v)
+        # Отклоняется от mid в сторону меньшего объема
+        microprice = (bid_p_0 * ask_v_0 + ask_p_0 * bid_v_0) / (ask_v_0 + bid_v_0 + eps)
+        microprice_dev = microprice  # уже относительное отклонение (mid = 0)
+        price_ch_raw = microprice_dev.unsqueeze(-1).expand(-1, 50)
+
+        # ch[1]: Volume — среднее логарифмов
+        vol_ch_raw = (ask_v + bid_v) / 2.0
+
         # ch[2]: Static Imbalance [-1, 1]
-        denom = bid_v_raw + ask_v_raw + 1e-8
+        denom = bid_v_raw + ask_v_raw + eps
         imb_ch_raw = (bid_v_raw - ask_v_raw) / denom
-        
+
         # ch[3]: Delta OFI (изменение дисбаланса по времени)
         ofi_raw = torch.diff(imb_ch_raw, dim=0, prepend=imb_ch_raw[:1])
-        
+
         # ch[4]: VIB (Volume Imbalance)
         if vib_raw is None:
             bv_sum = bid_v_raw.sum(dim=1)
             av_sum = ask_v_raw.sum(dim=1)
-            vib_val = (bv_sum - av_sum) / (bv_sum + av_sum + 1e-8)
+            vib_val = (bv_sum - av_sum) / (bv_sum + av_sum + eps)
             vib_ch_raw = vib_val.unsqueeze(-1).repeat(1, 50)
         else:
             vib_ch_raw = vib_raw.unsqueeze(-1).repeat(1, 50) if vib_raw.ndim == 1 else vib_raw
-            
-        # ch[5]: Past Returns
+
+        # ch[5]: Past Returns — среднее из лог-возвратов на лагах [10, 50, 100] (Задача 316)
+        # Восстанавливаем mid из относительных цен: mid ≈ ask_p_0 + 1.0
         if pr_raw is None:
-            # Fallback: разница относительных цен (уже в % от mid)
-            r_val = ask_p[-1, 0] - ask_p[0, 0]
-            pr_ch_raw = torch.full_like(ask_p, r_val.item())
+            seq_len = ask_p.shape[0]
+            mid_approx = ask_p[:, 0] + 1.0  # восстановленный mid (относительный)
+
+            # Три отдельных лог-возврата
+            if seq_len >= 10:
+                ret_10 = torch.log(torch.clamp(mid_approx[-1], min=eps)) - \
+                         torch.log(torch.clamp(mid_approx[-10], min=eps))
+            else:
+                ret_10 = torch.tensor(0.0, device=ask_p.device)
+
+            if seq_len >= 50:
+                ret_50 = torch.log(torch.clamp(mid_approx[-1], min=eps)) - \
+                         torch.log(torch.clamp(mid_approx[-50], min=eps))
+            else:
+                ret_50 = torch.tensor(0.0, device=ask_p.device)
+
+            if seq_len >= 100:
+                ret_100 = torch.log(torch.clamp(mid_approx[-1], min=eps)) - \
+                          torch.log(torch.clamp(mid_approx[-100], min=eps))
+            else:
+                ret_100 = torch.tensor(0.0, device=ask_p.device)
+
+            # Среднее из 3 лагов
+            r_val = (ret_10 + ret_50 + ret_100) / 3.0
+            pr_ch_raw = r_val.unsqueeze(0).unsqueeze(-1).expand(seq_len, 50)
         else:
             pr_ch_raw = pr_raw.unsqueeze(-1).repeat(1, 50) if pr_raw.ndim == 1 else pr_raw
-            
-        return price_ch_raw, vol_ch_raw, imb_ch_raw, ofi_raw, vib_ch_raw, pr_ch_raw
+
+        # ch[6]: Spread — нормализованный спред (Задача 316)
+        # spread = (ask_p_0 - bid_p_0) / mid, но mid уже учтён в относительных ценах
+        # ask_p_0 = (ask - mid)/mid, bid_p_0 = (bid - mid)/mid
+        # spread/mid = ask_p_0 - bid_p_0
+        spread = (ask_p_0 - bid_p_0).unsqueeze(-1).expand(-1, 50)
+
+        return price_ch_raw, vol_ch_raw, imb_ch_raw, ofi_raw, vib_ch_raw, pr_ch_raw, spread
 
     def _compute_channels_for_normalization(self, data: Union[pl.DataFrame, List[int], np.ndarray]) -> pl.DataFrame:
         """
@@ -1375,11 +1422,11 @@ class LOBDataset(Dataset):
             bid_v = torch.from_numpy(df_raw.select([f"feat_bid_v_{i}" for i in range(50)]).to_numpy()).float()
             vib_raw, pr_raw = None, None
 
-        # Используем единый метод расчета
-        p_raw, v_raw, i_raw, o_raw, vi_raw, pr_raw = self._calculate_6_channels_raw(ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw)
-        
-        channels = torch.cat([p_raw, v_raw, i_raw, o_raw, vi_raw, pr_raw], dim=1).numpy()
-        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(300)])
+        # Используем единый метод расчета (7 каналов после Задача 316)
+        p_raw, v_raw, i_raw, o_raw, vi_raw, pr_raw, sp_raw = self._calculate_6_channels_raw(ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw)
+
+        channels = torch.cat([p_raw, v_raw, i_raw, o_raw, vi_raw, pr_raw, sp_raw], dim=1).numpy()
+        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(350)])
 
     def _process_sample(self, x_raw, y, v, w, regime_id, ts, mid, idx=None, f_ret=None):
         # NaN protection (Задача 094-2)
@@ -1416,40 +1463,50 @@ class LOBDataset(Dataset):
         elif self.past_ret_indices:
             pr_raw = torch.from_numpy(x_raw[:, self.past_ret_indices[-1]].copy()).float()
 
-        # Расчет сырых каналов (Единый источник правды)
-        p_raw, v_raw, i_raw, o_raw, vi_raw, pr_raw = self._calculate_6_channels_raw(ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw)
-        
+        # Расчет сырых каналов (Единый источник правды, 7 каналов после Задача 316)
+        p_raw, v_raw, i_raw, o_raw, vi_raw, pr_raw, sp_raw = self._calculate_6_channels_raw(ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw)
+
         # Нормализация (Векторизованная)
-        # Channel 0 (Price) пропускается внутри normalize_channel
+        # Channel 0 (Microprice Dev) пропускается внутри normalize_channel
         price_ch = self.normalize_channel(p_raw, channel_idx=0)
         vol_ch = self.normalize_channel(v_raw, channel_idx=1)
         imb_ch = self.normalize_channel(i_raw, channel_idx=2)
         ofi_ch = self.normalize_channel(o_raw, channel_idx=3)
         vib_ch = self.normalize_channel(vi_raw, channel_idx=4)
         pr_ch = self.normalize_channel(pr_raw, channel_idx=5)
-        
-        # Собираем итоговый тензор (Seq, 6, 50)
-        x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch], dim=1)
-        
+        spread_ch = self.normalize_channel(sp_raw, channel_idx=6)
+
+        # Собираем итоговый тензор (Seq, 7, 50)
+        x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, pr_ch, spread_ch], dim=1)
+
         # Clipping для стабильности
         x_final = torch.clamp(x_final, -5.0, 5.0)
-        
-        # Расширенная диагностика (Задача 315-4)
+
+        # Расширенная диагностика (Задача 316)
         if idx is not None and 100 <= idx <= 101:
-            print(f"\n[ДИАГНОСТИКА 315-4] Сэмпл idx={idx}:")
-            channels_names = ["Price", "Vol", "Imb", "OFI", "VIB", "PastRet"]
+            print(f"\n[ДИАГНОСТИКА 316] Сэмпл idx={idx}:")
+            if self.normalizer and self.normalizer.params:
+                print("  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):")
+                for ch_idx, name in enumerate(["MicropriceDev", "Vol"]):
+                    p = self.normalizer.params.get(f"feat_{ch_idx*50}", {})
+                    if name == "MicropriceDev":
+                        print(f"    {name}: mean={p.get('mean', 0.0):.10f}, std={p.get('std', 1.0):.10f} (normalization SKIPPED - raw relative prices)")
+                    else:
+                        print(f"    {name}: mean={p.get('mean', 0.0):.6f}, std={p.get('std', 1.0):.6f}")
+
+            channels_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "PastRet", "Spread"]
             for i, name in enumerate(channels_names):
                 ch = x_final[:, i, :]
-                print(f"  Channel {i} ({name}): min={ch.min():.4f}, max={ch.max():.4f}, mean={ch.mean():.4f}, std={ch.std():.4f}")
+                print(f"  Channel {i} ({name}) ПОСЛЕ CLAMP: min={ch.min():.4f}, max={ch.max():.4f}, mean={ch.mean():.4f}, std={ch.std():.4f}")
 
-        # Формируем extra_data (как в оригинальном коде)
+        # Формируем extra_data (совместимость с train.py)
         extra_data = {
-            "v": float(v),
-            "w": float(w),
-            "regime_id": int(regime_id),
+            "vol": torch.tensor(v).float() if not isinstance(v, torch.Tensor) else v,
+            "weight": torch.tensor(w).float() if not isinstance(w, torch.Tensor) else w,
+            "regime_id": regime_id if isinstance(regime_id, torch.Tensor) else torch.tensor(int(regime_id)),
             "ts": int(ts),
             "mid": float(mid),
-            "f_ret": f_ret
+            "f_ret": f_ret if f_ret is not None else (torch.zeros(self.num_horizons) if self.is_multi_horizon else torch.tensor(0.0))
         }
         
         target = torch.tensor(y).long()

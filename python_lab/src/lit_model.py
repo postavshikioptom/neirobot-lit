@@ -5,8 +5,8 @@ import math
 from dataclasses import dataclass
 from .layers import LOBPatching
 
-# Глобальная конфигурация входных данных (Задача 306)
-DEFAULT_INPUT_CHANNELS = 6
+# Глобальная конфигурация входных данных (Задача 316: 7 каналов)
+DEFAULT_INPUT_CHANNELS = 7
 N_LEVELS = 50
 
 
@@ -18,7 +18,7 @@ class LiTConfig:
     особенно полезно для Knowledge Distillation (Teacher vs Student).
     """
     seq_len: int = 100
-    in_channels: int = 6
+    in_channels: int = 7  # Задача 316: MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread
     d_model: int = 64
     embed_dim: int = None  # Алиас для d_model (для совместимости с задачей 237)
     nhead: int = 4
@@ -544,16 +544,16 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
     
-    print("\nTesting with 6 channels (3 baseline + 3 past returns) and SiLU:")
-    model_with_returns = LiTModel(seq_len=100, in_channels=6, activation='silu')
-    dummy_input_6ch = torch.randn(8, 100, 6, 50)
-    output_6ch = model_with_returns(dummy_input_6ch)
-    
-    print(f"Input shape: {dummy_input_6ch.shape}")
-    print(f"Output shape: {output_6ch.shape}") # Ожидаем (8, 3)
-    
-    total_params_6ch = sum(p.numel() for p in model_with_returns.parameters())
-    print(f"Total parameters: {total_params_6ch:,}")
+    print("\nTesting with 7 channels (Задача 316: MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread) and SiLU:")
+    model_with_returns = LiTModel(seq_len=100, in_channels=7, activation='silu')
+    dummy_input_7ch = torch.randn(8, 100, 7, 50)
+    output_7ch = model_with_returns(dummy_input_7ch)
+
+    print(f"Input shape: {dummy_input_7ch.shape}")
+    print(f"Output shape: {output_7ch.shape}") # Ожидаем (8, 3)
+
+    total_params_7ch = sum(p.numel() for p in model_with_returns.parameters())
+    print(f"Total parameters: {total_params_7ch:,}")
     
     print("\nTesting Multi-Horizon (3 horizons) with separate heads:")
     model_multi = LiTModel(seq_len=100, in_channels=3, num_horizons=3, use_horizon_embedding=False)

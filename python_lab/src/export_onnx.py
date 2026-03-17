@@ -30,29 +30,29 @@ except ImportError:
 
 class ExportWrapper(nn.Module):
     """
-    Обертка для экспорта модели с входом формы (B, S, 300).
-    Преобразует плоский вход (B, S, 300) в (B, S, in_channels, n_levels)
+    Обертка для экспорта модели с входом формы (B, S, 350).
+    Преобразует плоский вход (B, S, 350) в (B, S, in_channels, n_levels)
     для совместимости с LOBPatching внутри модели.
-    
-    300 = 50 уровней * 6 каналов (Price, Vol, Imb, OFI, VIB, PastRet)
+
+    350 = 50 уровней * 7 каналов (MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread) (Задача 316)
     """
-    def __init__(self, model, in_channels=6, n_levels=50):
+    def __init__(self, model, in_channels=7, n_levels=50):
         super().__init__()
         self.model = model
-        self.in_channels = in_channels  # 6 каналов
+        self.in_channels = in_channels  # 7 каналов (Задача 316)
         self.n_levels = n_levels
         
     def forward(self, x):
         """
-        x: (Batch, Seq, 300) - плоский входной тензор
-        300 = 6 каналов * 50 уровней
+        x: (Batch, Seq, 350) - плоский входной тензор
+        350 = 7 каналов * 50 уровней (Задача 316)
         """
         b, s, f = x.shape
-        
-        # Reshape (B, S, 300) -> (B, S, 6, 50)
-        # 6 каналов: Price, Volume, Imbalance, OFI, VIB, PastReturns
-        x_reshaped = x.view(b, s, 6, self.n_levels)  # (B, S, 6, 50)
-        
+
+        # Reshape (B, S, 350) -> (B, S, 7, 50)
+        # 7 каналов: MicropriceDev, Volume, Imbalance, OFI, VIB, PastReturns, Spread
+        x_reshaped = x.view(b, s, 7, self.n_levels)  # (B, S, 7, 50)
+
         return self.model(x_reshaped)
 
 def convert_to_fp16(onnx_path, output_path):
@@ -185,15 +185,15 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         
         model = ModelWithTemperature(model, temperature)
     
-    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 300) -> (B, S, 6, 50)
-    # Согласно задаче 311: 300 = 50 уровней * 6 каналов (Price, Volume, Imbalance, OFI, VIB, PastRet)
-    in_channels = 6  # 6 каналов согласно задаче 311
+    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 350) -> (B, S, 7, 50)
+    # Задача 316: 350 = 50 уровней * 7 каналов (MicropriceDev, Volume, Imbalance, OFI, VIB, PastRet, Spread)
+    in_channels = 7  # 7 каналов (Задача 316)
     n_levels = 50  # Стандартное значение
     export_model = ExportWrapper(model, in_channels=in_channels, n_levels=n_levels)
     export_model.eval()
-    
-    # 5. Dummy input - форма (1, 100, 300) согласно задаче 311
-    dummy_input = torch.randn(1, seq_len, 300)
+
+    # 5. Dummy input - форма (1, 100, 350) (Задача 316)
+    dummy_input = torch.randn(1, seq_len, 350)
     
     # Проверяем, использует ли модель regime embedding
     num_regimes = getattr(model, 'num_regimes', 0)
@@ -316,9 +316,9 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
             "num_horizons": num_horizons,
             "use_horizon_embedding": use_horizon_embedding,
             "multi_horizon": num_horizons > 1,
-            "input_shape": [1, seq_len, 300],
-            "input_format": "flat_lob_6ch",
-            "input_description": "Flat LOB buffer: 50 levels * 6 channels (Price, Vol, Imb, OFI, VIB, PastRet) = 300 features"
+            "input_shape": [1, seq_len, 350],
+            "input_format": "flat_lob_7ch",
+            "input_description": "Flat LOB buffer: 50 levels * 7 channels (MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread) = 350 features"
         }
     
     # 9. Экспорт параметров HMM (regime_config.json) - Задача 155
@@ -363,9 +363,9 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         means, stds, medians, iqrs = [], [], [], []
         winsor_limits_vals = []
         
-        # В задаче 311 параметры нормализатора имеют имена feat_0..feat_299
+        # Задача 316: параметры нормализатора имеют имена feat_0..feat_349 (7 каналов * 50 уровней)
         # Rust ожидает именно этот порядок
-        for i in range(300):
+        for i in range(350):
             feat_name = f"feat_{i}"
             p = norm_params.get(feat_name, {})
             m = p.get("mean", 0.0)

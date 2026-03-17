@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Tavily__tavily_research",
+      "mcp__sequential-thinking__sequentialthinking",
+      "mcp__Tavily__tavily_search",
+      "mcp__Context7__resolve-library-id",
+      "mcp__Context7__query-docs",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "mcp__fetch__fetch",
+      "Bash(python:*)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "sequential-thinking",
+    "fetch",
+    "Context7",
+    "Tavily",
+    "Supermemory"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "sequential-thinking": {
+      "type": "http",
+      "url": "https://remote.mcpservers.org/sequentialthinking/mcp"
+    },
+    "fetch": {
+      "type": "http",
+      "url": "https://remote.mcpservers.org/fetch/mcp"
+    },
+    "Context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ctx7sk-920aec86-2c5e-4454-9076-df6eb131b4b7"
+      }
+    },
+    "Tavily": {
+      "type": "http",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=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"
+    }    
+  }
+}
