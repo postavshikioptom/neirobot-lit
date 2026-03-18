@@ -190,7 +190,7 @@ def train_model(model, train_loader, val_loader, epochs=5, lr=1e-3, device='cpu'
     return val_mcc
 
 
-def export_to_onnx(model, output_path, seq_len=100, in_channels=6):
+def export_to_onnx(model, output_path, seq_len=100, in_channels=9):
     """
     Экспортирует модель в ONNX формат.
     
@@ -223,7 +223,7 @@ def export_to_onnx(model, output_path, seq_len=100, in_channels=6):
     )
 
 
-def measure_latency(onnx_path, seq_len=100, in_channels=6, n_warmup=10, n_runs=100):
+def measure_latency(onnx_path, seq_len=100, in_channels=9, n_warmup=10, n_runs=100):
     """
     Измеряет latency модели через ONNX Runtime на CPU.
     
@@ -299,7 +299,7 @@ def objective(trial, args):
     # Создание модели
     model = LiTModel(
         seq_len=100,
-        in_channels=6,  # 3 базовых + 3 past returns
+        in_channels=9,  # 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)
         embed_dim=embed_dim,
         num_heads=num_heads,
         num_layers=num_layers,
@@ -323,10 +323,10 @@ def objective(trial, args):
     
     # Экспорт в ONNX
     onnx_path = f"/tmp/tune_attention_trial_{trial.number}.onnx"
-    export_to_onnx(model, onnx_path, seq_len=100, in_channels=6)
+    export_to_onnx(model, onnx_path, seq_len=100, in_channels=9)
     
     # Измерение latency
-    latency_ms = measure_latency(onnx_path, seq_len=100, in_channels=6)
+    latency_ms = measure_latency(onnx_path, seq_len=100, in_channels=9)
     
     print(f"  Inference Latency: {latency_ms:.3f} ms")
     

@@ -17,7 +17,7 @@
     },
     "Tavily": {
       "type": "http",
-      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=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"
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=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"
     }    
   }
 }

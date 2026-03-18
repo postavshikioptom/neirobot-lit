@@ -386,8 +386,8 @@ class LiTModule(pl.LightningModule):
         # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
         x, y, ts, mid, label, extra_data = batch
         
-        # x: (Batch, Seq, Channels, Levels) — 7 каналов после Задача 316
-        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "PastRet", "Spread"]
+        # x: (Batch, Seq, Channels, Levels) — 9 каналов после Задача 317
+        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread"]
         
         print("\n[ДИАГНОСТИКА] Статистика каналов ПОСЛЕ нормализации:")
         for ch_idx, ch_name in enumerate(channel_names):
@@ -1401,7 +1401,7 @@ def update_model_metadata(base_path, symbol, args, winsor_limits, norm_params_pa
 def train():
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
-    parser.add_argument("--seq_len", type=int, default=100, help="Sequence length for the model")
+    parser.add_argument("--seq_len", type=int, default=200, help="Sequence length for the model (Задача 318.6: 200 = 2:1 ratio к горизонту)")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=100, help="Maximum number of epochs")
     parser.add_argument("--horizon", type=int, default=100, help="Prediction horizon for labels (single horizon, deprecated)")
@@ -1547,11 +1547,11 @@ def train():
     past_returns_lags = [int(x.strip()) for x in args.past_returns_lags.split(",")]
     n_past_returns = len(past_returns_lags)
 
-    # Задача 317: 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)
-    in_channels = 9
+    # Задача 318: 13 каналов (+DeltaImb, DeltaSpread, CumOFI, ImbAccel)
+    in_channels = 13
 
     print(f"Using past returns lags: {past_returns_lags}")
-    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)")
+    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel)")
     print(f"Data loading mode: {args.data_mode}")
 
     # 1. Фиксируем seed для воспроизводимости

@@ -28,7 +28,7 @@ def test_activation_parity(activation_type: str, tolerance: float = 1e-6):
     # 1. Создаем модель с заданной активацией
     model = LiTModel(
         seq_len=100,
-        in_channels=6,  # 3 базовых + 3 past returns
+        in_channels=9,  # 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)
         d_model=64,
         nhead=4,
         num_layers=2,

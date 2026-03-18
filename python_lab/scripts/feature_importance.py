@@ -158,13 +158,8 @@ def compute_feature_importance(model, X_val, y_val, device, n_repeats=5, seed=42
     # Словарь для хранения результатов
     importance_results = {}
     
-    # Названия каналов согласно плану 053
-    # Канал 0: Normalized Price, Канал 1: Log Volume, Канал 2: Static Level Imbalance
-    channel_names = ['price', 'volume', 'imbalance']
-    if channels > 3:
-        # Добавляем past returns каналы
-        for i in range(channels - 3):
-            channel_names.append(f'past_return_{i+1}')
+    # Названия каналов согласно Задаче 317 (9 каналов)
+    channel_names = ['MicropriceDev', 'Vol', 'Imb', 'OFI', 'VIB', 'Ret_10', 'Ret_50', 'Ret_100', 'Spread']
     
     print(f"\nАнализ важности {channels * levels} признаков...")
     print(f"Каналы: {channel_names}")

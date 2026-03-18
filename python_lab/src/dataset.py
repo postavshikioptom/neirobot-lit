@@ -92,6 +92,63 @@ def compute_depth_imbalance_globally(bid_v: np.ndarray, ask_v: np.ndarray) -> np
     return vib.astype(np.float32)
 
 
+def compute_ofi_from_lob(bid_p: np.ndarray, ask_p: np.ndarray,
+                         bid_v: np.ndarray, ask_v: np.ndarray,
+                         update_ids: np.ndarray) -> np.ndarray:
+    """
+    Векторизованный расчёт OFI (Order Flow Imbalance) по Cont-Kukanov-Stoikov.
+
+    OFI = cumulative net volume flowing through bid/ask levels.
+    При обновлении стакана (change in update_id):
+      - Если bid_price上升 (bid_p[0] increased) → buyer aggression → +bid_v[0]
+      - Если ask_price下降 (ask_p[0] decreased) → seller aggression → -ask_v[0]
+
+    Упрощённый векторизованный метод:
+    - Определяем change_points через diff(update_ids) > 0
+    - Для каждого change_point: OFI += sum(bid_v[0:3]) - sum(ask_v[0:3])
+    - Between change_points: OFI повторяет последнее значение (constant hold)
+
+    Args:
+        bid_p, ask_p: (N, 50) best bid/ask prices (relative)
+        bid_v, ask_v: (N, 50) raw volumes per level (NOT log1p)
+        update_ids: (N,) last_update_id values
+    Returns:
+        (N,) OFI values, cumulative running sum
+    """
+    n = len(update_ids)
+
+    # Определяем точки обновления стакана
+    id_diff = np.diff(update_ids, prepend=update_ids[0])
+    is_update = id_diff > 0  # bool mask
+
+    # При обновлении: OFI_delta = sum(bid_v[0:3]) - sum(ask_v[0:3])
+    # Берём первые 3 уровня (глубина агрессии)
+    depth = 3
+    bid_flow = bid_v[:, :depth].sum(axis=1)  # (N,)
+    ask_flow = ask_v[:, :depth].sum(axis=1)  # (N,)
+    delta = np.where(is_update, bid_flow - ask_flow, 0.0)
+
+    # Кумулятивная сумма
+    ofi = np.cumsum(delta).astype(np.float32)
+
+    return ofi
+
+
+def compute_ofi_from_lob_cache(bid_p: np.ndarray, ask_p: np.ndarray,
+                                bid_v: np.ndarray, ask_v: np.ndarray,
+                                update_ids: np.ndarray) -> np.ndarray:
+    """
+    Глобальная версия compute_ofi_from_lob для precompute при инициализации.
+    Принимает LOG1P объёмы и преобразует их: exp(x) - 1
+    Принимает relative prices напрямую (feat_ask_p_i, feat_bid_p_i)
+    """
+    # Восстанавливаем сырые объёмы из log1p
+    bid_v_raw = np.exp(np.clip(bid_v, None, 20.0)) - 1.0
+    ask_v_raw = np.exp(np.clip(ask_v, None, 20.0)) - 1.0
+
+    return compute_ofi_from_lob(bid_p, ask_p, bid_v_raw, ask_v_raw, update_ids)
+
+
 def compute_past_returns_globally(mid_prices: np.ndarray, lags: List[int] = [10, 50, 100]) -> np.ndarray:
     """
     Глобальный расчет Past Returns для всех сэмплов сразу.
@@ -691,17 +748,17 @@ class LOBDataset(Dataset):
             raise ValueError(f"Unknown data_mode: {data_mode}. Only 'memory' mode is supported.")
 
         # Задача 307.6: Аудит целостности признаков и логирование первого сэмпла
-        expected_cols = [f"feat_bid_p_{i}" for i in range(50)] + [f"feat_ask_p_{i}" for i in range(50)]
+        expected_cols = [f"feat_{i}" for i in range(450)]
         actual_cols = self.feat_cols if hasattr(self, 'feat_cols') else []
         missing = [c for c in expected_cols if c not in actual_cols]
 
         if not missing:
-            print(f"[{self.__class__.__name__}] Feature Map Verified: 7 channels, 50 levels. Total features: 350. Status: OK")
+            print(f"[{self.__class__.__name__}] Feature Map Verified: 9 channels, 50 levels. Total features: 450. Status: OK")
 
         if len(self) > 0:
             sample_x = self[0][0]
             print(f"[{self.__class__.__name__}] First Sample Statistics (z-score normalized, clipped [-5,5]):")
-            channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "PastRet", "Spread"]
+            channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread"]
             for i in range(sample_x.shape[1]):
                 chan = sample_x[:, i, :]
                 print(f"  Channel {i} ({channel_names[i]}): min={chan.min():.4f}, max={chan.max():.4f}, mean={chan.mean():.4f}")
@@ -791,6 +848,8 @@ class LOBDataset(Dataset):
         self.trade_side_idx = get_idx("feat_trade_side")
         self.ofi_idx = get_idx("feat_ofi_100")
         self.vib_idx = get_idx("feat_vib_100")
+        # Задача 318.1: Индекс для last_update_id (расчёт OFI)
+        self.update_id_idx = get_idx("feat_update_id")
         
         # Индексы для Past Returns
         self.past_ret_indices = []
@@ -844,10 +903,31 @@ class LOBDataset(Dataset):
             if len(log_p) > lag:
                 ret[lag:] = (log_p[lag:] - log_p[:-lag]).astype(np.float32)
             self.past_ret_cache[lag] = ret
+
+        # 4. Расчёт OFI из сырых данных (Задача 318.2)
+        if hasattr(self, 'update_id_raw') and self.update_id_raw is not None:
+            bid_p_matrix = df.select([f"feat_bid_p_{i}" for i in range(self.n_levels)]).to_numpy().astype(np.float64)
+            ask_p_matrix = df.select([f"feat_ask_p_{i}" for i in range(self.n_levels)]).to_numpy().astype(np.float64)
+            self.ofi_cache = compute_ofi_from_lob_cache(
+                bid_p_matrix, ask_p_matrix, bid_v_matrix, ask_v_matrix,
+                self.update_id_raw
+            )
+            print(f"[DEBUG] ofi raw: min={self.ofi_cache.min():.6f}, max={self.ofi_cache.max():.6f}, mean={self.ofi_cache.mean():.6f}")
+        else:
+            self.ofi_cache = None
+            print("[DEBUG] update_id_raw not available, OFI will use fallback")
         
         # Шаг 1: Диагностика сырых признаков (индикаторов)
         print(f"[DEBUG] past_ret raw (lag=10): min={self.past_ret_cache[10].min():.6f}, max={self.past_ret_cache[10].max():.6f}")
         print(f"[DEBUG] vib raw: min={self.vib_cache.min():.6f}, max={self.vib_cache.max():.6f}")
+
+        # Задача 318.1: Извлекаем feat_update_id ДО удаления мета-колонок
+        if "feat_update_id" in df.columns:
+            self.update_id_raw = df["feat_update_id"].to_numpy().astype(np.int64)
+            print(f"[DEBUG] update_id_raw: shape={self.update_id_raw.shape}, dtype={self.update_id_raw.dtype}")
+        else:
+            self.update_id_raw = None
+            print("[DEBUG] feat_update_id not found, OFI will use fallback (diff(imbalance))")
         
         self.has_computed_features = True
 
@@ -1291,22 +1371,27 @@ class LOBDataset(Dataset):
         
         return channel_data
 
-    def _calculate_6_channels_raw(self, ask_p, ask_v, bid_p, bid_v, vib_raw=None, pr_raw=None):
+    def _calculate_6_channels_raw(self, ask_p, ask_v, bid_p, bid_v, vib_raw=None, pr_raw=None, ofi_precomputed=None):
         """
-        Единый метод формирования 9 каналов LOB (Задача 317).
-        Каналы: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread.
+        Единый метод формирования 13 каналов LOB (Задача 318).
+        Каналы: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread,
+                DeltaImb, DeltaSpread, CumOFI, ImbAccel.
         Вход: torch.Tensors (seq_len, 50).
 
         Каналы:
         ch[0]: Microprice Deviation — предсказательное отклонение microprice от mid
         ch[1]: Volume — среднее логарифмов объемов
         ch[2]: Static Imbalance — дисбаланс объемов [-1, 1]
-        ch[3]: Delta OFI — изменение дисбаланса по времени
+        ch[3]: OFI — Order Flow Imbalance (Cont-Kukanov-Stoikov)
         ch[4]: VIB — Volume Imbalance (суммарный дисбаланс по всем уровням)
         ch[5]: Ret_10 — short-term momentum (лог-возврат за 10 тиков)
         ch[6]: Ret_50 — medium-term momentum (лог-возврат за 50 тиков)
         ch[7]: Ret_100 — long-term trend (лог-возврат за 100 тиков)
         ch[8]: Spread — нормализованный спред (ask_0 - bid_0) / mid
+        ch[9]: DeltaImb — скорость изменения Imbalance (first derivative)
+        ch[10]: DeltaSpread — скорость изменения спреда
+        ch[11]: CumOFI — кумулятивный OFI внутри окна (сброс на 0 в начале окна)
+        ch[12]: ImbAccel — ускорение Imbalance (second derivative)
         """
         eps = 1e-8
 
@@ -1321,12 +1406,10 @@ class LOBDataset(Dataset):
         ask_v_0 = ask_v_raw[:, 0]  # (seq_len,)
         bid_v_0 = bid_v_raw[:, 0]  # (seq_len,)
 
-        # ch[0]: Microprice Deviation (Задача 316)
-        # microprice = (bid_p * ask_v + ask_p * bid_v) / (ask_v + bid_v)
-        # Отклоняется от mid в сторону меньшего объема
+        # ch[0]: Microprice Deviation (Задача 318.3: делим на spread/2 для диапазона [-1, 1])
         microprice = (bid_p_0 * ask_v_0 + ask_p_0 * bid_v_0) / (ask_v_0 + bid_v_0 + eps)
         spread_width = ask_p_0 - bid_p_0  # ширина спреда в относительных ценах
-        microprice_dev = microprice / (spread_width + eps)  # нормируем на ширину спреда
+        microprice_dev = microprice / (spread_width / 2.0 + eps)
         price_ch_raw = microprice_dev.unsqueeze(-1).expand(-1, 50)
 
         # ch[1]: Volume — среднее логарифмов
@@ -1336,8 +1419,11 @@ class LOBDataset(Dataset):
         denom = bid_v_raw + ask_v_raw + eps
         imb_ch_raw = (bid_v_raw - ask_v_raw) / denom
 
-        # ch[3]: Delta OFI (изменение дисбаланса по времени)
-        ofi_raw = torch.diff(imb_ch_raw, dim=0, prepend=imb_ch_raw[:1])
+        # ch[3]: OFI — настоящий Cont-Kukanov-Stoikov Order Flow Imbalance (Задача 318.2)
+        if ofi_precomputed is not None:
+            ofi_raw = ofi_precomputed.unsqueeze(-1).expand(-1, 50)
+        else:
+            ofi_raw = torch.diff(imb_ch_raw, dim=0, prepend=imb_ch_raw[:1])
 
         # ch[4]: VIB (Volume Imbalance)
         if vib_raw is None:
@@ -1385,12 +1471,36 @@ class LOBDataset(Dataset):
             ret_100_ch_raw = pr_raw[:, 2].unsqueeze(-1).expand(-1, 50)
 
         # ch[8]: Spread — нормализованный спред
-        # spread = (ask_p_0 - bid_p_0) / mid, но mid уже учтён в относительных ценах
-        # ask_p_0 = (ask - mid)/mid, bid_p_0 = (bid - mid)/mid
-        # spread/mid = ask_p_0 - bid_p_0
         spread = (ask_p_0 - bid_p_0).unsqueeze(-1).expand(-1, 50)
 
-        return price_ch_raw, vol_ch_raw, imb_ch_raw, ofi_raw, vib_ch_raw, ret_10_ch_raw, ret_50_ch_raw, ret_100_ch_raw, spread
+        # ===== НОВЫЕ TEMPORAL DERIVATIVE КАНАЛЫ (Задача 318.4) =====
+
+        # ch[9]: DeltaImb — скорость изменения Imbalance (first derivative)
+        delta_imb = torch.diff(imb_ch_raw[:, 0], dim=0, prepend=torch.zeros(1, device=imb_ch_raw.device))
+        delta_imb_ch = delta_imb.unsqueeze(-1).expand(-1, 50)  # (seq_len, 50)
+
+        # ch[10]: DeltaSpread — скорость изменения спреда
+        spread_1d = ask_p_0 - bid_p_0  # (seq_len,)
+        delta_spread = torch.diff(spread_1d, dim=0, prepend=torch.zeros(1, device=spread_1d.device))
+        delta_spread_ch = delta_spread.unsqueeze(-1).expand(-1, 50)
+
+        # ch[11]: CumOFI — кумулятивный OFI внутри окна (сброс на 0 в начале каждого окна)
+        if ofi_precomputed is not None:
+            ofi_window = ofi_precomputed  # (seq_len,)
+            ofi_cum = ofi_window - ofi_window[0]
+        else:
+            # ofi_raw shape: (seq_len, 50), берём первый столбец
+            ofi_cum = torch.cumsum(ofi_raw[:, 0], dim=0)
+            ofi_cum = ofi_cum - ofi_cum[0]
+        cumofi_ch = ofi_cum.unsqueeze(-1).expand(-1, 50)
+
+        # ch[12]: ImbAccel — ускорение Imbalance (second derivative)
+        accel_imb = torch.diff(delta_imb, dim=0, prepend=torch.zeros(1, device=delta_imb.device))
+        accel_imb_ch = accel_imb.unsqueeze(-1).expand(-1, 50)
+
+        return price_ch_raw, vol_ch_raw, imb_ch_raw, ofi_raw, vib_ch_raw, \
+               ret_10_ch_raw, ret_50_ch_raw, ret_100_ch_raw, spread, \
+               delta_imb_ch, delta_spread_ch, cumofi_ch, accel_imb_ch
 
     def _compute_channels_for_normalization(self, data: Union[pl.DataFrame, List[int], np.ndarray]) -> pl.DataFrame:
         """
@@ -1415,7 +1525,7 @@ class LOBDataset(Dataset):
             vib_raw = None
             if hasattr(self, 'vib_cache') and self.vib_cache is not None:
                 vib_raw = torch.from_numpy(self.vib_cache[data]).float()
-                
+
             pr_raw = None
             if hasattr(self, 'past_ret_cache') and self.past_ret_cache is not None:
                 r10 = self.past_ret_cache[10][data]
@@ -1423,6 +1533,11 @@ class LOBDataset(Dataset):
                 r100 = self.past_ret_cache[100][data]
                 pr_raw = np.stack([r10, r50, r100], axis=1)  # (N, 3)
                 pr_raw = torch.from_numpy(pr_raw).float()
+
+            # Задача 318.2: OFI из precomputed cache
+            ofi_precomp = None
+            if hasattr(self, 'ofi_cache') and self.ofi_cache is not None:
+                ofi_precomp = torch.from_numpy(self.ofi_cache[data]).float()
         else:
             # Для DataFrame (streaming/temp_ds)
             df_raw = data
@@ -1431,12 +1546,19 @@ class LOBDataset(Dataset):
             ask_v = torch.from_numpy(df_raw.select([f"feat_ask_v_{i}" for i in range(50)]).to_numpy()).float()
             bid_v = torch.from_numpy(df_raw.select([f"feat_bid_v_{i}" for i in range(50)]).to_numpy()).float()
             vib_raw, pr_raw = None, None
+            ofi_precomp = None
 
-        # Используем единый метод расчета (9 каналов после Задача 317)
-        p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw = self._calculate_6_channels_raw(ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw)
+        # Используем единый метод расчета (13 каналов после Задача 318)
+        p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw, \
+            di_raw, ds_raw, co_raw, ai_raw = self._calculate_6_channels_raw(
+                ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
+            )
 
-        channels = torch.cat([p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw], dim=1).numpy()
-        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(450)])
+        channels = torch.cat([
+            p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw,
+            di_raw, ds_raw, co_raw, ai_raw
+        ], dim=1).numpy()
+        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(650)])
 
     def _process_sample(self, x_raw, y, v, w, regime_id, ts, mid, idx=None, f_ret=None):
         # NaN protection (Задача 094-2)
@@ -1479,10 +1601,18 @@ class LOBDataset(Dataset):
             # pad до 3 колонок нулями
             pr_raw = torch.cat([pr_raw, torch.zeros_like(pr_raw), torch.zeros_like(pr_raw)], dim=-1)
 
-        # Расчет сырых каналов (Единый источник правды, 9 каналов после Задача 317)
-        p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw = self._calculate_6_channels_raw(ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw)
+        # Подготовка OFI из precomputed cache (Задача 318.2)
+        ofi_precomp = None
+        if idx is not None and hasattr(self, 'ofi_cache') and self.ofi_cache is not None:
+            ofi_precomp = torch.from_numpy(self.ofi_cache[idx : idx + self.seq_len].copy()).float()
 
-        # Нормализация (Векторизованная)
+        # Расчет сырых каналов (Единый источник правды, 13 каналов после Задача 318)
+        p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw, \
+            di_raw, ds_raw, co_raw, ai_raw = self._calculate_6_channels_raw(
+                ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
+            )
+
+        # Нормализация (Векторизованная, 13 каналов)
         price_ch = self.normalize_channel(p_raw, channel_idx=0)
         vol_ch = self.normalize_channel(v_raw, channel_idx=1)
         imb_ch = self.normalize_channel(i_raw, channel_idx=2)
@@ -1492,9 +1622,17 @@ class LOBDataset(Dataset):
         ret50_ch = self.normalize_channel(ret50_raw, channel_idx=6)
         ret100_ch = self.normalize_channel(ret100_raw, channel_idx=7)
         spread_ch = self.normalize_channel(sp_raw, channel_idx=8)
+        delta_imb_ch = self.normalize_channel(di_raw, channel_idx=9)
+        delta_spread_ch = self.normalize_channel(ds_raw, channel_idx=10)
+        cumofi_ch = self.normalize_channel(co_raw, channel_idx=11)
+        accel_imb_ch = self.normalize_channel(ai_raw, channel_idx=12)
 
-        # Собираем итоговый тензор (Seq, 9, 50)
-        x_final = torch.stack([price_ch, vol_ch, imb_ch, ofi_ch, vib_ch, ret10_ch, ret50_ch, ret100_ch, spread_ch], dim=1)
+        # Собираем итоговый тензор (Seq, 13, 50)
+        x_final = torch.stack([
+            price_ch, vol_ch, imb_ch, ofi_ch, vib_ch,
+            ret10_ch, ret50_ch, ret100_ch, spread_ch,
+            delta_imb_ch, delta_spread_ch, cumofi_ch, accel_imb_ch
+        ], dim=1)
 
         # Clipping для стабильности
         x_final = torch.clamp(x_final, -5.0, 5.0)
@@ -1508,7 +1646,8 @@ class LOBDataset(Dataset):
                     p = self.normalizer.params.get(f"feat_{ch_idx*50}", {})
                     print(f"    {name}: mean={p.get('mean', 0.0):.6f}, std={p.get('std', 1.0):.6f}")
 
-            channels_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread"]
+            channels_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread",
+                              "DeltaImb", "DeltaSpread", "CumOFI", "ImbAccel"]
             for i, name in enumerate(channels_names):
                 ch = x_final[:, i, :]
                 print(f"  Channel {i} ({name}) ПОСЛЕ CLAMP: min={ch.min():.4f}, max={ch.max():.4f}, mean={ch.mean():.4f}, std={ch.std():.4f}")
@@ -1608,6 +1747,8 @@ def load_multi_symbol_data(symbols, data_path="bots", lazy=True) -> Union[pl.Dat
         rename_map[f"ask_v_{i}"] = f"feat_ask_v_{i}"
         rename_map[f"bid_p_{i}"] = f"feat_bid_p_{i}"
         rename_map[f"bid_v_{i}"] = f"feat_bid_v_{i}"
+    # Задача 318.1: Сохраняем last_update_id как feat_update_id для расчёта OFI
+    rename_map["last_update_id"] = "feat_update_id"
     
     # Применяем переименование только для существующих колонок
     existing_cols = merged.collect_schema().names() if lazy else merged.columns
@@ -1617,7 +1758,8 @@ def load_multi_symbol_data(symbols, data_path="bots", lazy=True) -> Union[pl.Dat
     
     # Задача 306.2.1: Удаляем служебные колонки ПЕРЕД конвертацией в numpy/memmap
     # Используем правильные имена согласно уточнению пользователя
-    meta_cols = ["timestamp_ms", "last_update_id", "symbol"]
+    # Задача 318.1: last_update_id переименован в feat_update_id, не удаляем
+    meta_cols = ["timestamp_ms", "symbol"]
     merged = merged.drop([c for c in meta_cols if c in merged.columns])
     
     # Задача 306.4.1: Сортировка колонок для детерминированного порядка

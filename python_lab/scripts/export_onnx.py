@@ -138,7 +138,7 @@ def export():
     nhead = hparams.get("nhead", 4)
     num_layers = hparams.get("num_layers", 2)
     past_returns_lags = hparams.get("past_returns_lags", [])
-    n_channels = 3 + len(past_returns_lags)
+    n_channels = 9  # 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)
     
     # Динамически извлекаем n_levels из модели (подзадача 2)
     n_levels = hparams.get("n_levels", 50)
@@ -357,7 +357,7 @@ def export():
             "nhead": nhead,
             "num_layers": num_layers,
             "patch_size": patch_size,
-            "feature_order": ["price", "volume", "imbalance"],
+            "feature_order": ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread"],
             "output_classes": output_classes,
             "label_map": {"0": "Flat", "1": "Up", "2": "Down"},
             "precision": final_precision,

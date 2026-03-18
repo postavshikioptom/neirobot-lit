@@ -17,8 +17,8 @@ class LiTConfig:
     Используется для удобной инициализации моделей с разными параметрами,
     особенно полезно для Knowledge Distillation (Teacher vs Student).
     """
-    seq_len: int = 100
-    in_channels: int = 9  # Задача 317: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread
+    seq_len: int = 200  # Задача 318.6: 2:1 ratio к горизонту (100 тиков)
+    in_channels: int = 13  # Задача 318: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel
     d_model: int = 64
     embed_dim: int = None  # Алиас для d_model (для совместимости с задачей 237)
     nhead: int = 4
@@ -544,16 +544,16 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
     
-    print("\nTesting with 7 channels (Задача 316: MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread) and SiLU:")
-    model_with_returns = LiTModel(seq_len=100, in_channels=7, activation='silu')
-    dummy_input_7ch = torch.randn(8, 100, 7, 50)
-    output_7ch = model_with_returns(dummy_input_7ch)
+    print("\nTesting with 13 channels (Задача 318: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel) and SiLU:")
+    model_13ch = LiTModel(seq_len=200, in_channels=13, activation='silu')
+    dummy_input_13ch = torch.randn(8, 200, 13, 50)
+    output_13ch = model_13ch(dummy_input_13ch)
 
-    print(f"Input shape: {dummy_input_7ch.shape}")
-    print(f"Output shape: {output_7ch.shape}") # Ожидаем (8, 3)
+    print(f"Input shape: {dummy_input_13ch.shape}")
+    print(f"Output shape: {output_13ch.shape}") # Ожидаем (8, 3)
 
-    total_params_7ch = sum(p.numel() for p in model_with_returns.parameters())
-    print(f"Total parameters: {total_params_7ch:,}")
+    total_params_13ch = sum(p.numel() for p in model_13ch.parameters())
+    print(f"Total parameters: {total_params_13ch:,}")
     
     print("\nTesting Multi-Horizon (3 horizons) with separate heads:")
     model_multi = LiTModel(seq_len=100, in_channels=3, num_horizons=3, use_horizon_embedding=False)
