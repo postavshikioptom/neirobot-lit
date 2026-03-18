@@ -18,7 +18,7 @@ class LiTConfig:
     особенно полезно для Knowledge Distillation (Teacher vs Student).
     """
     seq_len: int = 100
-    in_channels: int = 7  # Задача 316: MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread
+    in_channels: int = 9  # Задача 317: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread
     d_model: int = 64
     embed_dim: int = None  # Алиас для d_model (для совместимости с задачей 237)
     nhead: int = 4

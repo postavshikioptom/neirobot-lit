@@ -1547,11 +1547,11 @@ def train():
     past_returns_lags = [int(x.strip()) for x in args.past_returns_lags.split(",")]
     n_past_returns = len(past_returns_lags)
 
-    # Задача 316: 7 каналов (MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread)
-    in_channels = 7
+    # Задача 317: 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)
+    in_channels = 9
 
     print(f"Using past returns lags: {past_returns_lags}")
-    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, PastRet, Spread)")
+    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)")
     print(f"Data loading mode: {args.data_mode}")
 
     # 1. Фиксируем seed для воспроизводимости

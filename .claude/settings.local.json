@@ -9,7 +9,11 @@
       "WebSearch",
       "WebFetch(domain:arxiv.org)",
       "mcp__fetch__fetch",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(find E:/MAX/PYTHON/NEURAL-BOTS/neirobot-lit/python_lab -name *.py -type f)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:quant.stackexchange.com)"
     ]
   },
   "enabledMcpjsonServers": [
