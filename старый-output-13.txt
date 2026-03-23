@@ -1,0 +1,294 @@
+ПОСЛЕ ЗАДАЧИ 318
+
+[Labeler] Labels distribution:
+  [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: 0.000500 (0.05%)
+  Horizons: [100], Threshold: 0.0005
+  single: {'label': [0, 1, 2], 'count': [247615, 60952, 62312]} | Masked: 0
+Initializing normalizer...
+Creating dataset in 'memory' mode (raw features)...
+[LOBDataset] Computing features from RAW data...
+[DEBUG] update_id_raw not available, OFI will use fallback
+[DEBUG] past_ret raw (lag=10): min=-0.009178, max=0.007146
+[DEBUG] vib raw: min=-0.641032, max=0.802446
+[DEBUG] feat_update_id not found, OFI will use fallback (diff(imbalance))
+[LOBDataset] Training normalizer on CHANNELS...
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.746909, std=0.349374
+    Vol: mean=7.961174, std=0.984958
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.0676, max=0.7183, mean=0.2127, std=0.4465
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-4.0798, max=3.0820, mean=0.4313, std=0.8967
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.4282, max=3.7161, mean=0.0707, std=0.9138
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0005, std=0.7693
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.4513, max=1.1064, mean=0.3143, std=0.3386
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.0004, max=0.0001, mean=-0.0000, std=0.0001
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-0.0007, max=0.0005, mean=-0.0000, std=0.0003
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.0007, max=0.0006, mean=0.0001, std=0.0004
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9991, max=3.9394, mean=1.4365, std=0.6861
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-2.3266, max=3.8645, mean=0.0173, std=0.4537
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0268, std=0.8656
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-2.2293, max=-0.4433, mean=-0.9490, std=0.4466
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-2.3169, max=2.4536, mean=-0.0003, std=0.4057
+[LOBDataset] First Sample Statistics (z-score normalized, clipped [-5,5]):
+  Channel 0 (MicropriceDev): min=-1.0676, max=0.7183, mean=0.2127
+  Channel 1 (Vol): min=-4.0798, max=3.0820, mean=0.4313
+  Channel 2 (Imb): min=-2.4282, max=3.7161, mean=0.0707
+  Channel 3 (OFI): min=-5.0000, max=5.0000, mean=0.0005
+  Channel 4 (VIB): min=-0.4513, max=1.1064, mean=0.3143
+  Channel 5 (Ret_10): min=-0.0004, max=0.0001, mean=-0.0000
+  Channel 6 (Ret_50): min=-0.0007, max=0.0005, mean=-0.0000
+  Channel 7 (Ret_100): min=-0.0007, max=0.0006, mean=0.0001
+  Channel 8 (Spread): min=0.9991, max=3.9394, mean=1.4365
+  Channel 9 (DeltaImb): min=-2.3266, max=3.8645, mean=0.0173
+  Channel 10 (DeltaSpread): min=-5.0000, max=5.0000, mean=0.0268
+  Channel 11 (CumOFI): min=-2.2293, max=-0.4433, mean=-0.9490
+  Channel 12 (ImbAccel): min=-2.3169, max=2.4536, mean=-0.0003
+[LOBDataset] Loaded 370580 samples. Data mode: memory
+..........
+
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 23.87           | 35.03           | 41.09          
+Hit Rate (Точность)            | 0.8317          | 0.1104          | 0.1416         
+Процент пропущенных сигналов (%) | -               | 19.52           | 17.04          
+Ложные входы (%)               | -               | 34.77           | 39.75          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000011       | -0.000025      
+Directional Accuracy (DA) без Flat | 0.1272          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5373 | Уверенности при ложном: 0.5821 | Разница уверенности: -0.0448
+Корреляция с LOB Imbalance     | 0.0226          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 2 (8m 53s) Validation: MCC=0.0506, Macro-F1=0.2603, ECE=0.2735, MCE=0.9394
+  Vol-MSE=2.611935, Vol-MAE=1.036332
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0506, F1=0.2603, Samples=55587
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.5713, max=0.3702, mean=-0.1336, std=0.4787
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.7292, max=3.3481, mean=1.0893, std=0.7802
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.3173, max=5.0000, mean=0.0343, std=0.5924
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0035, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2363, std=0.2796
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0429, std=0.7257
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1606, std=0.5762
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2944, std=0.5448
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-2.9991, max=-1.0577, mean=-1.5615, std=0.4787
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1428, std=3.1711
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.5571, max=0.3705, mean=-0.1201, std=0.4751
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.6496, max=3.5041, mean=1.2109, std=0.7933
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.3268, max=5.0000, mean=0.0345, std=0.5953
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0045, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2373, std=0.2793
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0334, std=0.7262
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1575, std=0.5809
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2945, std=0.5447
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-3.1294, max=-1.2019, mean=-1.6925, std=0.4751
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1433, std=3.1679
+....
+
+Epoch 4 (8m 53s) Validation: MCC=0.0497, Macro-F1=0.3113, ECE=0.2191, MCE=0.7435
+  Vol-MSE=2.138187, Vol-MAE=0.897647
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0497, F1=0.3113, Samples=55587
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.7025, max=0.3655, mean=-0.2424, std=0.5200
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-3.4515, max=1.9326, mean=-0.0154, std=0.6685
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2281, max=4.9101, mean=0.0335, std=0.5667
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0035, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2363, std=0.2796
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0429, std=0.7257
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1606, std=0.5762
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2944, std=0.5448
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-2.9731, max=-0.9051, mean=-1.5130, std=0.5200
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1402, std=3.1960
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.7075, max=0.3652, mean=-0.2434, std=0.5227
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-3.4787, max=1.8794, mean=-0.0572, std=0.6647
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2246, max=4.9034, mean=0.0335, std=0.5659
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0045, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2373, std=0.2793
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0334, std=0.7262
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1575, std=0.5809
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2945, std=0.5447
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-3.1143, max=-1.0415, mean=-1.6502, std=0.5227
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1399, std=3.1966
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 43.03           | 29.89           | 27.07          
+Hit Rate (Точность)            | 0.8134          | 0.1112          | 0.1453         
+Процент пропущенных сигналов (%) | -               | 34.05           | 38.28          
+Ложные входы (%)               | -               | 29.70           | 25.36          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | 0.000001        | -0.000004      
+Directional Accuracy (DA) без Flat | 0.1274          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6325 | Уверенности при ложном: 0.6656 | Разница уверенности: -0.0330
+Корреляция с LOB Imbalance     | 0.0059          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 5 (8m 51s) Validation: MCC=0.0504, Macro-F1=0.3155, ECE=0.2292, MCE=0.7563
+  Vol-MSE=2.146857, Vol-MAE=0.901999
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0504, F1=0.3155, Samples=55587
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.6630, max=0.3673, mean=-0.2075, std=0.5076
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-3.2365, max=2.3540, mean=0.3135, std=0.7004
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2552, max=4.9624, mean=0.0337, std=0.5745
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0035, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2363, std=0.2796
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0429, std=0.7257
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1606, std=0.5762
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2944, std=0.5448
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-2.9835, max=-0.9532, mean=-1.5281, std=0.5076
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1420, std=3.1918
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.6323, max=0.3684, mean=-0.1785, std=0.4990
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-3.0679, max=2.6843, mean=0.5710, std=0.7264
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2761, max=5.0000, mean=0.0341, std=0.5806
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0045, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2373, std=0.2793
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0334, std=0.7262
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1575, std=0.5809
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2945, std=0.5447
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-3.1263, max=-1.1256, mean=-1.6725, std=0.4990
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1412, std=3.1862
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 50.56           | 27.72           | 21.72          
+Hit Rate (Точность)            | 0.7952          | 0.1034          | 0.1563         
+Процент пропущенных сигналов (%) | -               | 43.15           | 50.05          
+Ложные входы (%)               | -               | 28.61           | 19.79          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | 0.000019        | -0.000011      
+Directional Accuracy (DA) без Flat | 0.1266          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6498 | Уверенности при ложном: 0.6598 | Разница уверенности: -0.0100
+Корреляция с LOB Imbalance     | -0.0193         (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 6 (8m 52s) Validation: MCC=0.0348, Macro-F1=0.3263, ECE=0.1933, MCE=0.6203
+  Vol-MSE=2.038376, Vol-MAE=0.848261
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0348, F1=0.3263, Samples=55587
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.6137, max=0.3690, mean=-0.1635, std=0.4931
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.9653, max=2.8854, mean=0.7280, std=0.7425
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2887, max=5.0000, mean=0.0342, std=0.5843
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0045, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2373, std=0.2793
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0334, std=0.7262
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1575, std=0.5809
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2945, std=0.5447
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-3.1278, max=-1.1451, mean=-1.6777, std=0.4931
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1411, std=3.1821
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.6630, max=0.3673, mean=-0.2075, std=0.5076
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-3.2365, max=2.3540, mean=0.3135, std=0.7004
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2552, max=4.9624, mean=0.0337, std=0.5745
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0035, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2363, std=0.2796
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0429, std=0.7257
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1606, std=0.5762
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2944, std=0.5448
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-2.9835, max=-0.9532, mean=-1.5281, std=0.5076
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1420, std=3.1918
+.....
+
+Epoch 8 (8m 54s) Validation: MCC=0.0334, Macro-F1=0.3206, ECE=0.2232, MCE=0.6945
+  Vol-MSE=2.057410, Vol-MAE=0.875337
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0334, F1=0.3206, Samples=55587
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733339, std=0.365161
+    Vol: mean=7.938655, std=0.990962
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-1.6630, max=0.3673, mean=-0.2075, std=0.5076
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-3.2365, max=2.3540, mean=0.3135, std=0.7004
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-2.2552, max=4.9624, mean=0.0337, std=0.5745
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0035, std=2.6025
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3960, max=0.8904, mean=0.2363, std=0.2796
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-3.1428, max=1.0469, mean=-0.1571, std=0.7625
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=-1.5878, max=1.2704, mean=0.0429, std=0.7257
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-1.0245, max=0.8708, mean=0.1606, std=0.5762
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9471, max=3.2816, mean=1.2944, std=0.5448
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.3750, std=2.8258
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=0.0500, std=1.9359
+  Channel 11 (CumOFI) ПОСЛЕ CLAMP: min=-2.9835, max=-0.9532, mean=-1.5281, std=0.5076
+  Channel 12 (ImbAccel) ПОСЛЕ CLAMP: min=-5.0000, max=5.0000, mean=-0.1420, std=3.1918

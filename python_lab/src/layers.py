@@ -26,90 +26,64 @@ def get_activation(activation_type: str):
 
 class LOBPatching(nn.Module):
     """
-    Продвинутый слой патчинга для стакана (LOB).
-    Группирует уровни стакана и добавляет уровневое и временное позиционное кодирование.
+    Продвинутый слой патчинга для стакана (LOB) — Per-Level Token Architecture (Задача 319).
+    Каждый уровень стакана — отдельный токен. Трансформер видит S*50 токенов
+    и учит attention между уровнями (bid-loaded vs ask-loaded и т.д.).
+
+    Вход:  (B, S, in_channels=11, n_levels=50)
+    Выход: (B, S*50, d_model=96) — 5000 токенов для S=100
     """
-    def __init__(self, seq_len=100, n_levels=50, in_channels=3, d_model=64, activation='gelu_exact'):
+    def __init__(self, seq_len=100, n_levels=50, in_channels=11, d_model=96, activation='gelu_exact'):
         super().__init__()
         self.d_model = d_model
         self.in_channels = in_channels
         self.n_levels = n_levels
         self.seq_len = seq_len
-        
-        # Динамический расчет размерностей на основе параметров
-        # Согласно плану 026: num_features = in_channels * n_levels
-        self.num_features = in_channels * n_levels
-        # После Conv1d(kernel=in_channels, stride=in_channels): num_patches = num_features // in_channels = n_levels
-        self.num_patches = self.num_features // in_channels
-        
-        # 1. Vertical Patching: Объединяем все каналы одного уровня через Conv1d
-        # Вход: (Batch*Seq, 1, num_features) -> Выход: (Batch*Seq, d_model, num_patches)
-        # kernel_size=in_channels, stride=in_channels объединяет все каналы одного уровня в один токен
-        self.patch_conv = nn.Conv1d(1, d_model, kernel_size=in_channels, stride=in_channels)
-        self.act = get_activation(activation)  # Активация после patch_conv
-        
-        # 2. Level Positional Embedding (динамический размер по плану 026)
-        # После Conv1d(kernel=in_channels, stride=in_channels) получаем num_patches токенов
-        self.level_pos_emb = nn.Parameter(torch.randn(1, self.num_patches, d_model) * 0.02)
-        
-        # 3. Temporal Positional Embedding (строго seq_len по плану 026)
-        # Различаем шаги времени 0..seq_len-1
-        self.time_pos_emb = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
-        
-        # Шаг 3: Attention Pooling (Задача 310-3)
-        # Слой для вычисления весов внимания для каждого уровня стакана
-        self.level_attention = nn.Linear(d_model, 1)
-        
-        # Задача 314.6: Дополнительная нормализация перед aggregation
-        self.pre_attn_norm = nn.LayerNorm(d_model)
-        
-        # 4. Финальная нормализация для стабильности
+
+        # Per-level projection: each level's in_channels features → d_model
+        self.level_proj = nn.Linear(in_channels, d_model)
+        self.act = get_activation(activation)
+
+        # Level Positional Embedding: (1, 1, n_levels, d_model)
+        # Информация о глубине стакана (уровень 0 vs уровень 49)
+        self.level_pos_emb = nn.Parameter(torch.randn(1, 1, n_levels, d_model) * 0.02)
+
+        # Temporal Positional Embedding: (1, seq_len, 1, d_model)
+        # Информация о временнóм порядке
+        self.time_pos_emb = nn.Parameter(torch.randn(1, seq_len, 1, d_model) * 0.02)
+
+        # CLS token for classification (Задача 319: learnable [CLS] token)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # Финальная нормализация
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
         """
-        x: (Batch, Seq, in_channels, n_levels) - входные данные из dataset
-        Преобразуем в (Batch, Seq, 1, num_features) для патчинга.
-        
-        ВАЖНО (Задача 304): После перехода на блочный порядок (P, P, V, V) в features.py,
-        нам нужно переставить оси, чтобы свертка по каналам объединяла признаки ОДНОГО уровня.
-        
-        Порядок в x: [channel_0, channel_1, channel_2] где каждый - 50 уровней.
-        Нам нужно: [L0_C0, L0_C1, L0_C2, L1_C0, L1_C1, L1_C2, ...]
+        x: (B, S, C, L) — C=11 каналов, L=50 уровней
+        Возвращает: (B, S*L, d_model) — каждый уровень стакана как отдельный токен
         """
-        b, s, c, l = x.shape  # c=in_channels, l=n_levels
-        
-        # Шаг 0: Транспонируем (B, S, C, L) -> (B, S, L, C)
-        # Это гарантирует, что признаки одного уровня идут подряд
-        x_permuted = x.transpose(2, 3).contiguous() # (B, S, L, C)
-        
-        # Flatten в (B, S, 1, L*C)
-        x_flat_seq = x_permuted.view(b, s, 1, l * c) # (B, S, 1, num_features)
-        
-        # Шаг 1: Vertical Patching - объединяем каналы одного уровня
-        # Reshape в (B*S, 1, num_features) для применения Conv1d
-        x_flat = x_flat_seq.view(b * s, 1, self.num_features)  # (B*S, 1, num_features)
-        x_patched = self.patch_conv(x_flat)  # (B*S, d_model, num_patches)
-        x_patched = self.act(x_patched)  # Применяем активацию
-        x_patched = x_patched.permute(0, 2, 1)  # (B*S, num_patches, d_model)
-        
-        # Reshape обратно в батч: (B, S, num_patches, d_model)
-        x_patched = x_patched.view(b, s, self.num_patches, self.d_model)
-        
-        # Шаг 2: Добавляем уровневые позиции (информация о глубине стакана)
-        x_patched = x_patched + self.level_pos_emb  # Broadcasting: (B, S, num_patches, d_model)
-        
-        # Шаг 3: Агрегация уровней в один "Snapshot Token" на каждый шаг времени.
-        # Сжимаем num_patches уровней в один вектор размерности D через Attention Pooling (Задача 310-3).
-        # (B, S, num_patches, d_model) -> (B, S, d_model)
-        
-        # Задача 314.6: Применяем нормализацию перед attention pooling
-        x_patched_norm = self.pre_attn_norm(x_patched)  # (B, S, num_patches, d_model)
-        attn_weights = F.softmax(self.level_attention(x_patched_norm), dim=2)  # (B, S, num_patches, 1)
-        x_snapshot = (x_patched_norm * attn_weights).sum(dim=2)  # (B, S, d_model)
-        
-        # Шаг 4: Добавляем временные позиции (информация о порядке событий)
-        # Динамически нарезаем позиционное кодирование под текущую длину последовательности
-        x_temporal = x_snapshot + self.time_pos_emb[:, :s, :]
-        
-        return self.norm(x_temporal)
+        b, s, c, l = x.shape
+
+        # (B, S, C, L) → (B, S, L, C) — признаки одного уровня вместе
+        x_perm = x.transpose(2, 3).contiguous()  # (B, S, 50, 11)
+
+        # Per-level projection: (B*S, 50, 11) → (B*S, 50, d_model)
+        x_flat = x_perm.view(b * s, l, c)
+        x_proj = self.level_proj(x_flat)
+        x_proj = self.act(x_proj)
+
+        # Reshape back: (B, S, 50, d_model)
+        x_tokens = x_proj.view(b, s, l, self.d_model)
+
+        # Add positional embeddings (broadcasting)
+        x_tokens = x_tokens + self.level_pos_emb + self.time_pos_emb
+
+        # Flatten for transformer: (B, S*50, d_model)
+        x_tokens_flat = x_tokens.view(b, s * l, self.d_model)
+
+        # Добавляем CLS токен в начало каждой последовательности (Задача 319)
+        cls_tokens = self.cls_token.expand(b, -1, -1)  # (B, 1, d_model)
+        x_out = torch.cat([cls_tokens, x_tokens_flat], dim=1)  # (B, 1 + S*L, d_model)
+
+        return self.norm(x_out)

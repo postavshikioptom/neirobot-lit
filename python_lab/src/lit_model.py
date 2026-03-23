@@ -5,8 +5,8 @@ import math
 from dataclasses import dataclass
 from .layers import LOBPatching
 
-# Глобальная конфигурация входных данных (Задача 316: 7 каналов)
-DEFAULT_INPUT_CHANNELS = 7
+# Глобальная конфигурация входных данных (Задача 319: 11 каналов)
+DEFAULT_INPUT_CHANNELS = 11
 N_LEVELS = 50
 
 
@@ -17,13 +17,13 @@ class LiTConfig:
     Используется для удобной инициализации моделей с разными параметрами,
     особенно полезно для Knowledge Distillation (Teacher vs Student).
     """
-    seq_len: int = 200  # Задача 318.6: 2:1 ratio к горизонту (100 тиков)
-    in_channels: int = 13  # Задача 318: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel
-    d_model: int = 64
+    seq_len: int = 100  # Задача 319: 100×50 = 5000 токенов, достаточно
+    in_channels: int = 11  # Задача 319: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread (без CumOFI, ImbAccel)
+    d_model: int = 96
     embed_dim: int = None  # Алиас для d_model (для совместимости с задачей 237)
     nhead: int = 4
     num_heads: int = None  # Алиас для nhead (для совместимости с задачей 237)
-    num_layers: int = 2
+    num_layers: int = 3
     dropout: float = 0.1
     activation: str = 'gelu_exact'
     multi_task: bool = True
@@ -32,6 +32,7 @@ class LiTConfig:
     num_horizons: int = 1  # Количество горизонтов предсказания (Задача 160)
     use_horizon_embedding: bool = False  # Использовать Horizon Embedding вместо отдельных голов
     use_gqa: bool = False  # Использовать Grouped Query Attention (опционально, задача 237)
+    use_gradient_checkpointing: bool = False  # OOM фикс: использовать gradient checkpointing для экономии памяти (по умолчанию выключено)
 
 def get_activation(activation_type: str):
     """
@@ -151,14 +152,15 @@ class CustomTransformerEncoderLayer(nn.Module):
     
     Задача 237: Требование А.2 - использование F.scaled_dot_product_attention
     """
-    def __init__(self, d_model, num_heads, dim_feedforward, dropout=0.1, activation='gelu_exact', use_gqa=False):
+    def __init__(self, d_model, num_heads, dim_feedforward, dropout=0.1, activation='gelu_exact', use_gqa=False, use_gradient_checkpointing=False):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        
+
         self.d_model = d_model
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
         self.use_gqa = use_gqa
+        self.use_gradient_checkpointing = use_gradient_checkpointing  # OOM фикс: сохраняем флаг
         
         # GQA: уменьшаем количество KV heads
         if use_gqa:
@@ -198,12 +200,22 @@ class CustomTransformerEncoderLayer(nn.Module):
         x: (batch, seq_len, d_model)
         src_key_padding_mask: (batch, seq_len) - True для padding позиций
         """
-        # Self-Attention с residual connection
-        x = x + self._sa_block(x, src_key_padding_mask)
-        
-        # Feedforward с residual connection
-        x = x + self._ff_block(x)
-        
+        if self.use_gradient_checkpointing and self.training:
+            # OOM фикс: Gradient checkpointing экономит память за счет пересчета активаций во время backwards
+            # Checkpoint требует, чтобы все аргументы были тензорами. Если mask=None, используем lambda-обёртку.
+            if src_key_padding_mask is None:
+                sa_block_fn = lambda x: self._sa_block(x, None)
+                x = x + torch.utils.checkpoint.checkpoint(sa_block_fn, x, use_reentrant=False)
+            else:
+                x = x + torch.utils.checkpoint.checkpoint(self._sa_block, x, src_key_padding_mask, use_reentrant=False)
+            
+            # Feedforward block - только x
+            x = x + torch.utils.checkpoint.checkpoint(self._ff_block, x, use_reentrant=False)
+        else:
+            # Оригинальный код без checkpointing
+            x = x + self._sa_block(x, src_key_padding_mask)
+            x = x + self._ff_block(x)
+
         return x
     
     def _sa_block(self, x, attn_mask=None):
@@ -265,9 +277,21 @@ class CustomTransformerEncoderLayer(nn.Module):
     
     def _ff_block(self, x):
         """Feedforward block"""
-        x2 = self.linear2(self.dropout(self.activation(self.linear1(x))))
-        x2 = self.dropout2(x2)
-        return self.norm2(x2)
+        # Linear 1
+        x = self.linear1(x)
+
+        # Активация
+        x = self.activation(x)
+
+        # Dropout
+        x = self.dropout(x)
+
+        # Linear 2
+        x = self.linear2(x)
+
+        # Dropout2 и Norm
+        x = self.dropout2(x)
+        return self.norm2(x)
 
 class LiTModel(nn.Module):
     """
@@ -279,7 +303,7 @@ class LiTModel(nn.Module):
     - Выход формы (batch, num_horizons, 3) для multi-horizon
     - Опциональный Horizon Embedding для кондиционирования
     """
-    def __init__(self, seq_len=100, in_channels=3, d_model=64, embed_dim=None, nhead=4, num_heads=None, num_layers=2, dropout=0.1, activation='gelu_exact', multi_task=True, num_regimes=0, regime_embedding_dim=16, num_horizons=1, use_horizon_embedding=False, use_gqa=False):
+    def __init__(self, seq_len=100, in_channels=11, d_model=96, embed_dim=None, nhead=6, num_heads=None, num_layers=3, dropout=0.1, activation='gelu_exact', multi_task=True, num_regimes=0, regime_embedding_dim=16, num_horizons=1, use_horizon_embedding=False, use_gqa=False, use_gradient_checkpointing=False):
         super().__init__()
         
         # Поддержка алиасов для совместимости с задачей 237
@@ -293,6 +317,7 @@ class LiTModel(nn.Module):
         
         self.d_model = d_model
         self.in_channels = in_channels
+        self.n_levels = N_LEVELS
         self.activation_type = activation
         self.multi_task = multi_task
         self.num_regimes = num_regimes
@@ -303,6 +328,7 @@ class LiTModel(nn.Module):
         self.head_dim = d_model // nhead
         self.use_gqa = use_gqa
         self.seq_len = seq_len
+        self.use_gradient_checkpointing = use_gradient_checkpointing  # OOM фикс: сохраняем флаг
         
         # 1. Продвинутый слой патчинга (с уровневым и временным позиционированием)
         self.patching = LOBPatching(
@@ -312,26 +338,8 @@ class LiTModel(nn.Module):
             d_model=d_model,
             activation=activation
         )
-        
-        # 1.5. Positional Encoding (Задача 055)
-        # Поддерживает динамическое слicing до текущей seq_len
-        # Используем sinusoidal PE (не требует обучения)
-        max_seq_len = seq_len + 1  # +1 для [CLS] токена
-        pe = torch.zeros(max_seq_len, d_model)
-        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        if d_model % 2 == 1:
-            pe[:, 1::2] = torch.cos(position * div_term[:-1])
-        else:
-            pe[:, 1::2] = torch.cos(position * div_term)
-        # Регистрируем как буфер (не параметр, не требует градиентов)
-        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_seq_len, d_model)
-        
-        # 2. [CLS] Токен (сохраняем для совместимости, но будем использовать GAP)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        
-        # 3. Regime Embedding (опционально, если num_regimes > 0)
+
+        # 2. Regime Embedding (опционально, если num_regimes > 0)
         if num_regimes > 0:
             self.regime_embedding = nn.Embedding(num_regimes, regime_embedding_dim)
             # Проекция для добавления regime embedding к патчам
@@ -358,7 +366,8 @@ class LiTModel(nn.Module):
                 dim_feedforward=d_model * 4,
                 dropout=dropout,
                 activation=activation,
-                use_gqa=use_gqa
+                use_gqa=use_gqa,
+                use_gradient_checkpointing=self.use_gradient_checkpointing  # OOM фикс: передаем флаг
             )
             for _ in range(num_layers)
         ])
@@ -384,7 +393,6 @@ class LiTModel(nn.Module):
         self.vol_regressor = nn.Linear(d_model, 1) # Предсказание Log-Vol
 
         # Инициализация параметров
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
         if self.regime_embedding is not None:
             nn.init.trunc_normal_(self.regime_embedding.weight, std=0.02)
         
@@ -438,7 +446,7 @@ class LiTModel(nn.Module):
     def forward(self, x, mask=None, regime_id=None):
         """
         x: (Batch, Seq, in_channels, n_levels) - входные данные из dataset
-           По умолчанию: (Batch, Seq, 3, 50) - 3 канала × 50 уровней
+           По умолчанию: (Batch, Seq, 11, 50) - 11 каналов × 50 уровней
         mask: (Batch, Seq)
         regime_id: (Batch,) - индексы режимов рынка (опционально)
         
@@ -448,46 +456,35 @@ class LiTModel(nn.Module):
         """
         b, s, c, l = x.shape
         
-        # Шаг 1: Патчинг и позиционное кодирование
-        x = self.patching(x)  # (Batch, num_patches, d_model)
-        
-        # Шаг 1.5: Добавляем Positional Encoding (Задача 055)
-        # Срезаем PE до текущей seq_len и добавляем к патчам
-        pe_slice = self.pe[:, :x.shape[1], :]  # (1, num_patches, d_model)
-        x = x + pe_slice  # (Batch, num_patches, d_model)
-        
+        # Шаг 1: Патчинг — каждый уровень стакана становится токеном
+        # PE (level + temporal) уже внутри patching (Задача 319)
+        # Выход: (Batch, 1 + S*50, d_model) с CLS токеном в начале
+        x = self.patching(x)  # (Batch, 1 + S*50, d_model)
+
         # Шаг 2: Добавляем Regime Embedding (если включено)
         if self.regime_embedding is not None and regime_id is not None:
-            # Получаем regime embedding для каждого семпла в батче
             regime_emb = self.regime_embedding(regime_id)  # (Batch, regime_embedding_dim)
-            
-            # Расширяем на все патчи: (Batch, 1, regime_embedding_dim) -> (Batch, num_patches, regime_embedding_dim)
             regime_emb = regime_emb.unsqueeze(1).expand(-1, x.shape[1], -1)
-            
-            # Конкатенируем с патчами и проецируем обратно в d_model
-            x = torch.cat([x, regime_emb], dim=-1)  # (Batch, num_patches, d_model + regime_embedding_dim)
-            x = self.regime_projection(x)  # (Batch, num_patches, d_model)
-        
-        # Шаг 3: Добавляем [CLS] токен
-        cls_tokens = self.cls_token.expand(b, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        
-        # Шаг 4: Подготовка маски для Transformer (Задача 055)
+            x = torch.cat([x, regime_emb], dim=-1)
+            x = self.regime_projection(x)
+
+        # Шаг 3: Подготовка маски для Transformer
         src_key_padding_mask = None
         if mask is not None:
-            # mask: (Batch, Seq) - True для padding, False для valid
-            # Добавляем False для [CLS] токена (он всегда valid)
-            cls_mask = torch.zeros((b, 1), dtype=torch.bool, device=x.device)
-            src_key_padding_mask = torch.cat([cls_mask, mask], dim=1)  # (Batch, Seq+1)
-        
-        # Шаг 5: Transformer Encoder с поддержкой src_key_padding_mask
-        # src_key_padding_mask: True для позиций, которые нужно игнорировать
+            # mask: (Batch, S) - True для padding. Расширяем на 50 уровней на каждый таймстеп
+            mask_expanded = mask.unsqueeze(-1).expand(-1, -1, self.n_levels)  # (B, S, 50)
+            mask_flat = mask_expanded.reshape(b, -1)  # (B, S*50)
+            # Добавляем False для CLS токена (он никогда не padding)
+            cls_padding = torch.zeros((b, 1), dtype=mask_flat.dtype, device=mask_flat.device)
+            src_key_padding_mask = torch.cat([cls_padding, mask_flat], dim=1)  # (B, 1 + S*50)
+
+        # Шаг 4: Transformer Encoder
         x_trans = x
         for layer in self.transformer_layers:
             x_trans = layer(x_trans, src_key_padding_mask=src_key_padding_mask)
-        
-        # Шаг 6: Global Average Pooling по патчам (исключая CLS токен) согласно плану 130
-        pooled = x_trans[:, 1:, :].mean(dim=1)
+
+        # Шаг 5: Используем CLS токен (индекс 0) для pooled representation
+        pooled = x_trans[:, 0, :]  # (Batch, d_model) - берем первый токен (CLS)
         pooled = self.norm(pooled)
         
         # Шаг 7: Разделение на ветки (Multi-Task)
@@ -544,9 +541,9 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
     
-    print("\nTesting with 13 channels (Задача 318: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel) and SiLU:")
-    model_13ch = LiTModel(seq_len=200, in_channels=13, activation='silu')
-    dummy_input_13ch = torch.randn(8, 200, 13, 50)
+    print("\nTesting with 11 channels (Задача 319: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread) and SiLU:")
+    model_13ch = LiTModel(seq_len=100, in_channels=11, activation='silu')
+    dummy_input_13ch = torch.randn(8, 100, 11, 50)
     output_13ch = model_13ch(dummy_input_13ch)
 
     print(f"Input shape: {dummy_input_13ch.shape}")

@@ -1369,11 +1369,14 @@ def plot_confusion_matrix_tensorboard(y_true, y_pred, class_names, writer, epoch
         print(f"\nWARNING: plot_confusion_matrix_tensorboard: NaN in y_pred. Skipping plot {tag}.")
         return
 
-    # Вычисляем confusion matrix
-    cm = confusion_matrix(y_true, y_pred)
-    
-    # Нормализуем по строкам (recall)
-    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    # Вычисляем confusion matrix с явным указанием labels для гарантии 3 классов
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
+
+    # Нормализуем по строкам (recall) с защитой от деления на ноль
+    row_sums = cm.sum(axis=1)
+    # Заменяем нулевые суммы на 1, чтобы избежать деления на 0 (но тогда normalized row будет 0)
+    row_sums_safe = np.where(row_sums == 0, 1, row_sums)
+    cm_normalized = cm.astype('float') / row_sums_safe[:, np.newaxis]
     
     # Создаем фигуру
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))

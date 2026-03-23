@@ -94,26 +94,29 @@ def compute_depth_imbalance_globally(bid_v: np.ndarray, ask_v: np.ndarray) -> np
 
 def compute_ofi_from_lob(bid_p: np.ndarray, ask_p: np.ndarray,
                          bid_v: np.ndarray, ask_v: np.ndarray,
-                         update_ids: np.ndarray) -> np.ndarray:
+                         update_ids: np.ndarray, depth: int = 3) -> np.ndarray:
     """
     Векторизованный расчёт OFI (Order Flow Imbalance) по Cont-Kukanov-Stoikov.
 
-    OFI = cumulative net volume flowing through bid/ask levels.
-    При обновлении стакана (change in update_id):
-      - Если bid_price上升 (bid_p[0] increased) → buyer aggression → +bid_v[0]
-      - Если ask_price下降 (ask_p[0] decreased) → seller aggression → -ask_v[0]
+    OFI = per-tick (non-cumulative) order flow imbalance.
+    Возвращает дельты (сырой OFI за каждый таймстеп), НЕ кумулятивную сумму.
 
-    Упрощённый векторизованный метод:
-    - Определяем change_points через diff(update_ids) > 0
-    - Для каждого change_point: OFI += sum(bid_v[0:3]) - sum(ask_v[0:3])
-    - Between change_points: OFI повторяет последнее значение (constant hold)
+    Правильная CKS логика (учитывает изменения цен):
+    - buyer-initiated: bid_price увеличился ИЛИ (bid_price не изменился И bid_volume увеличился)
+    - seller-initiated: ask_price уменьшился ИЛИ (ask_price не изменился И ask_volume уменьшился)
+
+    Формула:
+    OFI_delta[t] = sum_{i=0}^{depth-1} [ bid_vol_diff[t,i] * I{buyer-initiated at level i}
+                                          - ask_vol_diff[t,i] * I{seller-initiated at level i} ]
+    где diff = текущее значение - предыдущее значение
 
     Args:
         bid_p, ask_p: (N, 50) best bid/ask prices (relative)
         bid_v, ask_v: (N, 50) raw volumes per level (NOT log1p)
         update_ids: (N,) last_update_id values
+        depth: число уровней для расчета (обычно 3)
     Returns:
-        (N,) OFI values, cumulative running sum
+        (N,) OFI values, per-tick deltas (non-cumulative), dtype=np.float32
     """
     n = len(update_ids)
 
@@ -121,15 +124,26 @@ def compute_ofi_from_lob(bid_p: np.ndarray, ask_p: np.ndarray,
     id_diff = np.diff(update_ids, prepend=update_ids[0])
     is_update = id_diff > 0  # bool mask
 
-    # При обновлении: OFI_delta = sum(bid_v[0:3]) - sum(ask_v[0:3])
-    # Берём первые 3 уровня (глубина агрессии)
-    depth = 3
-    bid_flow = bid_v[:, :depth].sum(axis=1)  # (N,)
-    ask_flow = ask_v[:, :depth].sum(axis=1)  # (N,)
-    delta = np.where(is_update, bid_flow - ask_flow, 0.0)
+    # Рассчитываем diff цен и объемов только для указанной глубины
+    # Используем prepend=0 чтобы получить diff[t] = value[t] - value[t-1], с diff[0]=0
+    bid_p_diff = np.diff(bid_p[:, :depth], axis=0, prepend=bid_p[:, :depth][:1])
+    ask_p_diff = np.diff(ask_p[:, :depth], axis=0, prepend=ask_p[:, :depth][:1])
+    bid_v_diff = np.diff(bid_v[:, :depth], axis=0, prepend=bid_v[:, :depth][:1])
+    ask_v_diff = np.diff(ask_v[:, :depth], axis=0, prepend=ask_v[:, :depth][:1])
 
-    # Кумулятивная сумма
-    ofi = np.cumsum(delta).astype(np.float32)
+    # Создаем masks согласно CKS логике
+    buyer_mask = (bid_p_diff > 0) | ((bid_p_diff == 0) & (bid_v_diff > 0))
+    seller_mask = (ask_p_diff < 0) | ((ask_p_diff == 0) & (ask_v_diff > 0))
+
+    # Суммируем contribution по уровням для каждого таймстемпа
+    buy_contrib = np.where(buyer_mask, bid_v_diff, 0).sum(axis=1)
+    sell_contrib = np.where(seller_mask, ask_v_diff, 0).sum(axis=1)
+
+    # OFI = buy_contrib - sell_contrib
+    ofi_deltas = buy_contrib - sell_contrib
+
+    # Применяем маску обновлений (только при реальном обновлении стакана)
+    ofi = np.where(is_update, ofi_deltas, 0.0).astype(np.float32)
 
     return ofi
 
@@ -748,17 +762,18 @@ class LOBDataset(Dataset):
             raise ValueError(f"Unknown data_mode: {data_mode}. Only 'memory' mode is supported.")
 
         # Задача 307.6: Аудит целостности признаков и логирование первого сэмпла
-        expected_cols = [f"feat_{i}" for i in range(450)]
+        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread", "DeltaImb", "DeltaSpread"]
+        n_channels = len(channel_names)
+        expected_cols = [f"feat_{i}" for i in range(n_channels * self.n_levels)]
         actual_cols = self.feat_cols if hasattr(self, 'feat_cols') else []
         missing = [c for c in expected_cols if c not in actual_cols]
 
         if not missing:
-            print(f"[{self.__class__.__name__}] Feature Map Verified: 9 channels, 50 levels. Total features: 450. Status: OK")
+            print(f"[{self.__class__.__name__}] Feature Map Verified: {n_channels} channels, {self.n_levels} levels. Total features: {n_channels * self.n_levels}. Status: OK")
 
         if len(self) > 0:
             sample_x = self[0][0]
             print(f"[{self.__class__.__name__}] First Sample Statistics (z-score normalized, clipped [-5,5]):")
-            channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread"]
             for i in range(sample_x.shape[1]):
                 chan = sample_x[:, i, :]
                 print(f"  Channel {i} ({channel_names[i]}): min={chan.min():.4f}, max={chan.max():.4f}, mean={chan.mean():.4f}")
@@ -766,6 +781,19 @@ class LOBDataset(Dataset):
         # Информационный лог о загрузке
         n_samples = len(self)
         print(f"[{self.__class__.__name__}] Loaded {n_samples} samples. Data mode: {data_mode}")
+
+        # Логирование распределения классов (диагностика дисбаланса)
+        if hasattr(self, 'labels') and len(self.labels) > 0:
+            labels_for_stats = self.labels[:, 0] if self.labels.ndim > 1 else self.labels
+            unique, counts = np.unique(labels_for_stats, return_counts=True)
+            total = len(labels_for_stats)
+            print(f"[{self.__class__.__name__}] Label distribution:")
+            for cls, cnt in zip(unique, counts):
+                print(f"  Class {cls}: {cnt} samples ({cnt/total:.1%})")
+            # Предупреждение о доминации Flat
+            flat_count = counts[unique == 0].sum() if 0 in unique else 0
+            if flat_count / total > 0.9:
+                print(f"[WARN] Flat class dominates: {flat_count/total:.1%}. Consider adjusting threshold or oversampling.")
 
     def _calculate_time_weights(self, timestamps: np.ndarray, labels: np.ndarray) -> torch.Tensor:
         max_ts = timestamps.max()
@@ -912,7 +940,7 @@ class LOBDataset(Dataset):
                 bid_p_matrix, ask_p_matrix, bid_v_matrix, ask_v_matrix,
                 self.update_id_raw
             )
-            print(f"[DEBUG] ofi raw: min={self.ofi_cache.min():.6f}, max={self.ofi_cache.max():.6f}, mean={self.ofi_cache.mean():.6f}")
+            print(f"[DEBUG] ofi raw (per-tick, non-cumulative): min={self.ofi_cache.min():.6f}, max={self.ofi_cache.max():.6f}, mean={self.ofi_cache.mean():.6f}")
         else:
             self.ofi_cache = None
             print("[DEBUG] update_id_raw not available, OFI will use fallback")
@@ -1018,7 +1046,11 @@ class LOBDataset(Dataset):
         # Расчет волатильности для взвешивания или адаптивного порога
         if "mid_price" in aux_df.columns:
             self.mid_prices = aux_df["mid_price"].to_numpy()
-            self.vols = compute_target_vol(self.mid_prices, window=self.vol_window)[self.seq_len - 1:]
+            # Задача 319: защита от NaN/Inf в vols
+            vols = compute_target_vol(self.mid_prices, window=self.vol_window)[self.seq_len - 1:]
+            vols = np.asarray(vols, dtype=np.float32)
+            vols = np.nan_to_num(vols, nan=0.0, posinf=0.0, neginf=0.0)
+            self.vols = vols
         else:
             self.mid_prices = np.zeros(len(self.labels), dtype=np.float32)
             self.vols = np.zeros(len(self.labels) - self.seq_len + 1, dtype=np.float32)
@@ -1373,16 +1405,16 @@ class LOBDataset(Dataset):
 
     def _calculate_6_channels_raw(self, ask_p, ask_v, bid_p, bid_v, vib_raw=None, pr_raw=None, ofi_precomputed=None):
         """
-        Единый метод формирования 13 каналов LOB (Задача 318).
+        Единый метод формирования 11 каналов LOB (Задача 319).
         Каналы: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread,
-                DeltaImb, DeltaSpread, CumOFI, ImbAccel.
+                DeltaImb, DeltaSpread.
         Вход: torch.Tensors (seq_len, 50).
 
         Каналы:
         ch[0]: Microprice Deviation — предсказательное отклонение microprice от mid
         ch[1]: Volume — среднее логарифмов объемов
         ch[2]: Static Imbalance — дисбаланс объемов [-1, 1]
-        ch[3]: OFI — Order Flow Imbalance (Cont-Kukanov-Stoikov)
+        ch[3]: OFI — Order Flow Imbalance (Cont-Kukanov-Stoikov, per-tick)
         ch[4]: VIB — Volume Imbalance (суммарный дисбаланс по всем уровням)
         ch[5]: Ret_10 — short-term momentum (лог-возврат за 10 тиков)
         ch[6]: Ret_50 — medium-term momentum (лог-возврат за 50 тиков)
@@ -1390,8 +1422,6 @@ class LOBDataset(Dataset):
         ch[8]: Spread — нормализованный спред (ask_0 - bid_0) / mid
         ch[9]: DeltaImb — скорость изменения Imbalance (first derivative)
         ch[10]: DeltaSpread — скорость изменения спреда
-        ch[11]: CumOFI — кумулятивный OFI внутри окна (сброс на 0 в начале окна)
-        ch[12]: ImbAccel — ускорение Imbalance (second derivative)
         """
         eps = 1e-8
 
@@ -1484,23 +1514,9 @@ class LOBDataset(Dataset):
         delta_spread = torch.diff(spread_1d, dim=0, prepend=torch.zeros(1, device=spread_1d.device))
         delta_spread_ch = delta_spread.unsqueeze(-1).expand(-1, 50)
 
-        # ch[11]: CumOFI — кумулятивный OFI внутри окна (сброс на 0 в начале каждого окна)
-        if ofi_precomputed is not None:
-            ofi_window = ofi_precomputed  # (seq_len,)
-            ofi_cum = ofi_window - ofi_window[0]
-        else:
-            # ofi_raw shape: (seq_len, 50), берём первый столбец
-            ofi_cum = torch.cumsum(ofi_raw[:, 0], dim=0)
-            ofi_cum = ofi_cum - ofi_cum[0]
-        cumofi_ch = ofi_cum.unsqueeze(-1).expand(-1, 50)
-
-        # ch[12]: ImbAccel — ускорение Imbalance (second derivative)
-        accel_imb = torch.diff(delta_imb, dim=0, prepend=torch.zeros(1, device=delta_imb.device))
-        accel_imb_ch = accel_imb.unsqueeze(-1).expand(-1, 50)
-
         return price_ch_raw, vol_ch_raw, imb_ch_raw, ofi_raw, vib_ch_raw, \
                ret_10_ch_raw, ret_50_ch_raw, ret_100_ch_raw, spread, \
-               delta_imb_ch, delta_spread_ch, cumofi_ch, accel_imb_ch
+               delta_imb_ch, delta_spread_ch
 
     def _compute_channels_for_normalization(self, data: Union[pl.DataFrame, List[int], np.ndarray]) -> pl.DataFrame:
         """
@@ -1548,17 +1564,17 @@ class LOBDataset(Dataset):
             vib_raw, pr_raw = None, None
             ofi_precomp = None
 
-        # Используем единый метод расчета (13 каналов после Задача 318)
+        # Используем единый метод расчета (11 каналов после Задача 319)
         p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw, \
-            di_raw, ds_raw, co_raw, ai_raw = self._calculate_6_channels_raw(
+            di_raw, ds_raw = self._calculate_6_channels_raw(
                 ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
             )
 
         channels = torch.cat([
             p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw,
-            di_raw, ds_raw, co_raw, ai_raw
+            di_raw, ds_raw
         ], dim=1).numpy()
-        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(650)])
+        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(550)])
 
     def _process_sample(self, x_raw, y, v, w, regime_id, ts, mid, idx=None, f_ret=None):
         # NaN protection (Задача 094-2)
@@ -1606,13 +1622,13 @@ class LOBDataset(Dataset):
         if idx is not None and hasattr(self, 'ofi_cache') and self.ofi_cache is not None:
             ofi_precomp = torch.from_numpy(self.ofi_cache[idx : idx + self.seq_len].copy()).float()
 
-        # Расчет сырых каналов (Единый источник правды, 13 каналов после Задача 318)
+        # Расчет сырых каналов (Единый источник правды, 11 каналов после Задача 319)
         p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw, \
-            di_raw, ds_raw, co_raw, ai_raw = self._calculate_6_channels_raw(
+            di_raw, ds_raw = self._calculate_6_channels_raw(
                 ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
             )
 
-        # Нормализация (Векторизованная, 13 каналов)
+        # Нормализация (Векторизованная, 11 каналов)
         price_ch = self.normalize_channel(p_raw, channel_idx=0)
         vol_ch = self.normalize_channel(v_raw, channel_idx=1)
         imb_ch = self.normalize_channel(i_raw, channel_idx=2)
@@ -1624,18 +1640,25 @@ class LOBDataset(Dataset):
         spread_ch = self.normalize_channel(sp_raw, channel_idx=8)
         delta_imb_ch = self.normalize_channel(di_raw, channel_idx=9)
         delta_spread_ch = self.normalize_channel(ds_raw, channel_idx=10)
-        cumofi_ch = self.normalize_channel(co_raw, channel_idx=11)
-        accel_imb_ch = self.normalize_channel(ai_raw, channel_idx=12)
 
-        # Собираем итоговый тензор (Seq, 13, 50)
+        # Собираем итоговый тензор (Seq, 11, 50)
         x_final = torch.stack([
             price_ch, vol_ch, imb_ch, ofi_ch, vib_ch,
             ret10_ch, ret50_ch, ret100_ch, spread_ch,
-            delta_imb_ch, delta_spread_ch, cumofi_ch, accel_imb_ch
+            delta_imb_ch, delta_spread_ch
         ], dim=1)
 
-        # Clipping для стабильности
-        x_final = torch.clamp(x_final, -5.0, 5.0)
+        # Защита 1: Разный клиппинг для разных каналов согласно статистике
+        # Каналы с высокой волатильностью (OFI, DeltaImb, DeltaSpread) ужесточем до [-3, 3]
+        # Остальные оставляем [-5, 5]
+        x_final = torch.clamp(x_final, -5.0, 5.0)  # Сначала общий клип
+        # Ужесточение для критических каналов
+        x_final[:, 3, :] = torch.clamp(x_final[:, 3, :], -3.0, 3.0)   # OFI
+        x_final[:, 9, :] = torch.clamp(x_final[:, 9, :], -3.0, 3.0)   # DeltaImb
+        x_final[:, 10, :] = torch.clamp(x_final[:, 10, :], -3.0, 3.0) # DeltaSpread
+
+        # Защита 2: Замена NaN/Inf на безопасные значения
+        x_final = torch.nan_to_num(x_final, nan=0.0, posinf=5.0, neginf=-5.0)
 
         # Расширенная диагностика (Задача 316)
         if idx is not None and 100 <= idx <= 101:
@@ -1647,7 +1670,7 @@ class LOBDataset(Dataset):
                     print(f"    {name}: mean={p.get('mean', 0.0):.6f}, std={p.get('std', 1.0):.6f}")
 
             channels_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread",
-                              "DeltaImb", "DeltaSpread", "CumOFI", "ImbAccel"]
+                              "DeltaImb", "DeltaSpread"]
             for i, name in enumerate(channels_names):
                 ch = x_final[:, i, :]
                 print(f"  Channel {i} ({name}) ПОСЛЕ CLAMP: min={ch.min():.4f}, max={ch.max():.4f}, mean={ch.mean():.4f}, std={ch.std():.4f}")
@@ -1663,9 +1686,23 @@ class LOBDataset(Dataset):
         }
         
         target = torch.tensor(y).long()
+
+        # ЗАЩИТА: Валидация target (должен быть в [0, 2])
+        if (target < 0).any() or (target > 2).any():
+            invalid_min, invalid_max = target.min().item(), target.max().item()
+            print(f"[WARN] Invalid target at idx={idx}: range [{invalid_min}, {invalid_max}]. Clamping to [0, 2].")
+            target = torch.clamp(target, 0, 2)
+
         ts_val = int(ts) if ts is not None else 0
         mid_val = float(mid) if mid is not None else 0.0
-        
+
+        # ЗАЩИТА: Проверка x_final на NaN/Inf
+        if torch.isnan(x_final).any() or torch.isinf(x_final).any():
+            nan_cnt = torch.isnan(x_final).sum().item()
+            inf_cnt = torch.isinf(x_final).sum().item()
+            print(f"[WARN] NaN/Inf in x_final at idx={idx}: nan={nan_cnt}, inf={inf_cnt}. Replacing with 0.")
+            x_final = torch.nan_to_num(x_final, nan=0.0, posinf=1e4, neginf=-1e4)
+
         return x_final, target, torch.tensor(ts_val).long(), torch.tensor(mid_val).float(), y, extra_data
 
     def get_class_distribution(self) -> np.ndarray:

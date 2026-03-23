@@ -239,10 +239,10 @@ class LiTModule(pl.LightningModule):
     LightningModule для обучения модели LiT.
     Обертка над nn.Module, добавляющая логику обучения, валидации и оптимизации.
     """
-    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, **model_params):
+    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, use_gradient_checkpointing=False, **model_params):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
-        self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, **model_params)
+        self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, use_gradient_checkpointing=use_gradient_checkpointing, **model_params)
         self.use_time_weighting = use_time_weighting
         self.use_regime_weighting = use_regime_weighting
         self.teacher_model = teacher_model
@@ -307,9 +307,14 @@ class LiTModule(pl.LightningModule):
                     else:
                         self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=effective_label_smoothing)
         
-        # Лосс для волатильности (Регрессия)
-        self.vol_criterion = nn.MSELoss(reduction='none' if (use_time_weighting or use_regime_weighting) else 'mean')
+        # Лосс для волатильности (Регрессия) - Задача 319: SmoothL1 для устойчивости
+        self.vol_criterion = nn.SmoothL1Loss(reduction='none' if (use_time_weighting or use_regime_weighting) else 'mean')
         self.vol_mae = nn.L1Loss()
+        self.vol_clamp_val = 10.0
+        self.max_grad_warn_prints = 30
+        self._grad_warn_prints = 0
+        self.max_vol_diag_prints = 20
+        self._vol_diag_prints = 0
 
         # Обучаемые веса для Multi-Task Loss (Uncertainty Weighting)
         self.log_var_cls = nn.Parameter(torch.zeros(1))
@@ -348,6 +353,10 @@ class LiTModule(pl.LightningModule):
         Вызывается в начале каждой эпохи обучения.
         Настраиваем activation hooks для мониторинга (Задача 158).
         """
+        # Сброс счетчиков диагностики (Задача 319)
+        self._grad_warn_prints = 0
+        self._vol_diag_prints = 0
+
         # Засекаем время начала эпохи
         import time
         self.epoch_start_time = time.time()
@@ -375,6 +384,39 @@ class LiTModule(pl.LightningModule):
                 handle.remove()
             delattr(self, 'activation_hooks')
 
+    def on_before_optimizer_step(self, optimizer):
+        """
+        Защита от NaN/Inf градиентов перед шагом оптимизатора.
+        Вызывается PyTorch Lightning автоматически перед optimizer.step().
+        """
+        # Задача 319 (Fix): Стабилизируем log_var параметры (Uncertainty Weighting)
+        # Ограничиваем их в диапазоне [-5, 5], чтобы precision не улетал в Inf
+        if hasattr(self, 'log_var_cls'):
+            self.log_var_cls.data = torch.clamp(self.log_var_cls.data, -5.0, 5.0)
+        if hasattr(self, 'log_var_vol'):
+            self.log_var_vol.data = torch.clamp(self.log_var_vol.data, -5.0, 5.0)
+
+        # Ограничиваем частоту вывода предупреждений для предотвращения зависания консоли
+        # Выводим только для первых max_grad_warn_prints проблемных параметров в батче
+        warn_count = 0
+        max_warns = 5  # порог для общего сообщения о количестве
+
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                # Объединенная проверка на non-finite (NaN или Inf)
+                if not torch.isfinite(param.grad).all():
+                    bad_count = (~torch.isfinite(param.grad)).sum().item()
+                    if self._grad_warn_prints < self.max_grad_warn_prints:
+                        print(f"[WARN] Non-finite gradient in {name} (count={bad_count}), sanitize with nan_to_num + clamp")
+                        self._grad_warn_prints += 1
+                    # Sanitize: NaN/Inf -> 0, затем clamp
+                    param.grad.data = torch.nan_to_num(param.grad.data, nan=0.0, posinf=0.0, neginf=0.0)
+                    param.grad.data = torch.clamp(param.grad.data, -1.0, 1.0)
+                    warn_count += 1
+
+        if warn_count > max_warns and self._grad_warn_prints < self.max_grad_warn_prints:
+            print(f"[WARN] Total {warn_count} parameters with non-finite gradients. Warnings suppressed for the rest.")
+
     def log_channel_statistics(self, batch, batch_idx):
         """
         Логирует статистику каналов ПОСЛЕ нормализации.
@@ -386,8 +428,9 @@ class LiTModule(pl.LightningModule):
         # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
         x, y, ts, mid, label, extra_data = batch
         
-        # x: (Batch, Seq, Channels, Levels) — 9 каналов после Задача 317
-        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread"]
+        # x: (Batch, Seq, Channels, Levels) — 11 каналов после Задача 319
+        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread",
+                          "DeltaImb", "DeltaSpread"]
         
         print("\n[ДИАГНОСТИКА] Статистика каналов ПОСЛЕ нормализации:")
         for ch_idx, ch_name in enumerate(channel_names):
@@ -411,24 +454,80 @@ class LiTModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
         x, y, ts, mid, label, extra_data = batch
-        
+
+        # ЗАЩИТА: Валидация меток (должны быть long и в диапазоне [0, 2])
+        if y.dtype not in [torch.long, torch.int64]:
+            print(f"[WARN] Labels dtype is {y.dtype}, converting to long")
+            y = y.long()
+        if (y < 0).any() or (y > 2).any():
+            invalid_min, invalid_max = y.min().item(), y.max().item()
+            print(f"[ERROR] Labels out of range [0,2]: min={invalid_min}, max={invalid_max}. Clamping.")
+            y = torch.clamp(y, 0, 2)
+
         # Извлекаем данные из extra_data
         vol_target = extra_data["vol"]
         weights = extra_data["weight"]
         regime_id = extra_data["regime_id"]
-        
+
+        # Логируем распределение меток в батче для диагностики (каждые 100 батчей)
+        if batch_idx % 100 == 0:
+            unique, counts = torch.unique(y, return_counts=True)
+            print(f"[BATCH {batch_idx}] Label counts: {dict(zip(unique.cpu().numpy(), counts.cpu().numpy()))}")
+
+            # Диагностика статистики входа (Задача: Численная стабильность)
+            print(f"[DIAG] Batch stats: min={x.min():.4f}, max={x.max():.4f}, mean={x.mean():.4f}, std={x.std():.4f}")
+            print(f"[DIAG] Contains NaN: {torch.isnan(x).any()}, Contains Inf: {torch.isinf(x).any()}")
+
         # Логируем статистику каналов для первого батча первой эпохи
         if self.current_epoch == 0 and batch_idx == 0:
             self.log_channel_statistics(batch, batch_idx)
-        
+
+        # Защита: Проверка и коррекция входных данных перед моделью
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            nan_count = torch.isnan(x).sum().item()
+            inf_count = torch.isinf(x).sum().item()
+            print(f"[WARN] NaN/Inf in input at batch {batch_idx} (nan={nan_count}, inf={inf_count}). Clipping to [-10, 10]")
+            x = torch.clamp(x, -10.0, 10.0)
+            # Дополнительная очистка после клиппинга
+            x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+
         # Задача 238: Применяем input noise injection во время обучения
         if self.input_noise_std > 0:
             from .lit_model import apply_input_noise
             x = apply_input_noise(x, std=self.input_noise_std)
-        
+
         # Выход модели теперь содержит логиты и предсказание волатильности
         logits, vol_pred = self(x, regime_id=regime_id)
         vol_pred = vol_pred.squeeze(-1)
+
+        # Задача 319: Диагностика + guard для vol_pred
+        if batch_idx <= 300 and batch_idx % 50 == 0 and self._vol_diag_prints < self.max_vol_diag_prints:
+            vol_pred_min = float(torch.nan_to_num(vol_pred, nan=0.0, posinf=0.0, neginf=0.0).min().detach().cpu())
+            vol_pred_max = float(torch.nan_to_num(vol_pred, nan=0.0, posinf=0.0, neginf=0.0).max().detach().cpu())
+            vol_t_min = float(torch.nan_to_num(vol_target, nan=0.0, posinf=0.0, neginf=0.0).min().detach().cpu())
+            vol_t_max = float(torch.nan_to_num(vol_target, nan=0.0, posinf=0.0, neginf=0.0).max().detach().cpu())
+            print(
+                f"[VOL_DIAG][BATCH {batch_idx}] "
+                f"finite(pred)={torch.isfinite(vol_pred).all().item()} finite(target)={torch.isfinite(vol_target).all().item()} "
+                f"pred[min,max]=({vol_pred_min:.4f},{vol_pred_max:.4f}) "
+                f"target[min,max]=({vol_t_min:.4f},{vol_t_max:.4f})"
+            )
+            self._vol_diag_prints += 1
+
+        if not torch.isfinite(vol_pred).all() or not torch.isfinite(vol_target).all():
+            if self._vol_diag_prints < self.max_vol_diag_prints:
+                print(f"[WARN] Non-finite vol tensors at batch {batch_idx}, applying nan_to_num")
+                self._vol_diag_prints += 1
+            vol_pred = torch.nan_to_num(vol_pred, nan=0.0, posinf=self.vol_clamp_val, neginf=-self.vol_clamp_val)
+            vol_target = torch.nan_to_num(vol_target, nan=0.0, posinf=self.vol_clamp_val, neginf=-self.vol_clamp_val)
+
+        # ЗАЩИТА: Проверка logits на NaN/Inf
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            nan_count = torch.isnan(logits).sum().item()
+            inf_count = torch.isinf(logits).sum().item()
+            print(f"[WARN] NaN/Inf in logits at step {self.global_step}: nan={nan_count}, inf={inf_count}. Skipping batch.")
+            self.zero_grad()
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
         
         # 1. Лосс классификации
         if self.is_distillation:
@@ -481,8 +580,18 @@ class LiTModule(pl.LightningModule):
                 else:
                     loss_cls = loss_cls_raw
             
-        # 2. Лосс волатильности (MSE) - одинаков для обоих режимов
-        loss_vol_raw = self.vol_criterion(vol_pred, vol_target)
+        # 2. Лосс волатильности (MSE/SmoothL1) - одинаков для обоих режимов
+        # Задача 319: мягкий clamp перед вычислением loss для стабильности
+        vol_pred_loss = torch.clamp(vol_pred.float(), -self.vol_clamp_val, self.vol_clamp_val)
+        vol_target_loss = torch.clamp(vol_target.float(), -self.vol_clamp_val, self.vol_clamp_val)
+        loss_vol_raw = self.vol_criterion(vol_pred_loss, vol_target_loss)
+
+        # Задача 319: Диагностика loss_vol_raw
+        if batch_idx <= 300 and batch_idx % 50 == 0 and self._vol_diag_prints < self.max_vol_diag_prints:
+            lv = torch.nan_to_num(loss_vol_raw, nan=0.0, posinf=0.0, neginf=0.0)
+            print(f"[VOL_LOSS_DIAG][BATCH {batch_idx}] loss_vol_raw[min,max]=({float(lv.min().detach().cpu()):.6f},{float(lv.max().detach().cpu()):.6f})")
+            self._vol_diag_prints += 1
+
         if self.use_time_weighting or self.use_regime_weighting:
             combined_weights = weights
             if self.use_regime_weighting and self.regime_weights is not None and regime_id is not None:
@@ -509,6 +618,10 @@ class LiTModule(pl.LightningModule):
             
         # 3. Комбинированный Multi-Task Loss (с весами неопределенности)
         # Задача 304 (Fix): Используем формулу Kendall et al. (0.5 * log_var)
+        # Задача 319 (Fix): Ограничиваем log_var для предотвращения взрывных градиентов
+        self.log_var_cls.data = torch.clamp(self.log_var_cls.data, -5.0, 5.0)
+        self.log_var_vol.data = torch.clamp(self.log_var_vol.data, -5.0, 5.0)
+        
         precision_cls = torch.exp(-self.log_var_cls)
         precision_vol = torch.exp(-self.log_var_vol)
         
@@ -516,8 +629,9 @@ class LiTModule(pl.LightningModule):
                precision_vol * loss_vol + 0.5 * self.log_var_vol + \
                reg_loss
         
-        # Задача 305-2: Защита от NaN в градиентах
+        # Задача 305-2: Защита от NaN/Inf в loss
         if not torch.isfinite(loss):
+            print(f"[WARN] Non-finite loss at step {self.global_step}: {loss.item()}. Zeroing grads and skipping.")
             self.zero_grad()
             return torch.tensor(0.0, device=loss.device, requires_grad=True)
         
@@ -1216,6 +1330,7 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         num_horizons=num_horizons,
         horizon_weights=horizon_weights,
         use_horizon_embedding=args.use_horizon_embedding,
+        use_gradient_checkpointing=args.use_gradient_checkpointing,  # OOM фикс
         scheduler=scheduler,
         div_factor=div_factor,
         final_div_factor=final_div_factor,
@@ -1256,16 +1371,24 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         name=f"seq_len_{seq_len}"
     )
     
+    # Выбор precision в соответствии с args.precision_mode (Задача 319)
+    if args.precision_mode == "32":
+        trainer_precision = 32
+    elif args.precision_mode == "16-mixed":
+        trainer_precision = "16-mixed"
+    else:  # auto
+        trainer_precision = "16-mixed" if torch.cuda.is_available() else 32
+
     trial_trainer = pl.Trainer(
         max_epochs=min(20, args.epochs),  # Ограничиваем эпохи для быстрого поиска
         callbacks=trial_callbacks,
         logger=trial_logger,
         accelerator="auto",
         devices=1,
-        precision="16-mixed" if torch.cuda.is_available() else 32,
+        precision=trainer_precision,
         enable_progress_bar=False,  # Отключаем прогресс-бар для чистоты вывода
         log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
-        gradient_clip_val=0.5       # Задача 304: Защита от NaN
+        accumulate_grad_batches=args.accumulate_grad_batches,  # Gradient accumulation
     )
     
     # Обучаем модель
@@ -1401,8 +1524,9 @@ def update_model_metadata(base_path, symbol, args, winsor_limits, norm_params_pa
 def train():
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
-    parser.add_argument("--seq_len", type=int, default=200, help="Sequence length for the model (Задача 318.6: 200 = 2:1 ratio к горизонту)")
+    parser.add_argument("--seq_len", type=int, default=100, help="Sequence length for the model (Задача 319: 100 = 5000 токенов через 50 уровней)")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+    parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Gradient accumulation steps (OOM фикс: позволяет использовать эффективно больший batch size)")
     parser.add_argument("--epochs", type=int, default=100, help="Maximum number of epochs")
     parser.add_argument("--horizon", type=int, default=100, help="Prediction horizon for labels (single horizon, deprecated)")
     parser.add_argument("--horizons", type=str, default=None, help="Comma-separated list of horizons for multi-horizon prediction (e.g., '10,50,100')")
@@ -1412,7 +1536,7 @@ def train():
     parser.add_argument("--class_weight_smooth", type=float, default=1.0, help="Smoothing for class weights calculation")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing for CrossEntropyLoss")
     parser.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
-    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Gamma parameter for Focal Loss")
+    parser.add_argument("--focal_gamma", type=float, default=3.0, help="Gamma parameter for Focal Loss (higher = harder example mining)")
     parser.add_argument("--past_returns_lags", type=str, default="10,50,100", help="Comma-separated list of lags for past returns (e.g., '10,50,100')")
     parser.add_argument("--activation", type=str, default="gelu_exact", choices=["relu", "gelu_exact", "gelu_tanh", "silu"], help="Activation function type")
     
@@ -1421,6 +1545,7 @@ def train():
     parser.add_argument("--nhead", type=int, default=6, help="Number of attention heads")
     parser.add_argument("--num_layers", type=int, default=3, help="Number of transformer layers")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
+    parser.add_argument("--use_gradient_checkpointing", action="store_true", help="OOM фикс: использовать gradient checkpointing для экономии памяти (по умолчанию выключено)")
     
     # Параметры загрузки данных (Задача 094)
     # ПРИМЕЧАНИЕ: Режимы "streaming" и "memmap" отключены для упрощения кода.
@@ -1440,8 +1565,8 @@ def train():
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay for AdamW optimizer")
     
     # Параметры Adaptive Gradient Clipping (Задача 154)
-    parser.add_argument("--clip_mode", type=str, default="none", choices=["none", "norm", "agc"], help="Gradient clipping mode: none (no clipping), norm (global norm), agc (adaptive per-layer)")
-    parser.add_argument("--clip_val", type=float, default=0.01, help="Clipping threshold (for norm: usually 1.0, for agc: 0.01-0.1)")
+    parser.add_argument("--clip_mode", type=str, default="norm", choices=["none", "norm", "agc"], help="Gradient clipping mode: none (no clipping), norm (global norm), agc (adaptive per-layer)")
+    parser.add_argument("--clip_val", type=float, default=0.5, help="Clipping threshold (for norm: 0.5 recommended, for agc: 0.01-0.1)")
     
     # Параметры временного взвешивания (Задача 123)
     parser.add_argument("--use_time_weighting", action="store_true", help="Enable time-decay weighting")
@@ -1497,7 +1622,16 @@ def train():
     parser.add_argument("--trade_imb_windows", type=str, nargs="+", default=["1s", "5s", "15s", "60s"], help="Windows for trade imbalance aggregation")
     parser.add_argument("--trade_imb_agg", type=str, default="vol", choices=["vol", "count"], help="Aggregation type for imbalance: vol (volume) or count (number of trades)")
     parser.add_argument("--trade_noise_filter_pct", type=float, default=0.05, help="Noise filter percentage (trades smaller than this % of median size are excluded)")
-    
+
+    # Параметры Precision Mode для A/B отладки (Задача 319)
+    parser.add_argument(
+        "--precision_mode",
+        type=str,
+        default="auto",
+        choices=["auto", "32", "16-mixed"],
+        help="Precision mode for A/B debug: auto | 32 | 16-mixed"
+    )
+
     # Параметры Curvature Regularization (Задача 238)
     parser.add_argument("--use_curvature_reg", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable curvature regularization penalty")
     parser.add_argument("--curvature_lambda", type=float, default=1e-4, help="Curvature penalty coefficient (recommended: 1e-4 to 1e-3)")
@@ -1547,11 +1681,11 @@ def train():
     past_returns_lags = [int(x.strip()) for x in args.past_returns_lags.split(",")]
     n_past_returns = len(past_returns_lags)
 
-    # Задача 318: 13 каналов (+DeltaImb, DeltaSpread, CumOFI, ImbAccel)
-    in_channels = 13
+    # Задача 319: 11 каналов (без CumOFI, ImbAccel)
+    in_channels = 11
 
     print(f"Using past returns lags: {past_returns_lags}")
-    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel)")
+    print(f"Total input channels: {in_channels} (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread)")
     print(f"Data loading mode: {args.data_mode}")
 
     # 1. Фиксируем seed для воспроизводимости
@@ -2172,16 +2306,24 @@ def train():
     for cls, count in zip(classes, counts_list):
         if 0 <= cls < 3:
             counts[int(cls)] = count
-    
+
     total_samples = np.sum(counts)
     smoothing = args.class_weight_smooth
     n_classes = 3
-    
+
     # Формула: weights = total / (n_classes * (counts + smoothing))
     weights = total_samples / (n_classes * (counts + smoothing))
     # Нормализуем
     weights = weights / np.mean(weights)
-    
+
+    # УСИЛЕНИЕ: Если Flat класс доминирует (>85%), усилием веса для Up/Down
+    flat_ratio = counts[0] / total_samples if total_samples > 0 else 1.0
+    if flat_ratio > 0.85:
+        amplification = 5.0
+        print(f"[ADJUST] Flat class dominating: {flat_ratio:.1%}. Amplifying Up/Down weights by {amplification}x.")
+        weights[1] *= amplification
+        weights[2] *= amplification
+
     print(f"Effective class weights: [Flat: {weights[0]:.2f}, Up: {weights[1]:.2f}, Down: {weights[2]:.2f}]")
 
     # 9. Инициализация модели
@@ -2257,6 +2399,7 @@ def train():
             num_horizons=num_horizons,
             horizon_weights=horizon_weights,
             use_horizon_embedding=args.use_horizon_embedding,
+            use_gradient_checkpointing=args.use_gradient_checkpointing,  # OOM фикс
             # Параметры scheduler
             scheduler=args.scheduler,
             div_factor=args.div_factor,
@@ -2335,6 +2478,7 @@ def train():
             num_horizons=num_horizons,
             horizon_weights=horizon_weights,
             use_horizon_embedding=args.use_horizon_embedding,
+            use_gradient_checkpointing=args.use_gradient_checkpointing,  # OOM фикс
             # Параметры scheduler
             scheduler=args.scheduler,
             div_factor=args.div_factor,
@@ -2417,16 +2561,23 @@ def train():
     log_hparams(logger.experiment, hparams_dict, {})
 
     # 11. Trainer
+    # Выбор precision в соответствии с args.precision_mode (Задача 319)
+    if args.precision_mode == "32":
+        trainer_precision = 32
+    elif args.precision_mode == "16-mixed":
+        trainer_precision = "16-mixed"
+    else:  # auto
+        trainer_precision = "16-mixed" if torch.cuda.is_available() else 32
+
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         callbacks=callbacks,
         logger=logger,
         accelerator="auto",
         devices=1,
-        precision="32",              # Задача 305-2: Временная мера для диагностики
+        precision=trainer_precision,  # OOM фикс: mixed precision уменьшает потребление памяти вдвое
         log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
-        gradient_clip_val=0.5,      # Задача 304: Защита от NaN
-        gradient_clip_algorithm="norm", # Задача 305-2: Явный алгоритм клиппинга
+        accumulate_grad_batches=args.accumulate_grad_batches,  # OOM фикс: gradient accumulation
         enable_progress_bar=False   # Отключаем прогресс-бар, чтобы не было повторяющихся логов
     )
     
@@ -2737,6 +2888,7 @@ def train():
                 num_horizons=num_horizons,
                 horizon_weights=horizon_weights,
                 use_horizon_embedding=args.use_horizon_embedding,
+                use_gradient_checkpointing=args.use_gradient_checkpointing,  # OOM фикс
                 dropout=fold_config.dropout,
                 multi_task=fold_config.multi_task,
                 scheduler=args.scheduler,
@@ -2781,16 +2933,24 @@ def train():
             fold_logger = TensorBoardLogger("tb_logs", name=f"lit_{args.symbol}_fold{fold_idx + 1}")
             
             # Создаем trainer для фолда
+            # Выбор precision в соответствии с args.precision_mode (Задача 319)
+            if args.precision_mode == "32":
+                trainer_precision = 32
+            elif args.precision_mode == "16-mixed":
+                trainer_precision = "16-mixed"
+            else:  # auto
+                trainer_precision = "16-mixed" if torch.cuda.is_available() else 32
+
             fold_trainer = pl.Trainer(
                 max_epochs=args.epochs,
                 callbacks=fold_callbacks,
                 logger=fold_logger,
                 accelerator="auto",
                 devices=1,
-                precision="16-mixed" if torch.cuda.is_available() else 32,
+                precision=trainer_precision,
                 enable_progress_bar=False,  # Отключаем прогресс-бар
                 log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
-                gradient_clip_val=0.5       # Задача 304: Защита от NaN
+                accumulate_grad_batches=args.accumulate_grad_batches,  # Gradient accumulation
             )
             
             fold_trainer.symbol = args.symbol
@@ -3156,9 +3316,9 @@ def train():
                     logger=logger,
                     callbacks=[checkpoint_callback],
                     enable_progress_bar=False,  # Отключаем прогресс-бар
-                    gradient_clip_val=0.5,      # Задача 304: Защита от NaN
                     deterministic=False,
-                    log_every_n_steps=100       # Задача 304: Уменьшаем шаг логирования
+                    log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
+                    accumulate_grad_batches=args.accumulate_grad_batches,  # Gradient accumulation
                 )
                 
                 finetune_trainer.fit(model, train_loader, val_loader)

@@ -30,28 +30,27 @@ except ImportError:
 
 class ExportWrapper(nn.Module):
     """
-    Обертка для экспорта модели с входом формы (B, S, 450).
-    Преобразует плоский вход (B, S, 450) в (B, S, in_channels, n_levels)
+    Обертка для экспорта модели с входом формы (B, S, 550).
+    Преобразует плоский вход (B, S, 550) в (B, S, in_channels, n_levels)
     для совместимости с LOBPatching внутри модели.
 
-    450 = 50 уровней * 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread) (Задача 317)
+    550 = 50 уровней * 11 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread) (Задача 319)
     """
-    def __init__(self, model, in_channels=9, n_levels=50):
+    def __init__(self, model, in_channels=11, n_levels=50):
         super().__init__()
         self.model = model
-        self.in_channels = in_channels  # 9 каналов (Задача 317)
+        self.in_channels = in_channels  # 11 каналов (Задача 319)
         self.n_levels = n_levels
 
     def forward(self, x):
         """
-        x: (Batch, Seq, 450) - плоский входной тензор
-        450 = 9 каналов * 50 уровней (Задача 317)
+        x: (Batch, Seq, 550) - плоский входной тензор
+        550 = 11 каналов * 50 уровней (Задача 319)
         """
         b, s, f = x.shape
 
-        # Reshape (B, S, 450) -> (B, S, 9, 50)
-        # 9 каналов: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread
-        x_reshaped = x.view(b, s, self.in_channels, self.n_levels)  # (B, S, 9, 50)
+        # Reshape (B, S, 550) -> (B, S, 11, 50)
+        x_reshaped = x.view(b, s, self.in_channels, self.n_levels)
 
         return self.model(x_reshaped)
 
@@ -185,15 +184,15 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         
         model = ModelWithTemperature(model, temperature)
     
-    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 450) -> (B, S, 9, 50)
-    # Задача 317: 450 = 50 уровней * 9 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread)
-    in_channels = 9  # 9 каналов (Задача 317)
+    # 4. Обернуть модель в ExportWrapper для преобразования входа (B, S, 550) -> (B, S, 11, 50)
+    # Задача 319: 550 = 50 уровней * 11 каналов (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread)
+    in_channels = 11  # 11 каналов (Задача 319)
     n_levels = 50  # Стандартное значение
     export_model = ExportWrapper(model, in_channels=in_channels, n_levels=n_levels)
     export_model.eval()
 
-    # 5. Dummy input - форма (1, 100, 450) (Задача 317)
-    dummy_input = torch.randn(1, seq_len, 450)
+    # 5. Dummy input - форма (1, 100, 550) (Задача 319)
+    dummy_input = torch.randn(1, seq_len, 550)
     
     # Проверяем, использует ли модель regime embedding
     num_regimes = getattr(model, 'num_regimes', 0)
@@ -288,38 +287,38 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
     num_horizons = getattr(model, 'num_horizons', 1)
     use_horizon_embedding = getattr(model, 'use_horizon_embedding', False)
     
-    # Согласно плану 053: входной формат (B, S, 150) = (B, S, 3, 50)
-    # где 3 = каналы (Price, Volume, Imbalance)
+    # Согласно задаче 319: входной формат (B, S, 550) = (B, S, 11, 50)
+    # где 11 = каналы (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread)
     # 50 = уровни стакана
-    
-        # Структурируем metadata для совместимости с Rust кодом (Задача 311)
-        model_params = {
-            "seq_len": seq_len,
-            "n_levels": n_levels,
-            "in_channels": in_channels,  # 9 каналов согласно задаче 317
-            "past_returns_lags": past_returns_lags,
-        }
-        
-        # Сохраняем дополнительные метаданные для отладки и мониторинга
-        export_metadata = {
-            "model_name": "LiT",
-            "activation": activation,
-            "onnx_file": Path(output_path).name,
-            "temperature_embedded": embed_temperature,
-            "precision": final_precision,
-            "quantized": use_fp16,
-            "num_regimes": num_regimes,
-            "regime_embedding_dim": regime_embedding_dim,
-            "use_regime_embedding": use_regime,
-            "sparsity": float(sparsity),
-            "pruned": sparsity > 0.01,
-            "num_horizons": num_horizons,
-            "use_horizon_embedding": use_horizon_embedding,
-            "multi_horizon": num_horizons > 1,
-            "input_shape": [1, seq_len, 450],
-            "input_format": "flat_lob_9ch",
-            "input_description": "Flat LOB buffer: 50 levels * 9 channels (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread) = 450 features"
-        }
+
+    # Структурируем metadata для совместимости с Rust кодом (Задача 311)
+    model_params = {
+        "seq_len": seq_len,
+        "n_levels": n_levels,
+        "in_channels": in_channels,  # 11 каналов согласно задаче 319
+        "past_returns_lags": past_returns_lags,
+    }
+
+    # Сохраняем дополнительные метаданные для отладки и мониторинга
+    export_metadata = {
+        "model_name": "LiT",
+        "activation": activation,
+        "onnx_file": Path(output_path).name,
+        "temperature_embedded": embed_temperature,
+        "precision": final_precision,
+        "quantized": use_fp16,
+        "num_regimes": num_regimes,
+        "regime_embedding_dim": regime_embedding_dim,
+        "use_regime_embedding": use_regime,
+        "sparsity": float(sparsity),
+        "pruned": sparsity > 0.01,
+        "num_horizons": num_horizons,
+        "use_horizon_embedding": use_horizon_embedding,
+        "multi_horizon": num_horizons > 1,
+        "input_shape": [1, seq_len, 550],
+        "input_format": "flat_lob_11ch",
+        "input_description": "Flat LOB buffer: 50 levels * 11 channels (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread) = 550 features"
+    }
     
     # 9. Экспорт параметров HMM (regime_config.json) - Задача 155
     regime_config_path = Path(output_path).parent / "regime_config.json"
@@ -363,9 +362,9 @@ def export(input_path, output_path, embed_temperature=False, use_fp16=False):
         means, stds, medians, iqrs = [], [], [], []
         winsor_limits_vals = []
         
-        # Задача 317: параметры нормализатора имеют имена feat_0..feat_449 (9 каналов * 50 уровней)
+        # Задача 319: параметры нормализатора имеют имена feat_0..feat_549 (11 каналов * 50 уровней)
         # Rust ожидает именно этот порядок
-        for i in range(450):
+        for i in range(550):
             feat_name = f"feat_{i}"
             p = norm_params.get(feat_name, {})
             m = p.get("mean", 0.0)
