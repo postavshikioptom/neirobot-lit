@@ -35,7 +35,8 @@
       "Bash(pip list:*)",
       "Bash(conda list:*)",
       "Bash(find . -name python.exe -path */Scripts/*)",
-      "Bash(ls -la docs/*.md)"
+      "Bash(ls -la docs/*.md)",
+      "Bash(git add:*)"
     ]
   },
   "enabledMcpjsonServers": [

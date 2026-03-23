@@ -720,7 +720,12 @@ class LOBDataset(Dataset):
         self.use_symmetric_flip = use_symmetric_flip
         self.volume_jitter_range = volume_jitter_range
         self.generator = torch.Generator().manual_seed(aug_seed)
-        
+
+        # Задача 320.5: Диагностика saturation каналов
+        self.channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread", "DeltaImb", "DeltaSpread"]
+        self._clip_diag_prints = 0
+        self.max_clip_diag_prints = 2  # Ограничиваем логирование первыми 2 сэмплами
+
         self.price_cols, self.vol_cols, self.ask_cols, self.bid_cols = _compute_augmentation_indices(self.n_levels)
         
         if class_weights is not None:
@@ -1648,6 +1653,9 @@ class LOBDataset(Dataset):
             delta_imb_ch, delta_spread_ch
         ], dim=1)
 
+        # Задача 320.5: Сохраняем копию до clamp для диагностики saturation
+        x_pre_clip = x_final.clone()
+
         # Защита 1: Разный клиппинг для разных каналов согласно статистике
         # Каналы с высокой волатильностью (OFI, DeltaImb, DeltaSpread) ужесточем до [-3, 3]
         # Остальные оставляем [-5, 5]
@@ -1657,8 +1665,16 @@ class LOBDataset(Dataset):
         x_final[:, 9, :] = torch.clamp(x_final[:, 9, :], -3.0, 3.0)   # DeltaImb
         x_final[:, 10, :] = torch.clamp(x_final[:, 10, :], -3.0, 3.0) # DeltaSpread
 
+        # Сохраняем пост-клип версию (перед nan_to_num) для диагностики
+        x_post_clip = x_final.clone()
+
         # Защита 2: Замена NaN/Inf на безопасные значения
         x_final = torch.nan_to_num(x_final, nan=0.0, posinf=5.0, neginf=-5.0)
+
+        # Логирование saturation для отладки (только для ограниченного числа сэмплов)
+        if idx is not None and self._clip_diag_prints < self.max_clip_diag_prints:
+            self._log_clip_saturation(x_pre_clip, x_post_clip, idx)
+            self._clip_diag_prints += 1
 
         # Расширенная диагностика (Задача 316)
         if idx is not None and 100 <= idx <= 101:
@@ -1704,6 +1720,42 @@ class LOBDataset(Dataset):
             x_final = torch.nan_to_num(x_final, nan=0.0, posinf=1e4, neginf=-1e4)
 
         return x_final, target, torch.tensor(ts_val).long(), torch.tensor(mid_val).float(), y, extra_data
+
+    def _log_clip_saturation(self, x_pre: torch.Tensor, x_post: torch.Tensor, idx: int):
+        """
+        Логирует статистику saturation (доля значений, вышедших за лимиты) для каналов.
+        x_pre: тензор до clamp (seq, ch, level)
+        x_post: тензор после clamp (до nan_to_num)
+        """
+        print(f"\n[CLIP DIAG] Sample idx={idx} saturation report:")
+        # Перемещаем на CPU для вычислений
+        x_pre = x_pre.cpu()
+        x_post = x_post.cpu()
+        for ch_idx, ch_name in enumerate(self.channel_names):
+            pre_flat = x_pre[:, ch_idx, :]
+            post_flat = x_post[:, ch_idx, :]
+            # Определяем лимит для канала
+            limit = 3.0 if ch_idx in (3, 9, 10) else 5.0
+
+            below = (pre_flat < -limit).sum().item()
+            above = (pre_flat > limit).sum().item()
+            total = pre_flat.numel()
+            pct_below = below / total * 100 if total > 0 else 0.0
+            pct_above = above / total * 100 if total > 0 else 0.0
+            pct_total = (below + above) / total * 100 if total > 0 else 0.0
+
+            pre_min = pre_flat.min().item()
+            pre_max = pre_flat.max().item()
+            pre_mean = pre_flat.mean().item()
+            pre_std = pre_flat.std().item()
+            post_min = post_flat.min().item()
+            post_max = post_flat.max().item()
+            post_mean = post_flat.mean().item()
+            post_std = post_flat.std().item()
+
+            print(f"  Channel {ch_idx} ({ch_name}): limit={limit}, %below={pct_below:.2f}, %above={pct_above:.2f}, %total={pct_total:.2f}")
+            print(f"    pre: min={pre_min:.4f}, max={pre_max:.4f}, mean={pre_mean:.4f}, std={pre_std:.4f}")
+            print(f"    post: min={post_min:.4f}, max={post_max:.4f}, mean={post_mean:.4f}, std={post_std:.4f}")
 
     def get_class_distribution(self) -> np.ndarray:
         if self.data_mode == "streaming":

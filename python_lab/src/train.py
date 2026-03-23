@@ -360,14 +360,17 @@ class LiTModule(pl.LightningModule):
         # Засекаем время начала эпохи
         import time
         self.epoch_start_time = time.time()
-        
+
+        # Логирование начала training epoch (Задача 320.1)
+        print(f"\n[TRAIN] Epoch {self.current_epoch} started")
+
         # Получаем параметры из hparams или используем значения по умолчанию
         tb_hist_freq = self.hparams.get("tb_hist_freq", 10)
-        
+
         if self.logger and hasattr(self.logger, 'experiment'):
             from .utils import setup_activation_hooks
             writer = self.logger.experiment
-            
+
             # Настраиваем hooks (они будут автоматически удалены после эпохи)
             self.activation_hooks = setup_activation_hooks(
                 self.model, writer, self.current_epoch, hist_freq=tb_hist_freq
@@ -383,6 +386,12 @@ class LiTModule(pl.LightningModule):
             for handle in self.activation_hooks:
                 handle.remove()
             delattr(self, 'activation_hooks')
+
+        # Логирование завершения training epoch (Задача 320.1)
+        import time
+        epoch_time = time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
+        epoch_time_str = f"{int(epoch_time // 60)}m {int(epoch_time % 60)}s"
+        print(f"\n[TRAIN] Epoch {self.current_epoch} completed in {epoch_time_str}")
 
     def on_before_optimizer_step(self, optimizer):
         """
@@ -652,10 +661,31 @@ class LiTModule(pl.LightningModule):
         
         return loss
 
+    def on_validation_epoch_start(self):
+        """
+        Вызывается перед началом validation epoch.
+        Логирует время начала и тип фазы (sanity/regular).
+        """
+        import time
+        self.validation_start_time = time.time()
+        is_sanity = bool(getattr(self.trainer, 'sanity_checking', False))
+        phase = 'SANITY' if is_sanity else 'VAL'
+        print(f"\n[{phase}] Epoch {self.current_epoch} validation started")
+
     def validation_step(self, batch, batch_idx):
+        # Логирование прогресса валидации (Задача 320.1)
+        is_sanity = bool(getattr(self.trainer, 'sanity_checking', False))
+        phase = 'SANITY' if is_sanity else 'VAL'
+        val_batch_log_interval = self.hparams.get('val_batch_log_interval', 100)
+
+        if batch_idx == 0:
+            print(f"[{phase}] first validation batch received")
+        elif val_batch_log_interval > 0 and batch_idx % val_batch_log_interval == 0:
+            print(f"[{phase}] batch {batch_idx}")
+
         # Распаковываем новый формат батча (features, target, timestamp, mid_price, label, extra_data)
         x, y, ts, mid, label, extra_data = batch
-        
+
         # Извлекаем данные из extra_data
         vol_target = extra_data["vol"]
         regime_id = extra_data["regime_id"]
@@ -720,6 +750,31 @@ class LiTModule(pl.LightningModule):
         return loss_cls + loss_vol
 
     def on_validation_epoch_end(self):
+        # Логирование входа в epoch_end (Задача 320.1)
+        import time
+        is_sanity = bool(getattr(self.trainer, 'sanity_checking', False))
+        phase = 'SANITY' if is_sanity else 'VAL'
+
+        print(f"\n[{phase}] Entering on_validation_epoch_end, samples collected: {len(self.val_y_true)}")
+
+        # Засекаем время начала epoch_end
+        epoch_end_start_time = time.time()
+
+        # Guard: нет данных?
+        if not self.val_y_true:
+            print(f"[{phase}] No validation outputs collected; skipping epoch_end")
+            return
+
+        # Логируем длительность validation loop
+        if hasattr(self, 'validation_start_time'):
+            val_loop_time = time.time() - self.validation_start_time
+            val_loop_str = f"{int(val_loop_time // 60)}m {int(val_loop_time % 60)}s"
+            print(f"[{phase}] Validation loop took {val_loop_str}, proceeding with epoch_end processing")
+
+        # Защита от тяжелых артефактов в sanity-check и epoch 0 (Задача 320.3)
+        skip_epoch0_artifacts = self.hparams.get('skip_epoch0_artifacts', True) and self.current_epoch == 0
+        skip_heavy_artifacts = is_sanity or skip_epoch0_artifacts
+
         # 1. Объединяем накопленные результаты
         y_true = np.concatenate(self.val_y_true)
         y_pred = np.concatenate(self.val_y_pred)
@@ -801,14 +856,15 @@ class LiTModule(pl.LightningModule):
                   f"Macro-F1={metrics['f1_macro']:.4f}, "
                   f"ECE={ece:.4f}, MCE={mce:.4f}")
             
-            # Сохраняем Reliability Diagram каждые 20 эпох
-            if self.current_epoch % 20 == 0:
+            # Сохраняем Reliability Diagram каждые 20 эпох (Условно, Задача 320.3)
+            if (self.hparams.get('enable_epoch_end_plots', False) and not skip_heavy_artifacts
+                    and self.current_epoch % 20 == 0):
                 # Получаем symbol из trainer (если доступен)
                 symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
                 base_path = Path(__file__).parent.parent.parent
                 reports_dir = base_path / "reports" / symbol
                 reports_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 save_path = reports_dir / f"reliability_diagram_epoch_{self.current_epoch}.png"
                 plot_reliability_diagram(bin_data, ece, mce, str(save_path))
             
@@ -826,16 +882,17 @@ class LiTModule(pl.LightningModule):
             # TensorBoard визуализация (Задача 158)
             if self.logger and hasattr(self.logger, 'experiment'):
                 writer = self.logger.experiment
-                
-                # Confusion Matrix через add_figure (каждые 20 эпох)
-                if self.current_epoch % 20 == 0:
+
+                # Confusion Matrix через add_figure (каждые 20 эпох) - Условно (320.3)
+                if (self.hparams.get('enable_epoch_end_plots', False) and not skip_heavy_artifacts
+                        and self.current_epoch % 20 == 0):
                     from .utils import plot_confusion_matrix_tensorboard, plot_pr_curves_tensorboard
-                    
+
                     class_names = ["Flat", "Up", "Down"]
                     plot_confusion_matrix_tensorboard(
                         y_true, y_pred, class_names, writer, self.current_epoch
                     )
-                    
+
                     # PR-кривые (используем softmax вероятности из logits)
                     y_pred_probs = torch.softmax(logits, dim=1).numpy()
                     plot_pr_curves_tensorboard(
@@ -877,22 +934,25 @@ class LiTModule(pl.LightningModule):
         if self.logger and hasattr(self.logger, 'experiment'):
             writer = self.logger.experiment
             
-            # Логируем градиенты (каждую эпоху)
-            from .utils import log_gradient_norms
-            log_gradient_norms(self.model, writer, self.current_epoch)
+            # Логируем градиенты (каждую эпоху) - не в sanity (Задача 320.3)
+            if not is_sanity:
+                from .utils import log_gradient_norms
+                log_gradient_norms(self.model, writer, self.current_epoch)
             
-            # Логируем embeddings для TensorBoard Projector (каждые 30 эпох)
-            if self.current_epoch % 30 == 0:
+            # Логируем embeddings для TensorBoard Projector (каждые 30 эпох) - Условно (320.3)
+            if (self.hparams.get('enable_tb_embeddings', False) and not skip_heavy_artifacts
+                    and self.current_epoch % 30 == 0):
                 from .utils import log_embeddings
-                
+
                 # Получаем параметры из hparams
                 tb_embedding_samples = self.hparams.get("tb_embedding_samples", 1000)
-                
-                # Используем validation dataloader
-                val_dataloader = self.trainer.val_dataloaders
+
+                # Используем validation dataloader (берём первый если список)
+                val_dataloaders = self.trainer.val_dataloaders
+                val_dataloader = val_dataloaders[0] if isinstance(val_dataloaders, (list, tuple)) else val_dataloaders
                 if val_dataloader is not None:
                     log_embeddings(
-                        self.model, val_dataloader, writer, 
+                        self.model, val_dataloader, writer,
                         self.current_epoch, max_samples=tb_embedding_samples
                     )
         
@@ -913,6 +973,11 @@ class LiTModule(pl.LightningModule):
         self.conf_matrix.reset()
         self.val_f_ret.clear()
         self.val_imbalance.clear()
+
+        # Логирование завершения on_validation_epoch_end (Задача 320.1)
+        epoch_end_duration = time.time() - epoch_end_start_time
+        epoch_end_str = f"{int(epoch_end_duration // 60)}m {int(epoch_end_duration % 60)}s"
+        print(f"\n[{phase}] on_validation_epoch_end completed in {epoch_end_str}")
 
     def _log_extended_analytics(self, y_true, y_pred, logits, f_ret, imbalance):
         """
@@ -1154,6 +1219,8 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
     Возвращает:
     - val_mcc: MCC на валидационном наборе
     """
+    from torch.utils.data import Subset  # Для хронологического split
+
     # Предлагаем seq_len для поиска (Задача 055, пункт 3)
     seq_len = trial.suggest_int("seq_len", 10, 100, step=10)
     print(f"\n[Optuna Trial] Testing seq_len={seq_len}")
@@ -1254,38 +1321,18 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
             **time_weighting_params
         )
         
-        # Разделяем на train/val
+        # Разделяем на train/val (хронологически, без look-ahead bias)
         total_len = len(trial_dataset)
         train_size = int(0.8 * total_len)
         val_size = total_len - train_size
-        
-        trial_train_ds, trial_val_ds = random_split(trial_dataset, [train_size, val_size])
+
+        trial_train_ds = TrainSubset(trial_dataset, list(range(0, train_size)))
+        trial_val_ds = Subset(trial_dataset, list(range(train_size, total_len)))
         
         # Создаем DataLoaders
-        # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
-        num_workers = 4  # Всегда 4 для memory режима
-        worker_init_fn = None  # Не требуется для memory режима
-        # num_workers = 2 if args.data_mode == "streaming" else 4
-        # worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
-        
-        trial_train_loader = DataLoader(
-            trial_train_ds,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False,
-            worker_init_fn=worker_init_fn
-        )
-        trial_val_loader = DataLoader(
-            trial_val_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False,
-            worker_init_fn=worker_init_fn
-        )
+        # Используем унифицированные kwargs через helper (Задача 320.2)
+        trial_train_loader = DataLoader(trial_train_ds, **build_dataloader_kwargs(shuffle=True))
+        trial_val_loader = DataLoader(trial_val_ds, **build_dataloader_kwargs(shuffle=False))
         
     except Exception as e:
         print(f"[Optuna Trial] Error creating dataset with seq_len={seq_len}: {e}")
@@ -1386,13 +1433,19 @@ def objective_seq_len_search(trial, args, base_path, data_path, df,
         accelerator="auto",
         devices=1,
         precision=trainer_precision,
-        enable_progress_bar=False,  # Отключаем прогресс-бар для чистоты вывода
-        log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
-        accumulate_grad_batches=args.accumulate_grad_batches,  # Gradient accumulation
+        enable_progress_bar=False,  # Отключаем для чистоты вывода (trial mode)
+        log_every_n_steps=100,
+        accumulate_grad_batches=args.accumulate_grad_batches,
+        num_sanity_val_steps=0  # Пропускаем sanity для скорост
     )
     
     # Обучаем модель
     try:
+        # Задача 320: Передача конфигурационных параметров в модель для хуков
+        trial_model.hparams.val_batch_log_interval = args.val_batch_log_interval
+        trial_model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
+        trial_model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
+        trial_model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
         trial_trainer.fit(trial_model, trial_train_loader, trial_val_loader)
     except Exception as e:
         print(f"[Optuna Trial] Training failed for seq_len={seq_len}: {e}")
@@ -1652,7 +1705,19 @@ def train():
     parser.add_argument("--profiler_wait_steps", type=int, default=1, help="Number of steps to wait before profiling starts")
     parser.add_argument("--profiler_warmup_steps", type=int, default=1, help="Number of warmup steps for profiler")
     parser.add_argument("--profiler_active_steps", type=int, default=3, help="Number of active profiling steps")
-    
+
+    # Параметры DataLoader и Trainer (Задача 320)
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers (default: 0 for stability)")
+    parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=True, help="Pin memory for DataLoader")
+    parser.add_argument("--persistent_workers", action=argparse.BooleanOptionalAction, default=False, help="Persistent workers for DataLoader")
+    parser.add_argument("--prefetch_factor", type=int, default=2, help="Prefetch factor for DataLoader (only if num_workers > 0)")
+    parser.add_argument("--num_sanity_val_steps", type=int, default=0, help="Number of sanity validation steps")
+    parser.add_argument("--enable_progress_bar", action=argparse.BooleanOptionalAction, default=True, help="Enable progress bar")
+    parser.add_argument("--enable_tb_embeddings", action=argparse.BooleanOptionalAction, default=False, help="Enable TensorBoard embeddings logging")
+    parser.add_argument("--enable_epoch_end_plots", action=argparse.BooleanOptionalAction, default=False, help="Enable heavy epoch-end plots (reliability, confusion, PR)")
+    parser.add_argument("--skip_epoch0_artifacts", action=argparse.BooleanOptionalAction, default=True, help="Skip heavy artifacts on epoch 0")
+    parser.add_argument("--val_batch_log_interval", type=int, default=100, help="Log validation progress every N batches (0 to disable)")
+
     args = parser.parse_args()
     
     # Парсим winsor_limits из строки (Задача 240)
@@ -1665,7 +1730,21 @@ def train():
         raise ValueError(f"Invalid --winsor_limits format: {e}. Expected comma-separated floats like '0.01,0.99'")
     
     print(f"Scaler configuration: type={args.scaler_type}, winsor_limits={winsor_limits}")
-    
+
+    # Helper для создания DataLoader kwargs (Задача 320.2)
+    def build_dataloader_kwargs(shuffle: bool):
+        kwargs = {
+            'batch_size': args.batch_size,
+            'shuffle': shuffle,
+            'num_workers': args.num_workers,
+            'pin_memory': args.pin_memory,
+            'worker_init_fn': None,
+        }
+        if args.num_workers > 0:
+            kwargs['persistent_workers'] = args.persistent_workers
+            kwargs['prefetch_factor'] = args.prefetch_factor
+        return kwargs
+
     # Валидация аргументов прунинга (Задача 159)
     if args.prune_mode != "none":
         if args.prune_amount < 0.0 or args.prune_amount > 0.6:
@@ -1962,12 +2041,12 @@ def train():
     # else:
     #     # Memory mode (по умолчанию)
     full_dataset = LOBDataset(
-        df, 
-        seq_len=args.seq_len, 
+        df,
+        seq_len=args.seq_len,
         n_past_returns=n_past_returns,
         past_returns_lags=past_returns_lags,  # Задача 091
         data_mode="memory",
-        is_train=True,  # Задача 316: ДОЛЖНО БЫТЬ True для fit() в конструкторе
+        is_train=False,  # Задача 320.4: исправляем split - val/test работают в eval mode
         augment_prob=args.augment_prob,
         use_symmetric_flip=args.use_symmetric_flip,
         volume_jitter_range=args.volume_jitter_range,
@@ -1985,45 +2064,6 @@ def train():
     # ПРИМЕЧАНИЕ: Проверка только для memory режима (streaming не поддерживается)
     if np.isnan(full_dataset.x_raw).any():
         raise ValueError("КРИТИЧНО: Входящие features содержат NaN строки для запуска обучения!")
-    
-    # Проверка данных на NaN перед обучением (Sample-based check)
-    print("\nПроверка данных на NaN (sampling)...")
-    nan_check_samples = min(100, len(full_dataset))
-    nan_found = False
-    
-    for i in range(0, nan_check_samples, 10):
-        try:
-            sample = full_dataset[i]
-            x, y, vol_target, weight = sample[:4]  # Первые 4 элемента
-            
-            if i == 0:
-                # Задача 311: Добавить логирование тензоров после нормализации (для отладки)
-                print(f"Sample Normalized Tensor (first 5 features of channel 0): {x[0, :5]}")
-
-            if torch.isnan(x).any():
-                print(f"⚠️  WARNING: NaN обнаружен в признаках (x) на индексе {i}")
-                nan_found = True
-            if torch.isnan(torch.tensor(y)).any():
-                print(f"⚠️  WARNING: NaN обнаружен в метках (y) на индексе {i}")
-                nan_found = True
-            if torch.isnan(torch.tensor(vol_target)).any():
-                print(f"⚠️  WARNING: NaN обнаружен в целевой волатильности (vol_target) на индексе {i}")
-                nan_found = True
-        except Exception as e:
-            print(f"⚠️  WARNING: Ошибка при проверке индекса {i}: {e}")
-            nan_found = True
-    
-    if nan_found:
-        print("\n" + "!" * 80)
-        print("⚠️  CRITICAL WARNING: Обнаружены NaN значения в данных!")
-        print("   Это может привести к нестабильности обучения и NaN в метриках.")
-        print("   Рекомендации:")
-        print("   1. Проверьте качество исходных Parquet файлов")
-        print("   2. Проверьте параметры нормализации (scaler_type, winsor_limits)")
-        print("   3. Проверьте параметры feature engineering")
-        print("!" * 80 + "\n")
-    else:
-        print(f"✓ Проверка завершена: NaN не обнаружены в {nan_check_samples} проверенных примерах")
     
     # Хронологическое разделение 70/15/15 (Train/Val/Test)
     total_len = len(full_dataset)
@@ -2055,6 +2095,47 @@ def train():
     normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
     update_model_metadata(base_path, args.symbol, args, winsor_limits, norm_params_path)
     print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
+    # Проверка данных на NaN после нормализации (Sample-based check) (Задача 320.4)
+    print("\nПроверка данных на NaN после нормализации (sampling)...")
+    nan_check_samples = min(100, len(train_ds))
+    nan_found = False
+
+    for i in range(0, nan_check_samples, 10):
+        try:
+            # Используем train_ds (с is_train=True) если индекс в диапазоне, иначе full_dataset
+            ds = train_ds if i < len(train_ds) else full_dataset
+            sample = ds[i]
+            x, y, vol_target, weight = sample[:4]  # Первые 4 элемента
+
+            if i == 0:
+                # Логирование тензора после нормализации (для отладки)
+                print(f"Sample Normalized Tensor (first 5 features of channel 0): {x[0, :5]}")
+
+            if torch.isnan(x).any():
+                print(f"⚠️  WARNING: NaN обнаружен в признаках (x) на индексе {i}")
+                nan_found = True
+            if torch.isnan(torch.tensor(y)).any():
+                print(f"⚠️  WARNING: NaN обнаружен в метках (y) на индексе {i}")
+                nan_found = True
+            if torch.isnan(torch.tensor(vol_target)).any():
+                print(f"⚠️  WARNING: NaN обнаружен в целевой волатильности (vol_target) на индексе {i}")
+                nan_found = True
+        except Exception as e:
+            print(f"⚠️  WARNING: Ошибка при проверке индекса {i}: {e}")
+            nan_found = True
+
+    if nan_found:
+        print("\n" + "!" * 80)
+        print("⚠️  CRITICAL WARNING: Обнаружены NaN значения в данных!")
+        print("   Это может привести к нестабильности обучения и NaN в метриках.")
+        print("   Рекомендации:")
+        print("   1. Проверьте качество исходных Parquet файлов")
+        print("   2. Проверьте параметры нормализации (scaler_type, winsor_limits)")
+        print("   3. Проверьте параметры feature engineering")
+        print("!" * 80 + "\n")
+    else:
+        print(f"✓ Проверка завершена: NaN не обнаружены в {nan_check_samples} проверенных примерах")
+
 
     # Верификация разделения
     print(f"\nChronological split verification:")
@@ -2232,45 +2313,10 @@ def train():
     if args.use_symmetric_flip or args.volume_jitter_range > 0:
         print(f"Augmentation enabled for training: flip={args.use_symmetric_flip}, jitter={args.volume_jitter_range}, prob={args.augment_prob}")
 
-    # 8. DataLoaders
-    # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
-    num_workers = 4  # Всегда 4 для memory режима
-    # num_workers = 2 if args.data_mode == "streaming" else 4
-    
-    # Функция инициализации воркеров для streaming режима (ОТКЛЮЧЕНО)
-    worker_init_fn = None  # Не требуется для memory режима
-    # worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
-    
-    train_loader = DataLoader(
-        train_ds, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        num_workers=num_workers, 
-        pin_memory=True,
-        prefetch_factor=2,
-        persistent_workers=True if num_workers > 0 else False,
-        worker_init_fn=worker_init_fn
-    )
-    val_loader = DataLoader(
-        val_ds, 
-        batch_size=args.batch_size, 
-        shuffle=False, 
-        num_workers=num_workers, 
-        pin_memory=True,
-        prefetch_factor=2,
-        persistent_workers=True if num_workers > 0 else False,
-        worker_init_fn=worker_init_fn
-    )
-    test_loader = DataLoader(
-        test_ds, 
-        batch_size=args.batch_size, 
-        shuffle=False, 
-        num_workers=num_workers, 
-        pin_memory=True,
-        prefetch_factor=2,
-        persistent_workers=True if num_workers > 0 else False,
-        worker_init_fn=worker_init_fn
-    )
+    # 8. DataLoaders (Задача 320.2: унифицированная конфигурация через CLI)
+    train_loader = DataLoader(train_ds, **build_dataloader_kwargs(shuffle=True))
+    val_loader = DataLoader(val_ds, **build_dataloader_kwargs(shuffle=False))
+    test_loader = DataLoader(test_ds, **build_dataloader_kwargs(shuffle=False))
 
     # 8. Расчет весов классов на основе тренировочного набора
     print("Calculating class weights from training set...")
@@ -2578,7 +2624,8 @@ def train():
         precision=trainer_precision,  # OOM фикс: mixed precision уменьшает потребление памяти вдвое
         log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
         accumulate_grad_batches=args.accumulate_grad_batches,  # OOM фикс: gradient accumulation
-        enable_progress_bar=False   # Отключаем прогресс-бар, чтобы не было повторяющихся логов
+        enable_progress_bar=args.enable_progress_bar,
+        num_sanity_val_steps=args.num_sanity_val_steps
     )
     
     # Добавляем symbol в trainer для доступа из LiTModule
@@ -2737,36 +2784,20 @@ def train():
             winsor_limits=winsor_limits,
             **time_weighting_params_final
         )
-        
+
+        from torch.utils.data import Subset  # Для хронологического split
+
         # Пересоздаем train/val разделение (80/20)
         total_len = len(full_dataset)
         train_size = int(0.8 * total_len)
         val_size = total_len - train_size
+
+        train_ds = TrainSubset(full_dataset, list(range(0, train_size)))
+        val_ds = Subset(full_dataset, list(range(train_size, total_len)))
         
-        train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
-        
-        # Пересоздаем DataLoaders
-        # ПРИМЕЧАНИЕ: Streaming режим отключен
-        worker_init_fn = None  # _streaming_worker_init_fn if args.data_mode == "streaming" else None
-        
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False,
-            worker_init_fn=worker_init_fn
-        )
-        val_loader = DataLoader(
-            val_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=True if num_workers > 0 else False,
-            worker_init_fn=worker_init_fn
-        )
+        # Пересоздаем DataLoaders с унифицированными параметрами (Задача 320.2)
+        train_loader = DataLoader(train_ds, **build_dataloader_kwargs(shuffle=True))
+        val_loader = DataLoader(val_ds, **build_dataloader_kwargs(shuffle=False))
         
         print("Datasets recreated successfully\n")
 
@@ -2825,35 +2856,13 @@ def train():
             print(f"{'='*70}")
             print(f"Train samples: {len(train_idx)}, Val samples: {len(val_idx)}")
             
-            # Создаем Subset для train и val
-            fold_train_ds = Subset(full_dataset, train_idx)
-            fold_val_ds = Subset(full_dataset, val_idx)
+            # Создаем Subset для train и val (исправляем split: train использует TrainSubset для аугментации)
+            fold_train_ds = TrainSubset(full_dataset, list(train_idx))
+            fold_val_ds = Subset(full_dataset, list(val_idx))
             
-            # Создаем DataLoaders для фолда
-            # ПРИМЕЧАНИЕ: Streaming режим отключен, используется только memory режим
-            num_workers = 4  # Всегда 4 для memory режима
-            worker_init_fn = None  # Не требуется для memory режима
-            # num_workers = 2 if args.data_mode == "streaming" else 4
-            # worker_init_fn = _streaming_worker_init_fn if args.data_mode == "streaming" else None
-            
-            fold_train_loader = DataLoader(
-                fold_train_ds,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=True,
-                persistent_workers=True if num_workers > 0 else False,
-                worker_init_fn=worker_init_fn
-            )
-            
-            fold_val_loader = DataLoader(
-                fold_val_ds,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                pin_memory=True,
-                persistent_workers=True if num_workers > 0 else False
-            )
+            # Создаем DataLoaders для фолда (Задача 320.2: унифицированная конфигурация)
+            fold_train_loader = DataLoader(fold_train_ds, **build_dataloader_kwargs(shuffle=True))
+            fold_val_loader = DataLoader(fold_val_ds, **build_dataloader_kwargs(shuffle=False))
             
             # ВАЖНО: Полная инициализация модели с fresh weights для каждого фолда
             from .lit_model import LiTConfig
@@ -2948,15 +2957,21 @@ def train():
                 accelerator="auto",
                 devices=1,
                 precision=trainer_precision,
-                enable_progress_bar=False,  # Отключаем прогресс-бар
-                log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
-                accumulate_grad_batches=args.accumulate_grad_batches,  # Gradient accumulation
+                enable_progress_bar=args.enable_progress_bar,
+                log_every_n_steps=100,
+                accumulate_grad_batches=args.accumulate_grad_batches,
+                num_sanity_val_steps=args.num_sanity_val_steps
             )
             
             fold_trainer.symbol = args.symbol
             
             # Обучаем модель на фолде
             print(f"\nTraining fold {fold_idx + 1}...")
+            # Задача 320: Передача конфигурационных параметров в модель для хуков (CV fold)
+            fold_model.hparams.val_batch_log_interval = args.val_batch_log_interval
+            fold_model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
+            fold_model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
+            fold_model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
             fold_trainer.fit(fold_model, fold_train_loader, fold_val_loader)
             
             # Оцениваем на валидационном фолде
@@ -3136,6 +3151,11 @@ def train():
                 raise e
         # -------------------------------
         
+        # Задача 320: Передача конфигурационных параметров в модель для хуков
+        model.hparams.val_batch_log_interval = args.val_batch_log_interval
+        model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
+        model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
+        model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
         trainer.fit(model, train_loader, val_loader)
         
         # ============================================================================
@@ -3307,20 +3327,26 @@ def train():
                 
                 # Fine-tuning после прунинга
                 print(f"\nFine-tuning for {args.prune_finetune_epochs} epochs...")
-                
-                # Создаем новый trainer для fine-tuning
+
+                # Создаем новый trainer для fine-tuning (Задача 320.2: CLI параметры)
                 finetune_trainer = pl.Trainer(
                     max_epochs=args.prune_finetune_epochs,
                     accelerator="auto",
                     devices=1,
                     logger=logger,
                     callbacks=[checkpoint_callback],
-                    enable_progress_bar=False,  # Отключаем прогресс-бар
+                    enable_progress_bar=args.enable_progress_bar,
                     deterministic=False,
-                    log_every_n_steps=100,      # Задача 304: Уменьшаем шаг логирования
-                    accumulate_grad_batches=args.accumulate_grad_batches,  # Gradient accumulation
+                    log_every_n_steps=100,
+                    accumulate_grad_batches=args.accumulate_grad_batches,
+                    num_sanity_val_steps=args.num_sanity_val_steps
                 )
                 
+                # Задача 320: Передача конфигурационных параметров в модель для хуков (fine-tuning)
+                model.hparams.val_batch_log_interval = args.val_batch_log_interval
+                model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
+                model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
+                model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
                 finetune_trainer.fit(model, train_loader, val_loader)
                 
                 # Оцениваем MCC после fine-tuning

@@ -1456,9 +1456,9 @@ def plot_pr_curves_tensorboard(y_true, y_pred_probs, class_names, writer, epoch,
 def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embeddings'):
     """
     Извлекает embeddings после слоя патчинга и отправляет в TensorBoard Projector.
-    
+
     Ограничивает количество сэмплов для предотвращения зависания TensorBoard.
-    
+
     Args:
         model: LiTModel
         dataloader: DataLoader для извлечения данных
@@ -1467,19 +1467,33 @@ def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embe
         max_samples: максимальное количество сэмплов для визуализации (по умолчанию 1000)
         tag: тег для логирования
     """
+    # Сохраняем исходный режим модели (Задача 320.3)
+    was_training = model.training
+
+    # Обработка случая, когда dataloader - список (берём первый)
+    if isinstance(dataloader, (list, tuple)):
+        dataloader = dataloader[0] if dataloader else None
+    if dataloader is None:
+        print("[TB_EMB] Dataloader is None, skipping embeddings logging")
+        return
+
     model.eval()
-    
+
     embeddings_list = []
     labels_list = []
     regime_ids_list = []
-    
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
+            # Прогресс-логи каждые 10 батчей (Задача 320.3)
+            if batch_idx == 0 or batch_idx % 10 == 0:
+                print(f"[TB_EMB] batch {batch_idx}")
+
             # Распаковываем батч безопасно (Задача 313.4 - поддержка расширенного логирования)
             x = batch[0]
             y = batch[1]
             regime_id = None
-            
+
             # В новом формате (6 элементов) regime_id может быть в extra_data
             if len(batch) == 6:
                 extra_data = batch[5]
@@ -1490,24 +1504,24 @@ def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embe
             # В старом формате (5 элементов) regime_id был 5-м элементом
             elif len(batch) == 5:
                 regime_id = batch[4]
-            
+
             # Получаем embeddings после патчинга
             # Используем forward hook для извлечения
             patching_output = None
-            
+
             def hook(module, input, output):
                 nonlocal patching_output
                 patching_output = output.detach()
-            
+
             handle = model.patching.register_forward_hook(hook)
-            
+
             # Forward pass
             device = next(model.parameters()).device
             _ = model(x.to(device), regime_id=regime_id.to(device) if regime_id is not None else None)
-            
+
             # Удаляем hook
             handle.remove()
-            
+
             # Собираем embeddings (используем mean pooling по sequence dimension)
             if patching_output is not None:
                 # patching_output shape: (Batch, num_patches, d_model)
@@ -1515,28 +1529,28 @@ def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embe
                 emb = patching_output.mean(dim=1).cpu()  # (Batch, d_model)
                 embeddings_list.append(emb)
                 labels_list.append(y.cpu())
-                
+
                 if regime_id is not None:
                     regime_ids_list.append(regime_id.cpu())
-            
+
             # Ограничиваем количество сэмплов
             if len(embeddings_list) * x.size(0) >= max_samples:
                 break
-    
+
     # Объединяем все embeddings
     if embeddings_list:
         embeddings = torch.cat(embeddings_list, dim=0)[:max_samples]
         labels = torch.cat(labels_list, dim=0)[:max_samples]
-        
+
         # Подготавливаем метаданные
         metadata = [f'Label_{label.item()}' for label in labels]
-        
+
         # Добавляем regime_id если доступен
         if regime_ids_list:
             regime_ids = torch.cat(regime_ids_list, dim=0)[:max_samples]
-            metadata = [f'Label_{label.item()}_Regime_{regime.item()}' 
+            metadata = [f'Label_{label.item()}_Regime_{regime.item()}'
                        for label, regime in zip(labels, regime_ids)]
-        
+
         # Отправляем в TensorBoard Projector
         writer.add_embedding(
             embeddings,
@@ -1544,10 +1558,12 @@ def log_embeddings(model, dataloader, writer, epoch, max_samples=1000, tag='embe
             global_step=epoch,
             tag=tag
         )
-        
+
         print(f"✓ Logged {len(embeddings)} embeddings to TensorBoard Projector")
-    
-    model.train()
+
+    # Восстанавливаем исходный режим модели (Задача 320.3)
+    if was_training:
+        model.train()
 
 
 def setup_custom_scalars_layout(writer):
