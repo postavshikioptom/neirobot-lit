@@ -38,6 +38,7 @@ class LOBPatching(nn.Module):
         self.n_levels = n_levels
         self.seq_len = seq_len
         self.num_patches = n_levels
+        self.num_features = in_channels * n_levels
 
         # Patch convolution: сжимает каждый уровень (in_channels признаков) в d_model
         # Input: (batch*n_patches, 1, in_channels * n_levels?) Actually we treat each level independently.

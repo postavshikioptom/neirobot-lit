@@ -58,11 +58,22 @@ neirobot-lit/
 │	├── README.md              # как запускать train/backtest
 │	├── src/                   # основной код (модули)
 │	│   ├── __init__.py
-│   │	├── lit_model.py       # архитектура LiT: Transformer с patching, embedding, attention (PyTorch реализация)
-│   │	├── dataset.py         # загрузка parquet, preprocessing (event-time snapshots, normalization: z-score, (p-mid)/mid, log(vol))
-│   │	├── utils.py           # helpers: metrics (precision, recall, MCC), plotting loss, early stopping callback
-│   │	├── features.py        # используется только для предварительной обработки сырых данных (до загрузки в Dataset)
-│  	│	├── train.py           # обучение: argparse (--symbol, --data_dir, --epochs, --batch_size, --output_dir)
+│   │	├── lit_model.py       # архитектура LiT и LiTConfig: patching, transformer, heads, входной контракт модели
+│   │	├── dataset.py         # LOBDataset/LOBDataLoader, сборка 11 каналов, индексы признаков, train-time sample processing
+│   │	├── features.py        # предварительная генерация сырых LOB-признаков до сборки Dataset
+│   │	├── labels.py          # разметка single-horizon и multi-horizon таргетов
+│   │	├── normalization.py   # normalizer и сохранение параметров нормализации
+│   │	├── utils.py           # общие metrics, calibration, pruning, TensorBoard helpers, служебные утилиты
+│   │	├── train.py           # тонкая точка входа обучения: parse_args -> собрать config -> запустить основной pipeline
+│   │	├── train_cli.py       # argparse, группировка и валидация CLI-флагов без изменения внешнего интерфейса train.py
+│   │	├── train_runtime.py   # пути, seed, precision, dataloader/trainer kwargs, общий runtime/bootstrap layer
+│   │	├── train_data.py      # load_data -> feature engineering -> labeling -> split -> normalizer fit/save -> dataloaders
+│   │	├── train_metadata.py  # metadata.json и побочные эффекты, связанные с параметрами нормализации и артефактами модели
+│   │	├── train_module.py    # LiTModule, TrainSubset, ProfilerCallback, HFT/validation analytics и training-specific hooks
+│   │	├── train_model_factory.py # сборка teacher/student моделей, distillation bootstrap, единый model factory
+│   │	├── train_optuna.py    # objective_seq_len_search и Optuna-поиск seq_len на общих factory данных и модели
+│   │	├── train_cv.py        # purged k-fold cross-validation режим и fold-level orchestration
+│   │	├── train_postprocess.py # holdout evaluation, MC Dropout, pruning, teacher-vs-student comparison, финальное сохранение
 │   │	└── types.py           # типы данных (если нужно: Snapshot, Label enums: up/down/flat)
 │	├── scripts/               # CLI-скрипты для запуска
 

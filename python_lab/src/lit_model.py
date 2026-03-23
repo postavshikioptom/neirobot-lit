@@ -456,10 +456,10 @@ class LiTModel(nn.Module):
         """
         b, s, c, l = x.shape
         
-        # Шаг 1: Патчинг — каждый уровень стакана становится токеном
-        # PE (level + temporal) уже внутри patching (Задача 319)
-        # Выход: (Batch, 1 + S*50, d_model) с CLS токеном в начале
-        x = self.patching(x)  # (Batch, 1 + S*50, d_model)
+        # Шаг 1: Патчинг — сжимаем 50 уровней в один snapshot token на временном шаге
+        # PE (level + temporal) уже внутри patching (Задача 321)
+        # Выход: (Batch, S, d_model)
+        x = self.patching(x)  # (Batch, S, d_model)
 
         # Шаг 2: Добавляем Regime Embedding (если включено)
         if self.regime_embedding is not None and regime_id is not None:
@@ -468,24 +468,16 @@ class LiTModel(nn.Module):
             x = torch.cat([x, regime_emb], dim=-1)
             x = self.regime_projection(x)
 
-        # Шаг 3: Подготовка маски для Transformer
-        src_key_padding_mask = None
-        if mask is not None:
-            # mask: (Batch, S) - True для padding. Расширяем на 50 уровней на каждый таймстеп
-            mask_expanded = mask.unsqueeze(-1).expand(-1, -1, self.n_levels)  # (B, S, 50)
-            mask_flat = mask_expanded.reshape(b, -1)  # (B, S*50)
-            # Добавляем False для CLS токена (он никогда не padding)
-            cls_padding = torch.zeros((b, 1), dtype=mask_flat.dtype, device=mask_flat.device)
-            src_key_padding_mask = torch.cat([cls_padding, mask_flat], dim=1)  # (B, 1 + S*50)
+        # Шаг 3: Подготовка маски для Transformer (используем маску как есть)
+        src_key_padding_mask = mask if mask is not None else None
 
         # Шаг 4: Transformer Encoder
         x_trans = x
         for layer in self.transformer_layers:
             x_trans = layer(x_trans, src_key_padding_mask=src_key_padding_mask)
 
-        # Шаг 5: Используем CLS токен (индекс 0) для pooled representation
-        pooled = x_trans[:, 0, :]  # (Batch, d_model) - берем первый токен (CLS)
-        pooled = self.norm(pooled)
+        # Шаг 5: Mean pooling по временной оси
+        pooled = self.norm(x_trans.mean(dim=1))
         
         # Шаг 7: Разделение на ветки (Multi-Task)
         # Классификация с Multi-Horizon поддержкой

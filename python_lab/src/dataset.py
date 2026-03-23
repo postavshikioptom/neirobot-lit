@@ -800,6 +800,10 @@ class LOBDataset(Dataset):
             if flat_count / total > 0.9:
                 print(f"[WARN] Flat class dominates: {flat_count/total:.1%}. Consider adjusting threshold or oversampling.")
 
+    def get_timestamps(self) -> np.ndarray:
+        """Возвращает массив timestamps для всех сэмплов датасета."""
+        return self.timestamps
+
     def _calculate_time_weights(self, timestamps: np.ndarray, labels: np.ndarray) -> torch.Tensor:
         max_ts = timestamps.max()
         half_life_ms = self.half_life_hours * 3600 * 1000
