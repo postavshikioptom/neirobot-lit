@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Subset
 from .dataset import LOBDataset, LOBDataLoader
 from .features import FeatureEngineer
 from .labels import Labeler
-from .normalization import Normalizer
+from .normalization import Normalizer, symlog_transform
 from .train_module import TrainSubset
 from .train_runtime import build_dataloader_kwargs
 
@@ -96,7 +96,21 @@ def _fit_normalizer_on_train(full_dataset, train_ds, normalizer, args, winsor_li
     train_indices_for_fit = train_ds.indices
     train_channels_df = full_dataset._compute_channels_for_normalization(train_indices_for_fit)
     print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
-    normalizer.fit(train_channels_df, winsor_limits=winsor_limits)
+    # Извлекаем сырые динамические каналы (первый уровень каждого канала)
+    arr = train_channels_df.to_numpy()
+    ofi_raw = arr[:, 150]   # channel 3 (OFI), первый уровень
+    delta_imb_raw = arr[:, 450]  # channel 9 (DeltaImb), первый уровень
+    delta_spread_raw = arr[:, 500]  # channel 10 (DeltaSpread), первый уровень
+    # Применяем symlog трансформацию
+    ofi_sym = symlog_transform(ofi_raw)
+    delta_imb_sym = symlog_transform(delta_imb_raw)
+    delta_spread_sym = symlog_transform(delta_spread_raw)
+    dynamic_data = {
+        "ofi": ofi_sym,
+        "delta_imb": delta_imb_sym,
+        "delta_spread": delta_spread_sym
+    }
+    normalizer.fit(train_channels_df, winsor_limits=winsor_limits, dynamic_data=dynamic_data)
     normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
     print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
 

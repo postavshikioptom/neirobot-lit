@@ -37,8 +37,10 @@ class Normalizer:
         self.feature_order: List[str] = []
         self.eps = eps
         self.scale_multiplier = scale_multiplier
+        # Для динамических каналов (OFI, DeltaImb, DeltaSpread)
+        self.dynamic_params: Dict[str, Dict[str, float]] = {}
 
-    def fit(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], feature_names: List[str] = None, winsor_limits: List[float] = None) -> Dict[str, Dict[str, float]]:
+    def fit(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], feature_names: List[str] = None, winsor_limits: List[float] = None, dynamic_data: dict = None) -> Dict[str, Dict[str, float]]:
         """
         Рассчитывает среднее, стандартное отклонение, медиану, IQR и границы винзоризации.
         Поддерживает Polars DataFrame/LazyFrame и Numpy arrays.
@@ -129,7 +131,23 @@ class Normalizer:
                 if winsor_limits:
                     self.params[name]["winsor_low"] = float(wlows[i])
                     self.params[name]["winsor_high"] = float(whighs[i])
-        
+
+        # Обработка динамических каналов (OFI, DeltaImb, DeltaSpread)
+        if dynamic_data is not None:
+            for name, arr in dynamic_data.items():
+                arr = np.asarray(arr)
+                median = float(np.median(arr))
+                q25 = float(np.quantile(arr, 0.25))
+                q75 = float(np.quantile(arr, 0.75))
+                iqr = float(q75 - q25) if not math.isnan(q75 - q25) else 1.0
+                entry = {"median": median, "iqr": iqr}
+                if winsor_limits:
+                    wlow = float(np.quantile(arr, winsor_limits[0]))
+                    whigh = float(np.quantile(arr, winsor_limits[1]))
+                    entry["winsor_low"] = wlow
+                    entry["winsor_high"] = whigh
+                self.dynamic_params[name] = entry
+
         return self.params
 
     def save(self, scaler_type: str = "zscore", winsor_limits: List[float] = None):
@@ -145,7 +163,8 @@ class Normalizer:
             "params": self.params,
             "scaler_type": self.scaler_type,
             "winsor_limits": self.winsor_limits,
-            "feature_order": self.feature_order
+            "feature_order": self.feature_order,
+            "dynamic_params": self.dynamic_params
         }
         with open(self.output_path, 'w') as f:
             json.dump(save_data, f, indent=4)
@@ -163,12 +182,14 @@ class Normalizer:
                 self.scaler_type = data.get("scaler_type", "zscore")
                 self.winsor_limits = data.get("winsor_limits")
                 self.feature_order = data.get("feature_order", [])
+                self.dynamic_params = data.get("dynamic_params", {})
             else:
                 # Compatibility with old format
                 self.params = data
                 self.scaler_type = "zscore"
                 self.winsor_limits = None
                 self.feature_order = list(self.params.keys())
+                self.dynamic_params = {}
                 
         print(f"[{self.__class__.__name__}] Normalization params loaded from {self.output_path} (Type: {self.scaler_type})")
 
@@ -233,6 +254,25 @@ class Normalizer:
 
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
+
+    def transform_dynamic(self, data, channel_name: str):
+        """
+        Применяет нормализацию к динамическому каналу (OFI, DeltaImb, DeltaSpread).
+        Использует параметры из dynamic_params (median, iqr).
+        """
+        if channel_name not in self.dynamic_params:
+            raise ValueError(f"Dynamic channel '{channel_name}' not fitted")
+        p = self.dynamic_params[channel_name]
+        median = p["median"]
+        iqr = p["iqr"]
+        if hasattr(data, '__module__') and data.__module__ == 'torch':
+            # torch.Tensor
+            import torch
+            median_t = torch.tensor(median, device=data.device, dtype=data.dtype)
+            iqr_t = torch.tensor(iqr, device=data.device, dtype=data.dtype)
+            return (data - median_t) / (iqr_t + self.eps)
+        else:
+            return (data - median) / (iqr + self.eps)
 
     def winsorize(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], limits: List[float]) -> Union[pl.DataFrame, pl.LazyFrame, np.ndarray]:
         """

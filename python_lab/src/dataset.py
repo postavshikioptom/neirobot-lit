@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 import onnx
 
-from .normalization import Normalizer
+from .normalization import Normalizer, symlog_transform
 
 # ============================================================================
 # Константы для аугментации LOB данных
@@ -120,7 +120,10 @@ def compute_ofi_from_lob(bid_p: np.ndarray, ask_p: np.ndarray,
     """
     n = len(update_ids)
 
-    # Определяем точки обновления стакана
+    # Определяем точки обновления стакана (используем is_update как булевую маску)
+    # USE CASE FAILSAFE: Если update_ids не монотонно возрастают, id_diff может быть отрицательным
+    # Однако предполагается, что feat_update_id из parquet корректный (монотонно неубывающий).
+    # При равенстве update_ids (одинаковый timestamp) считается что обновления не было.
     id_diff = np.diff(update_ids, prepend=update_ids[0])
     is_update = id_diff > 0  # bool mask
 
@@ -913,6 +916,17 @@ class LOBDataset(Dataset):
         bid_v_cols = [f"feat_bid_v_{i}" for i in range(self.n_levels)]
         ask_v_cols = [f"feat_ask_v_{i}" for i in range(self.n_levels)]
         price_col = "mid_price" if "mid_price" in df.columns else df.columns[0]
+        # Извлекаем update_id_raw ДО вычисления OFI (Задача 323.1)
+        if "feat_update_id" in df.columns:
+            self.update_id_raw = df["feat_update_id"].to_numpy().astype(np.int64)
+            print(f"[DEBUG] update_id_raw: shape={self.update_id_raw.shape}, dtype={self.update_id_raw.dtype}")
+            # USE CASE FAILSAFE: Проверяем монотонность (нестрогая, допускаем равенства дляодинаковых timestamp)
+            diffs = np.diff(self.update_id_raw)
+            is_monotonic = np.all(diffs >= 0)
+            if not is_monotonic:
+                print("[WARN] update_id_raw is not monotonically non-decreasing; OFI may be incorrect")
+        else:
+            raise RuntimeError("feat_update_id not found in DataFrame; required for OFI calculation")
         
         # 1. Извлекаем логарифмированные объемы и восстанавливаем сырые данные
         # Задача 315-3 fix: сначала восстанавливаем каждый уровень, потом суммируем
@@ -942,29 +956,19 @@ class LOBDataset(Dataset):
             self.past_ret_cache[lag] = ret
 
         # 4. Расчёт OFI из сырых данных (Задача 318.2)
-        if hasattr(self, 'update_id_raw') and self.update_id_raw is not None:
-            bid_p_matrix = df.select([f"feat_bid_p_{i}" for i in range(self.n_levels)]).to_numpy().astype(np.float64)
-            ask_p_matrix = df.select([f"feat_ask_p_{i}" for i in range(self.n_levels)]).to_numpy().astype(np.float64)
-            self.ofi_cache = compute_ofi_from_lob_cache(
-                bid_p_matrix, ask_p_matrix, bid_v_matrix, ask_v_matrix,
-                self.update_id_raw
-            )
-            print(f"[DEBUG] ofi raw (per-tick, non-cumulative): min={self.ofi_cache.min():.6f}, max={self.ofi_cache.max():.6f}, mean={self.ofi_cache.mean():.6f}")
-        else:
-            self.ofi_cache = None
-            print("[DEBUG] update_id_raw not available, OFI will use fallback")
+        # Теперь update_id_raw гарантированно существует
+        bid_p_matrix = df.select([f"feat_bid_p_{i}" for i in range(self.n_levels)]).to_numpy().astype(np.float64)
+        ask_p_matrix = df.select([f"feat_ask_p_{i}" for i in range(self.n_levels)]).to_numpy().astype(np.float64)
+        self.ofi_cache = compute_ofi_from_lob_cache(
+            bid_p_matrix, ask_p_matrix, bid_v_matrix, ask_v_matrix,
+            self.update_id_raw
+        )
+        print(f"[DEBUG] ofi raw (per-tick, non-cumulative): min={self.ofi_cache.min():.6f}, max={self.ofi_cache.max():.6f}, mean={self.ofi_cache.mean():.6f}")
         
         # Шаг 1: Диагностика сырых признаков (индикаторов)
         print(f"[DEBUG] past_ret raw (lag=10): min={self.past_ret_cache[10].min():.6f}, max={self.past_ret_cache[10].max():.6f}")
         print(f"[DEBUG] vib raw: min={self.vib_cache.min():.6f}, max={self.vib_cache.max():.6f}")
 
-        # Задача 318.1: Извлекаем feat_update_id ДО удаления мета-колонок
-        if "feat_update_id" in df.columns:
-            self.update_id_raw = df["feat_update_id"].to_numpy().astype(np.int64)
-            print(f"[DEBUG] update_id_raw: shape={self.update_id_raw.shape}, dtype={self.update_id_raw.dtype}")
-        else:
-            self.update_id_raw = None
-            print("[DEBUG] feat_update_id not found, OFI will use fallback (diff(imbalance))")
         
         self.has_computed_features = True
 
@@ -1431,6 +1435,10 @@ class LOBDataset(Dataset):
         ch[8]: Spread — нормализованный спред (ask_0 - bid_0) / mid
         ch[9]: DeltaImb — скорость изменения Imbalance (first derivative)
         ch[10]: DeltaSpread — скорость изменения спреда
+
+        Примечание: Динамические каналы (OFI, DeltaImb, DeltaSpread) возвращаются в сыром виде.
+        OFI берётся из precomputed кэша (ofi_precomputed), Delta-каналы вычисляются как производные.
+        Их последующая нормализация выполняется отдельно через symlog + robust normalizer.
         """
         eps = 1e-8
 
@@ -1462,7 +1470,7 @@ class LOBDataset(Dataset):
         if ofi_precomputed is not None:
             ofi_raw = ofi_precomputed.unsqueeze(-1).expand(-1, 50)
         else:
-            ofi_raw = torch.diff(imb_ch_raw, dim=0, prepend=imb_ch_raw[:1])
+            raise RuntimeError("OFI cache is not initialized before channel construction")
 
         # ch[4]: VIB (Volume Imbalance)
         if vib_raw is None:
@@ -1530,6 +1538,7 @@ class LOBDataset(Dataset):
     def _compute_channels_for_normalization(self, data: Union[pl.DataFrame, List[int], np.ndarray]) -> pl.DataFrame:
         """
         Вычисляет каналы из сырых данных для обучения нормализатора.
+        Этот метод использует тот же OFI/Delta pipeline, что и __getitem__, без fallback.
         data может быть DataFrame, списком индексов или NumPy массивом.
         """
         if isinstance(data, list):
@@ -1586,6 +1595,15 @@ class LOBDataset(Dataset):
         return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(550)])
 
     def _process_sample(self, x_raw, y, v, w, regime_id, ts, mid, idx=None, f_ret=None):
+        """
+        Новый порядок обработки:
+        1. Raw LOB (ask_p, ask_v, bid_p, bid_v)
+        2. Cached OFI (from self.ofi_cache)
+        3. Raw delta channels (DeltaImb, DeltaSpread calculated as derivatives)
+        4. Static channels normalize (MicropriceDev, Vol, Imb, VIB, Ret_*, Spread)
+        5. Dynamic channels: symlog → robust normalize (dynamic_params) → clamp [-4, 4]
+        6. One-pass clamp (applied already in step 5 for dynamic channels)
+        """
         # NaN protection (Задача 094-2)
         x_raw = np.nan_to_num(x_raw, nan=0.0)
         
@@ -1637,42 +1655,42 @@ class LOBDataset(Dataset):
                 ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
             )
 
-        # Нормализация (Векторизованная, 11 каналов)
-        price_ch = self.normalize_channel(p_raw, channel_idx=0)
-        vol_ch = self.normalize_channel(v_raw, channel_idx=1)
-        imb_ch = self.normalize_channel(i_raw, channel_idx=2)
-        ofi_ch = self.normalize_channel(o_raw, channel_idx=3)
-        vib_ch = self.normalize_channel(vi_raw, channel_idx=4)
-        ret10_ch = self.normalize_channel(ret10_raw, channel_idx=5)
-        ret50_ch = self.normalize_channel(ret50_raw, channel_idx=6)
-        ret100_ch = self.normalize_channel(ret100_raw, channel_idx=7)
-        spread_ch = self.normalize_channel(sp_raw, channel_idx=8)
-        delta_imb_ch = self.normalize_channel(di_raw, channel_idx=9)
-        delta_spread_ch = self.normalize_channel(ds_raw, channel_idx=10)
+        # Нормализация каналов: статические обычным z-score/robust, динамические через symlog+robust+clamp
+        static_indices = [0, 1, 2, 4, 5, 6, 7, 8]
+        static_channels = [p_raw, v_raw, i_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw]
+        static_norm = [self.normalize_channel(ch, idx) for idx, ch in zip(static_indices, static_channels)]
 
-        # Собираем итоговый тензор (Seq, 11, 50)
-        x_final = torch.stack([
-            price_ch, vol_ch, imb_ch, ofi_ch, vib_ch,
-            ret10_ch, ret50_ch, ret100_ch, spread_ch,
-            delta_imb_ch, delta_spread_ch
-        ], dim=1)
+        # Динамические каналы: OFI, DeltaImb, DeltaSpread
+        dyn_info = {3: 'ofi', 9: 'delta_imb', 10: 'delta_spread'}
+        dyn_raw = {3: o_raw, 9: di_raw, 10: ds_raw}
+        dynamic_pre = {}
+        dynamic_final = {}
+        for idx, name in dyn_info.items():
+            raw = dyn_raw[idx]
+            sym = symlog_transform(raw)
+            normed = self.normalizer.transform_dynamic(sym, name)
+            dynamic_pre[name] = normed
+            clipped = torch.clamp(normed, -4.0, 4.0)
+            dynamic_final[name] = clipped
 
-        # Задача 320.5: Сохраняем копию до clamp для диагностики saturation
-        x_pre_clip = x_final.clone()
+        # Сборка финального тензора и pre_clip тензора
+        final_channels = []
+        pre_clip_channels = []
+        for i in range(11):
+            if i in static_indices:
+                pos = static_indices.index(i)
+                final_channels.append(static_norm[pos])
+                pre_clip_channels.append(static_norm[pos])
+            else:
+                name = dyn_info[i]
+                final_channels.append(dynamic_final[name])
+                pre_clip_channels.append(dynamic_pre[name])
 
-        # Защита 1: Разный клиппинг для разных каналов согласно статистике
-        # Каналы с высокой волатильностью (OFI, DeltaImb, DeltaSpread) ужесточем до [-3, 3]
-        # Остальные оставляем [-5, 5]
-        x_final = torch.clamp(x_final, -5.0, 5.0)  # Сначала общий клип
-        # Ужесточение для критических каналов
-        x_final[:, 3, :] = torch.clamp(x_final[:, 3, :], -3.0, 3.0)   # OFI
-        x_final[:, 9, :] = torch.clamp(x_final[:, 9, :], -3.0, 3.0)   # DeltaImb
-        x_final[:, 10, :] = torch.clamp(x_final[:, 10, :], -3.0, 3.0) # DeltaSpread
-
-        # Сохраняем пост-клип версию (перед nan_to_num) для диагностики
+        x_final = torch.stack(final_channels, dim=1)
+        x_pre_clip = torch.stack(pre_clip_channels, dim=1)
         x_post_clip = x_final.clone()
 
-        # Защита 2: Замена NaN/Inf на безопасные значения
+        # Защита: Замена NaN/Inf на безопасные значения
         x_final = torch.nan_to_num(x_final, nan=0.0, posinf=5.0, neginf=-5.0)
 
         # Логирование saturation для отладки (только для ограниченного числа сэмплов)
@@ -1738,8 +1756,8 @@ class LOBDataset(Dataset):
         for ch_idx, ch_name in enumerate(self.channel_names):
             pre_flat = x_pre[:, ch_idx, :]
             post_flat = x_post[:, ch_idx, :]
-            # Определяем лимит для канала
-            limit = 3.0 if ch_idx in (3, 9, 10) else 5.0
+            # Определяем лимит для канала (динамические каналы используют единый лимит 4.0)
+            limit = 4.0 if ch_idx in (3, 9, 10) else 5.0
 
             below = (pre_flat < -limit).sum().item()
             above = (pre_flat > limit).sum().item()
