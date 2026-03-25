@@ -146,6 +146,11 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit_train_batches", type=int, default=0, help="Limit number of training batches per epoch (0 = no limit)")
     parser.add_argument("--limit_val_batches", type=int, default=0, help="Limit number of validation batches per epoch (0 = no limit)")
 
+    # Задача 324.5: Guard для dynamic scale
+    parser.add_argument("--allow-bad-dynamic-scale", action="store_true", dest="allow_bad_dynamic_scale",
+                        help="Разрешить запуск обучения даже при плохом dynamic scale (saturation > 10%%). "
+                             "По умолчанию False — обучение останавливается с RuntimeError.")
+
     return parser
 
 

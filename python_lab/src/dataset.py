@@ -166,6 +166,67 @@ def compute_ofi_from_lob_cache(bid_p: np.ndarray, ask_p: np.ndarray,
     return compute_ofi_from_lob(bid_p, ask_p, bid_v_raw, ask_v_raw, update_ids)
 
 
+def compute_delta_imb_from_lob_cache(bid_v: np.ndarray, ask_v: np.ndarray,
+                                      update_ids: np.ndarray) -> np.ndarray:
+    """
+    Event-consistent расчёт DeltaImb (скорость изменения Imbalance).
+
+    Принимает LOG1P объёмы. Маскирует дельты по update_ids — там где стакан
+    не обновлялся (id_diff == 0), дельта равна 0, как в OFI.
+
+    Args:
+        bid_v: (N, 50) log1p bid volumes
+        ask_v: (N, 50) log1p ask volumes
+        update_ids: (N,) last_update_id values
+    Returns:
+        (N,) DeltaImb values, event-consistent, dtype=np.float32
+    """
+    # Восстанавливаем сырые объёмы
+    bid_v_raw = np.exp(np.clip(bid_v, None, 20.0)) - 1.0  # (N, 50)
+    ask_v_raw = np.exp(np.clip(ask_v, None, 20.0)) - 1.0  # (N, 50)
+
+    # Суммарный дисбаланс по всем уровням (скаляр на тик)
+    sum_bid = bid_v_raw.sum(axis=1)  # (N,)
+    sum_ask = ask_v_raw.sum(axis=1)  # (N,)
+    imb = (sum_bid - sum_ask) / (sum_bid + sum_ask + 1e-8)  # (N,)
+
+    # Дельта дисбаланса
+    imb_diff = np.diff(imb, prepend=imb[0])  # (N,)
+
+    # Маска реальных обновлений стакана (аналогично OFI)
+    id_diff = np.diff(update_ids, prepend=update_ids[0])
+    is_update = id_diff > 0
+
+    return np.where(is_update, imb_diff, 0.0).astype(np.float32)
+
+
+def compute_delta_spread_from_lob_cache(ask_p: np.ndarray, bid_p: np.ndarray,
+                                         update_ids: np.ndarray) -> np.ndarray:
+    """
+    Event-consistent расчёт DeltaSpread (скорость изменения спреда).
+
+    Маскирует дельты по update_ids — там где стакан не обновлялся, дельта = 0.
+
+    Args:
+        ask_p: (N, 50) relative ask prices
+        bid_p: (N, 50) relative bid prices
+        update_ids: (N,) last_update_id values
+    Returns:
+        (N,) DeltaSpread values, event-consistent, dtype=np.float32
+    """
+    # Спред лучшего уровня
+    spread = ask_p[:, 0] - bid_p[:, 0]  # (N,)
+
+    # Дельта спреда
+    spread_diff = np.diff(spread, prepend=spread[0])  # (N,)
+
+    # Маска реальных обновлений стакана
+    id_diff = np.diff(update_ids, prepend=update_ids[0])
+    is_update = id_diff > 0
+
+    return np.where(is_update, spread_diff, 0.0).astype(np.float32)
+
+
 def compute_past_returns_globally(mid_prices: np.ndarray, lags: List[int] = [10, 50, 100]) -> np.ndarray:
     """
     Глобальный расчет Past Returns для всех сэмплов сразу.
@@ -964,6 +1025,17 @@ class LOBDataset(Dataset):
             self.update_id_raw
         )
         print(f"[DEBUG] ofi raw (per-tick, non-cumulative): min={self.ofi_cache.min():.6f}, max={self.ofi_cache.max():.6f}, mean={self.ofi_cache.mean():.6f}")
+
+        # 5. Расчёт DeltaImb и DeltaSpread — event-consistent (Задача 324.1)
+        # Используем те же update_id_raw что и OFI — единый event-time контракт
+        self.delta_imb_cache = compute_delta_imb_from_lob_cache(
+            bid_v_matrix, ask_v_matrix, self.update_id_raw
+        )
+        self.delta_spread_cache = compute_delta_spread_from_lob_cache(
+            ask_p_matrix, bid_p_matrix, self.update_id_raw
+        )
+        print(f"[DEBUG] delta_imb (event-consistent): min={self.delta_imb_cache.min():.6f}, max={self.delta_imb_cache.max():.6f}, mean={self.delta_imb_cache.mean():.6f}")
+        print(f"[DEBUG] delta_spread (event-consistent): min={self.delta_spread_cache.min():.6f}, max={self.delta_spread_cache.max():.6f}, mean={self.delta_spread_cache.mean():.6f}")
         
         # Шаг 1: Диагностика сырых признаков (индикаторов)
         print(f"[DEBUG] past_ret raw (lag=10): min={self.past_ret_cache[10].min():.6f}, max={self.past_ret_cache[10].max():.6f}")
@@ -1378,45 +1450,62 @@ class LOBDataset(Dataset):
         """
         Нормализует канал используя статистики из normalizer.
         Векторизованная версия (Задача 312.2.1).
+
+        Задача 324: normalizer обучен на 8 статических каналах (400 признаков).
+        Маппинг реальных channel_idx → позиция в normalizer (feat_0..feat_399):
+          ch0=MicropriceDev → pos 0  (feat_0..49)
+          ch1=Vol           → pos 1  (feat_50..99)
+          ch2=Imb           → pos 2  (feat_100..149)
+          ch4=VIB           → pos 3  (feat_150..199)
+          ch5=Ret_10        → pos 4  (feat_200..249)
+          ch6=Ret_50        → pos 5  (feat_250..299)
+          ch7=Ret_100       → pos 6  (feat_300..349)
+          ch8=Spread        → pos 7  (feat_350..399)
+        Динамические каналы (3=OFI, 9=DeltaImb, 10=DeltaSpread) нормализуются отдельно.
         """
         if self.normalizer is None:
             return channel_data
-        
+
+        # Маппинг реального channel_idx → позиция в normalizer params (feat_N)
+        _STATIC_CHANNEL_TO_NORM_POS = {0: 0, 1: 1, 2: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7}
+        norm_pos = _STATIC_CHANNEL_TO_NORM_POS.get(channel_idx, None)
+        if norm_pos is None:
+            # Динамический канал — не должен попадать сюда
+            return channel_data
+
         n_levels = channel_data.shape[1]
-        start_feat_idx = channel_idx * n_levels
-        
+        start_feat_idx = norm_pos * n_levels
+
         # Векторизованное извлечение параметров для всех уровней сразу
         if self.normalizer.scaler_type == "zscore":
             means = []
             stds = []
             for level in range(n_levels):
-                feat_idx = start_feat_idx + level
-                param_key = f"feat_{feat_idx}"
+                param_key = f"feat_{start_feat_idx + level}"
                 params = self.normalizer.params.get(param_key, {})
                 means.append(params.get("mean", 0.0))
                 stds.append(params.get("std", 1.0))
-            
+
             mean_tensor = torch.tensor(means, device=channel_data.device, dtype=channel_data.dtype)
             std_tensor = torch.tensor(stds, device=channel_data.device, dtype=channel_data.dtype)
             return (channel_data - mean_tensor) / (std_tensor + 1e-8)
-        
-        elif self.normalizer.scaler_type == "robust":
+
+        elif self.normalizer.scaler_type in ("robust", "winsor_robust"):
             medians = []
             iqrs = []
             for level in range(n_levels):
-                feat_idx = start_feat_idx + level
-                param_key = f"feat_{feat_idx}"
+                param_key = f"feat_{start_feat_idx + level}"
                 params = self.normalizer.params.get(param_key, {})
                 medians.append(params.get("median", 0.0))
                 iqrs.append(params.get("iqr", 1.0))
-            
+
             median_tensor = torch.tensor(medians, device=channel_data.device, dtype=channel_data.dtype)
             iqr_tensor = torch.tensor(iqrs, device=channel_data.device, dtype=channel_data.dtype)
             return (channel_data - median_tensor) / (iqr_tensor + 1e-8)
-        
+
         return channel_data
 
-    def _calculate_6_channels_raw(self, ask_p, ask_v, bid_p, bid_v, vib_raw=None, pr_raw=None, ofi_precomputed=None):
+    def _calculate_6_channels_raw(self, ask_p, ask_v, bid_p, bid_v, vib_raw=None, pr_raw=None, ofi_precomputed=None, di_precomputed=None, ds_precomputed=None):
         """
         Единый метод формирования 11 каналов LOB (Задача 319).
         Каналы: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread,
@@ -1433,11 +1522,11 @@ class LOBDataset(Dataset):
         ch[6]: Ret_50 — medium-term momentum (лог-возврат за 50 тиков)
         ch[7]: Ret_100 — long-term trend (лог-возврат за 100 тиков)
         ch[8]: Spread — нормализованный спред (ask_0 - bid_0) / mid
-        ch[9]: DeltaImb — скорость изменения Imbalance (first derivative)
-        ch[10]: DeltaSpread — скорость изменения спреда
+        ch[9]: DeltaImb — скорость изменения Imbalance (event-consistent, из кэша)
+        ch[10]: DeltaSpread — скорость изменения спреда (event-consistent, из кэша)
 
         Примечание: Динамические каналы (OFI, DeltaImb, DeltaSpread) возвращаются в сыром виде.
-        OFI берётся из precomputed кэша (ofi_precomputed), Delta-каналы вычисляются как производные.
+        Все три берутся из precomputed кэшей с единым event-time контрактом (update_id_raw).
         Их последующая нормализация выполняется отдельно через symlog + robust normalizer.
         """
         eps = 1e-8
@@ -1520,16 +1609,24 @@ class LOBDataset(Dataset):
         # ch[8]: Spread — нормализованный спред
         spread = (ask_p_0 - bid_p_0).unsqueeze(-1).expand(-1, 50)
 
-        # ===== НОВЫЕ TEMPORAL DERIVATIVE КАНАЛЫ (Задача 318.4) =====
+        # ===== DYNAMIC TEMPORAL КАНАЛЫ (Задача 324.1: event-consistent из кэшей) =====
 
-        # ch[9]: DeltaImb — скорость изменения Imbalance (first derivative)
-        delta_imb = torch.diff(imb_ch_raw[:, 0], dim=0, prepend=torch.zeros(1, device=imb_ch_raw.device))
-        delta_imb_ch = delta_imb.unsqueeze(-1).expand(-1, 50)  # (seq_len, 50)
+        # ch[9]: DeltaImb — скорость изменения Imbalance (event-consistent)
+        if di_precomputed is not None:
+            delta_imb_ch = di_precomputed.unsqueeze(-1).expand(-1, 50)
+        else:
+            # Fallback: torch.diff (только если кэш недоступен — не event-consistent)
+            delta_imb = torch.diff(imb_ch_raw[:, 0], dim=0, prepend=torch.zeros(1, device=imb_ch_raw.device))
+            delta_imb_ch = delta_imb.unsqueeze(-1).expand(-1, 50)
 
-        # ch[10]: DeltaSpread — скорость изменения спреда
-        spread_1d = ask_p_0 - bid_p_0  # (seq_len,)
-        delta_spread = torch.diff(spread_1d, dim=0, prepend=torch.zeros(1, device=spread_1d.device))
-        delta_spread_ch = delta_spread.unsqueeze(-1).expand(-1, 50)
+        # ch[10]: DeltaSpread — скорость изменения спреда (event-consistent)
+        if ds_precomputed is not None:
+            delta_spread_ch = ds_precomputed.unsqueeze(-1).expand(-1, 50)
+        else:
+            # Fallback: torch.diff (только если кэш недоступен — не event-consistent)
+            spread_1d = ask_p_0 - bid_p_0
+            delta_spread = torch.diff(spread_1d, dim=0, prepend=torch.zeros(1, device=spread_1d.device))
+            delta_spread_ch = delta_spread.unsqueeze(-1).expand(-1, 50)
 
         return price_ch_raw, vol_ch_raw, imb_ch_raw, ofi_raw, vib_ch_raw, \
                ret_10_ch_raw, ret_50_ch_raw, ret_100_ch_raw, spread, \
@@ -1572,6 +1669,15 @@ class LOBDataset(Dataset):
             ofi_precomp = None
             if hasattr(self, 'ofi_cache') and self.ofi_cache is not None:
                 ofi_precomp = torch.from_numpy(self.ofi_cache[data]).float()
+
+            # Задача 324.1: DeltaImb/DeltaSpread из event-consistent кэшей
+            di_precomp = None
+            if hasattr(self, 'delta_imb_cache') and self.delta_imb_cache is not None:
+                di_precomp = torch.from_numpy(self.delta_imb_cache[data]).float()
+
+            ds_precomp = None
+            if hasattr(self, 'delta_spread_cache') and self.delta_spread_cache is not None:
+                ds_precomp = torch.from_numpy(self.delta_spread_cache[data]).float()
         else:
             # Для DataFrame (streaming/temp_ds)
             df_raw = data
@@ -1581,18 +1687,39 @@ class LOBDataset(Dataset):
             bid_v = torch.from_numpy(df_raw.select([f"feat_bid_v_{i}" for i in range(50)]).to_numpy()).float()
             vib_raw, pr_raw = None, None
             ofi_precomp = None
+            di_precomp = None
+            ds_precomp = None
 
         # Используем единый метод расчета (11 каналов после Задача 319)
         p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw, \
             di_raw, ds_raw = self._calculate_6_channels_raw(
-                ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
+                ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw,
+                ofi_precomputed=ofi_precomp,
+                di_precomputed=di_precomp,
+                ds_precomputed=ds_precomp
             )
 
-        channels = torch.cat([
-            p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw,
-            di_raw, ds_raw
-        ], dim=1).numpy()
-        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(550)])
+        # Задача 324.1/324.3: Возвращаем ТОЛЬКО статические каналы (8 × 50 = 400 признаков).
+        # Динамические каналы (OFI=3, DeltaImb=9, DeltaSpread=10) исключены намеренно —
+        # они обрабатываются отдельно через dynamic_data в train_data.py,
+        # чтобы не попасть в static fit дважды.
+        static_channels = [p_raw, v_raw, i_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw]
+        channels = torch.cat(static_channels, dim=1).numpy()
+        return pl.DataFrame(channels, schema=[f"feat_{i}" for i in range(400)])
+
+    def _apply_dynamic_transform(self, raw: 'torch.Tensor', channel_name: str):
+        """
+        Задача 324.3: Единая вспомогательная функция для нормализации dynamic-каналов.
+        Используется и при fit (через _compute_channels_for_normalization) и в runtime (_process_sample).
+        Порядок: symlog → robust normalize (dynamic_params) → clamp[-4, 4]
+
+        Returns:
+            (normed, clipped): тензоры до и после clamp
+        """
+        sym = symlog_transform(raw)
+        normed = self.normalizer.transform_dynamic(sym, channel_name)
+        clipped = torch.clamp(normed, -4.0, 4.0)
+        return normed, clipped
 
     def _process_sample(self, x_raw, y, v, w, regime_id, ts, mid, idx=None, f_ret=None):
         """
@@ -1649,28 +1776,39 @@ class LOBDataset(Dataset):
         if idx is not None and hasattr(self, 'ofi_cache') and self.ofi_cache is not None:
             ofi_precomp = torch.from_numpy(self.ofi_cache[idx : idx + self.seq_len].copy()).float()
 
+        # Задача 324.1: DeltaImb/DeltaSpread из event-consistent кэшей
+        di_precomp = None
+        if idx is not None and hasattr(self, 'delta_imb_cache') and self.delta_imb_cache is not None:
+            di_precomp = torch.from_numpy(self.delta_imb_cache[idx : idx + self.seq_len].copy()).float()
+
+        ds_precomp = None
+        if idx is not None and hasattr(self, 'delta_spread_cache') and self.delta_spread_cache is not None:
+            ds_precomp = torch.from_numpy(self.delta_spread_cache[idx : idx + self.seq_len].copy()).float()
+
         # Расчет сырых каналов (Единый источник правды, 11 каналов после Задача 319)
         p_raw, v_raw, i_raw, o_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw, \
             di_raw, ds_raw = self._calculate_6_channels_raw(
-                ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw, ofi_precomputed=ofi_precomp
+                ask_p, ask_v, bid_p, bid_v, vib_raw, pr_raw,
+                ofi_precomputed=ofi_precomp,
+                di_precomputed=di_precomp,
+                ds_precomputed=ds_precomp
             )
 
         # Нормализация каналов: статические обычным z-score/robust, динамические через symlog+robust+clamp
         static_indices = [0, 1, 2, 4, 5, 6, 7, 8]
         static_channels = [p_raw, v_raw, i_raw, vi_raw, ret10_raw, ret50_raw, ret100_raw, sp_raw]
-        static_norm = [self.normalize_channel(ch, idx) for idx, ch in zip(static_indices, static_channels)]
+        static_norm = [self.normalize_channel(ch, ch_idx) for ch_idx, ch in zip(static_indices, static_channels)]
 
-        # Динамические каналы: OFI, DeltaImb, DeltaSpread
+        # Задача 324.3: Динамические каналы через единую вспомогательную функцию
+        # Тот же путь что и при fit normalizer: symlog → robust → clamp[-4,4]
         dyn_info = {3: 'ofi', 9: 'delta_imb', 10: 'delta_spread'}
         dyn_raw = {3: o_raw, 9: di_raw, 10: ds_raw}
         dynamic_pre = {}
         dynamic_final = {}
-        for idx, name in dyn_info.items():
-            raw = dyn_raw[idx]
-            sym = symlog_transform(raw)
-            normed = self.normalizer.transform_dynamic(sym, name)
+        for ch_idx, name in dyn_info.items():
+            raw = dyn_raw[ch_idx]
+            normed, clipped = self._apply_dynamic_transform(raw, name)
             dynamic_pre[name] = normed
-            clipped = torch.clamp(normed, -4.0, 4.0)
             dynamic_final[name] = clipped
 
         # Сборка финального тензора и pre_clip тензора

@@ -95,16 +95,23 @@ def _fit_normalizer_on_train(full_dataset, train_ds, normalizer, args, winsor_li
     print("\nFitting normalizer on original training set (channels-based)...")
     train_indices_for_fit = train_ds.indices
     train_channels_df = full_dataset._compute_channels_for_normalization(train_indices_for_fit)
-    print(f"Features dimension check: {train_channels_df.shape[1]} channels features")
-    # Извлекаем сырые динамические каналы (первый уровень каждого канала)
-    arr = train_channels_df.to_numpy()
-    ofi_raw = arr[:, 150]   # channel 3 (OFI), первый уровень
-    delta_imb_raw = arr[:, 450]  # channel 9 (DeltaImb), первый уровень
-    delta_spread_raw = arr[:, 500]  # channel 10 (DeltaSpread), первый уровень
-    # Применяем symlog трансформацию
+    print(f"Static features dimension check: {train_channels_df.shape[1]} features (8 static channels × 50 levels, dynamic channels fitted separately)")
+
+    # Задача 324.2: Используем полные кэши train-части, а не три суррогатных столбца
+    # Берём все значения ofi_cache, delta_imb_cache, delta_spread_cache для train-индексов
+    train_idx_arr = np.array(train_indices_for_fit)
+
+    ofi_raw = full_dataset.ofi_cache[train_idx_arr]
+    delta_imb_raw = full_dataset.delta_imb_cache[train_idx_arr]
+    delta_spread_raw = full_dataset.delta_spread_cache[train_idx_arr]
+
+    # Задача 324.3: Применяем symlog через ту же функцию что и в runtime (_apply_dynamic_transform).
+    # Путь ИДЕНТИЧЕН: symlog_transform → transform_dynamic (median/iqr) → clamp[-4,4].
+    # symlog_transform импортирован из normalization.py — единый источник.
     ofi_sym = symlog_transform(ofi_raw)
     delta_imb_sym = symlog_transform(delta_imb_raw)
     delta_spread_sym = symlog_transform(delta_spread_raw)
+
     dynamic_data = {
         "ofi": ofi_sym,
         "delta_imb": delta_imb_sym,
@@ -113,6 +120,106 @@ def _fit_normalizer_on_train(full_dataset, train_ds, normalizer, args, winsor_li
     normalizer.fit(train_channels_df, winsor_limits=winsor_limits, dynamic_data=dynamic_data)
     normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
     print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
+
+    # Задача 324.4: Агрегированная диагностика по всему train split после fit
+    # Применяем полный pipeline (symlog → robust → clamp) и считаем статистику
+    diag_metrics = _log_dynamic_train_diagnostics(
+        {"ofi": ofi_sym, "delta_imb": delta_imb_sym, "delta_spread": delta_spread_sym},
+        normalizer,
+        clip_limit=4.0
+    )
+
+    # Задача 324.5: Hard guard — останавливаем обучение при плохом scale
+    allow_bad = getattr(args, 'allow_bad_dynamic_scale', False)
+    _check_dynamic_scale_guard(diag_metrics, allow_bad_scale=allow_bad)
+
+
+def _log_dynamic_train_diagnostics(dynamic_sym: dict, normalizer, clip_limit: float = 4.0):
+    """
+    Задача 324.4: Агрегированная диагностика dynamic-каналов по всему train split.
+    Печатается один раз после fit normalizer, до старта первой эпохи.
+    Возвращает dict с метриками для последующего guard-check.
+    """
+    print("\n" + "=" * 70)
+    print("DYNAMIC CHANNEL TRAIN DIAGNOSTICS (после fit normalizer)")
+    print("=" * 70)
+    metrics = {}
+    for name, sym_arr in dynamic_sym.items():
+        p = normalizer.dynamic_params.get(name, {})
+        median = p.get("median", 0.0)
+        iqr = p.get("iqr", 1.0)
+        eps = normalizer.eps
+
+        normed = (sym_arr - median) / (iqr + eps)
+
+        n = len(normed)
+        below = np.sum(normed < -clip_limit)
+        above = np.sum(normed > clip_limit)
+        sat_pct = (below + above) / n * 100 if n > 0 else 0.0
+        zero_pct = np.sum(normed == 0.0) / n * 100 if n > 0 else 0.0
+
+        p01 = float(np.percentile(normed, 1))
+        p50 = float(np.percentile(normed, 50))
+        p99 = float(np.percentile(normed, 99))
+        dyn_range = p99 - p01
+
+        print(f"\n  [{name}]")
+        print(f"    fit params: median={median:.6f}, iqr={iqr:.6f}")
+        print(f"    min={normed.min():.4f}, max={normed.max():.4f}, mean={normed.mean():.4f}, std={normed.std():.4f}")
+        print(f"    p01={p01:.4f}, p50={p50:.4f}, p99={p99:.4f}, range(p99-p01)={dyn_range:.4f}")
+        print(f"    saturation: below={below/n*100:.2f}%, above={above/n*100:.2f}%, total={sat_pct:.2f}%")
+        print(f"    zero%={zero_pct:.2f}%")
+
+        metrics[name] = {
+            "sat_pct": sat_pct,
+            "zero_pct": zero_pct,
+            "dyn_range": dyn_range,
+        }
+
+    print("=" * 70 + "\n")
+    return metrics
+
+
+def _check_dynamic_scale_guard(metrics: dict, allow_bad_scale: bool = False):
+    """
+    Задача 324.5: Hard guard — останавливает обучение при заведомо плохом dynamic scale.
+    Проверяет каждый канал на три условия:
+      1. saturation > 10%
+      2. zero% > 95% (канал схлопнулся в ноль)
+      3. range(p99-p01) < 0.01 (канал фактически константный)
+    """
+    SAT_THRESHOLD = 10.0
+    ZERO_THRESHOLD = 95.0
+    RANGE_THRESHOLD = 0.01
+
+    violations = []
+    for name, m in metrics.items():
+        if m["sat_pct"] > SAT_THRESHOLD:
+            violations.append(
+                f"  [{name}] saturation={m['sat_pct']:.2f}% > {SAT_THRESHOLD}% — слишком много значений за пределами clamp"
+            )
+        if m["zero_pct"] > ZERO_THRESHOLD:
+            violations.append(
+                f"  [{name}] zero%={m['zero_pct']:.2f}% > {ZERO_THRESHOLD}% — канал схлопнулся в ноль"
+            )
+        if m["dyn_range"] < RANGE_THRESHOLD:
+            violations.append(
+                f"  [{name}] range(p99-p01)={m['dyn_range']:.6f} < {RANGE_THRESHOLD} — канал фактически константный"
+            )
+
+    if violations:
+        msg = (
+            "\n" + "!" * 70 + "\n"
+            "DYNAMIC SCALE GUARD: Обнаружены проблемы с нормализацией dynamic-каналов!\n"
+            "Обучение остановлено. Исправьте pipeline или используйте --allow-bad-dynamic-scale.\n\n"
+            "Нарушения:\n" + "\n".join(violations) + "\n"
+            "!" * 70
+        )
+        if allow_bad_scale:
+            print(msg)
+            print("[WARN] --allow-bad-dynamic-scale активен, продолжаем несмотря на нарушения.\n")
+        else:
+            raise RuntimeError(msg)
 
 
 def _run_normalized_nan_checks(train_ds, full_dataset):
