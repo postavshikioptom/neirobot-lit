@@ -117,6 +117,30 @@ def _fit_normalizer_on_train(full_dataset, train_ds, normalizer, args, winsor_li
         "delta_imb": delta_imb_sym,
         "delta_spread": delta_spread_sym
     }
+
+    # Задача 324.8: диагностика до fit — видим raw/sym распределение и будущий IQR
+    print("\n" + "=" * 70)
+    print("PRE-FIT DYNAMIC CHANNEL DIAGNOSTICS")
+    print("=" * 70)
+    for _name, _raw, _sym in [
+        ("ofi", ofi_raw, ofi_sym),
+        ("delta_imb", delta_imb_raw, delta_imb_sym),
+        ("delta_spread", delta_spread_raw, delta_spread_sym),
+    ]:
+        _q25 = float(np.quantile(_sym, 0.25))
+        _q75 = float(np.quantile(_sym, 0.75))
+        _q10 = float(np.quantile(_sym, 0.10))
+        _q90 = float(np.quantile(_sym, 0.90))
+        _raw_iqr = _q75 - _q25
+        _alt_iqr = _q90 - _q10
+        _iqr_floor = 1e-3
+        _iqr = _raw_iqr if np.isfinite(_raw_iqr) and _raw_iqr >= _iqr_floor else max(_alt_iqr, _iqr_floor)
+        print(f"\n  [{_name}]")
+        print(f"    raw:  p01={float(np.percentile(_raw, 1)):.6f}, p50={float(np.percentile(_raw, 50)):.6f}, p99={float(np.percentile(_raw, 99)):.6f}")
+        print(f"    sym:  p01={float(np.percentile(_sym, 1)):.6f}, p50={float(np.percentile(_sym, 50)):.6f}, p99={float(np.percentile(_sym, 99)):.6f}")
+        print(f"    будущий iqr: raw_iqr={_raw_iqr:.6f}, alt_iqr={_alt_iqr:.6f} → iqr={_iqr:.6f}")
+    print("=" * 70 + "\n")
+
     normalizer.fit(train_channels_df, winsor_limits=winsor_limits, dynamic_data=dynamic_data)
     normalizer.save(scaler_type=args.scaler_type, winsor_limits=winsor_limits)
     print(f"✓ Normalizer fitted on {len(train_channels_df)} samples")
@@ -136,9 +160,15 @@ def _fit_normalizer_on_train(full_dataset, train_ds, normalizer, args, winsor_li
 
 def _log_dynamic_train_diagnostics(dynamic_sym: dict, normalizer, clip_limit: float = 4.0):
     """
-    Задача 324.4: Агрегированная диагностика dynamic-каналов по всему train split.
+    Задача 324.4 + 324.9: Агрегированная диагностика dynamic-каналов по всему train split.
     Печатается один раз после fit normalizer, до старта первой эпохи.
-    Возвращает dict с метриками для последующего guard-check.
+    Возвращает dict с метрик для последующего guard-check.
+
+    Критически важно: pipeline должен быть ТОЧНО ТАКИМ ЖЕ, как в runtime (_apply_dynamic_transform):
+      1. symlog already applied (passed as sym_arr)
+      2. preclip (p0.01/p0.99) — если задано в dynamic_params
+      3. robust normalize: (x - median) / (iqr + eps)  БЕЗ scale_multiplier (Задача 324.9)
+      4. clamp [-4, 4]
     """
     print("\n" + "=" * 70)
     print("DYNAMIC CHANNEL TRAIN DIAGNOSTICS (после fit normalizer)")
@@ -150,7 +180,16 @@ def _log_dynamic_train_diagnostics(dynamic_sym: dict, normalizer, clip_limit: fl
         iqr = p.get("iqr", 1.0)
         eps = normalizer.eps
 
-        normed = (sym_arr - median) / (iqr + eps)
+        # Задача 324.9: применяем preclip ДО нормализации (как в runtime _apply_dynamic_transform)
+        preclip_low = p.get("preclip_low")
+        preclip_high = p.get("preclip_high")
+        x = sym_arr.copy()
+        if preclip_low is not None and preclip_high is not None:
+            x = np.clip(x, preclip_low, preclip_high)
+
+        # Задача 324.9: для dynamic-каналов НЕ используем scale_multiplier (только iqr + eps)
+        scale = iqr + eps
+        normed = (x - median) / scale
 
         n = len(normed)
         below = np.sum(normed < -clip_limit)
@@ -165,6 +204,7 @@ def _log_dynamic_train_diagnostics(dynamic_sym: dict, normalizer, clip_limit: fl
 
         print(f"\n  [{name}]")
         print(f"    fit params: median={median:.6f}, iqr={iqr:.6f}")
+        print(f"    preclip: low={preclip_low}, high={preclip_high}")
         print(f"    min={normed.min():.4f}, max={normed.max():.4f}, mean={normed.mean():.4f}, std={normed.std():.4f}")
         print(f"    p01={p01:.4f}, p50={p50:.4f}, p99={p99:.4f}, range(p99-p01)={dyn_range:.4f}")
         print(f"    saturation: below={below/n*100:.2f}%, above={above/n*100:.2f}%, total={sat_pct:.2f}%")

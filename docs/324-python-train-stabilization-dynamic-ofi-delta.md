@@ -36,7 +36,7 @@
 
 ## Подзадачи
 
-### 324.1. Перевести `DeltaImb` и `DeltaSpread` на тот же event-consistent источник, что и `OFI`
+### 324.1. Перевести `DeltaImb` и `DeltaSpread` на тот же event-consistent источник, что и `OFI` - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/dataset.py`
@@ -69,7 +69,7 @@
 
 ---
 
-### 324.2. Переделать fit dynamic-normalizer так, чтобы он видел полное train-распределение, а не три суррогатных столбца
+### 324.2. Переделать fit dynamic-normalizer так, чтобы он видел полное train-распределение, а не три суррогатных столбца - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/train_data.py`
@@ -103,7 +103,7 @@
 
 ---
 
-### 324.3. Синхронизировать train-fit pipeline и runtime pipeline для dynamic-каналов
+### 324.3. Синхронизировать train-fit pipeline и runtime pipeline для dynamic-каналов - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/dataset.py`
@@ -129,7 +129,7 @@
 
 ---
 
-### 324.4. Заменить per-sample clip-диагностику на диагностику по всему train split
+### 324.4. Заменить per-sample clip-диагностику на диагностику по всему train split - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/dataset.py`
@@ -157,7 +157,7 @@
 
 ---
 
-### 324.5. Добавить hard-guard, который не даст запускать обучение на заведомо сломанном dynamic-scale
+### 324.5. Добавить hard-guard, который не даст запускать обучение на заведомо сломанном dynamic-scale - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/train_data.py`
@@ -185,7 +185,7 @@
 
 ---
 
-### 324.6. Провести узкую причинно-следственную проверку на одном повторном запуске
+### 324.6. Провести узкую причинно-следственную проверку на одном повторном запуске - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/train_cli.py`
@@ -220,7 +220,7 @@
 
 ---
 
-### 324.7. Сделать одну узкую абляцию, чтобы доказать, что проблема была именно в dynamic feature contract
+### 324.7. Сделать одну узкую абляцию, чтобы доказать, что проблема была именно в dynamic feature contract - ЗАВЕРШЕНО
 
 **Файлы:**
 - `python_lab/src/train_cli.py`
@@ -248,6 +248,141 @@
 Эта абляция отделяет реальный signal recovery от случайного улучшения и не дает снова обвинить LiT-архитектуру без доказательств.
 
 ---
+=========
+# Дополнителньые подзадачи - исправления ошибок.
+### 324.8: Исправление ошибок предыдущих подзадач - ЗАВЕРШЕНО
+В normalization.py в Normalizer.fit(..., dynamic_data=...) (блок, где сейчас q25/q75/iqr для dynamic) заменить расчёт iqr на защищённый.
+Было:
+q25 = float(np.quantile(arr, 0.25))
+q75 = float(np.quantile(arr, 0.75))
+iqr = float(q75 - q25) if not math.isnan(q75 - q25) else 1.0
+entry = {"median": median, "iqr": iqr}
+Сделать:
+
+q10 = float(np.quantile(arr, 0.10))
+q25 = float(np.quantile(arr, 0.25))
+q75 = float(np.quantile(arr, 0.75))
+q90 = float(np.quantile(arr, 0.90))
+
+raw_iqr = float(q75 - q25)
+alt_iqr = float(q90 - q10)
+iqr_floor = 1e-3
+iqr = raw_iqr if np.isfinite(raw_iqr) and raw_iqr >= iqr_floor else max(alt_iqr, iqr_floor)
+
+entry = {"median": median, "iqr": iqr}
+Там же, в том же блоке dynamic, всегда сохранять pre-clip границы для runtime (не зависеть от winsor_limits).
+Добавить в entry:
+entry["preclip_low"] = float(np.quantile(arr, 0.005))
+entry["preclip_high"] = float(np.quantile(arr, 0.995))
+И уже существующие winsor_low/winsor_high оставить как есть (если winsor_limits переданы).
+
+В normalization.py в transform_dynamic() синхронизировать scaling со static robust-веткой.
+Было:
+return (data - median_t) / (iqr_t + self.eps)
+# ...
+return (data - median) / (iqr + self.eps)
+Сделать:
+
+scale_t = (iqr_t + self.eps) / self.scale_multiplier
+return (data - median_t) / scale_t
+# ...
+scale = (iqr + self.eps) / self.scale_multiplier
+return (data - median) / scale
+В train_data.py в _log_dynamic_train_diagnostics() привести формулу к той же, что будет в runtime.
+Было:
+normed = (sym_arr - median) / (iqr + eps)
+Сделать:
+
+scale = (iqr + eps) / normalizer.scale_multiplier
+normed = (sym_arr - median) / scale
+В dataset.py в _apply_dynamic_transform() добавить мягкий pre-clip в symlog-пространстве перед нормализацией.
+Было:
+sym = symlog_transform(raw)
+normed = self.normalizer.transform_dynamic(sym, channel_name)
+clipped = torch.clamp(normed, -4.0, 4.0)
+Сделать:
+
+sym = symlog_transform(raw)
+p = self.normalizer.dynamic_params.get(channel_name, {})
+low = p.get("preclip_low")
+high = p.get("preclip_high")
+if low is not None and high is not None:
+    low_t = torch.tensor(low, device=sym.device, dtype=sym.dtype)
+    high_t = torch.tensor(high, device=sym.device, dtype=sym.dtype)
+    sym = torch.clamp(sym, low_t, high_t)
+
+normed = self.normalizer.transform_dynamic(sym, channel_name)
+clipped = torch.clamp(normed, -4.0, 4.0)
+В train_data.py в _fit_normalizer_on_train() добавить диагностический print до normalizer.fit(...) по каждому dynamic-каналу: raw p01/p50/p99, sym p01/p50/p99, будущий iqr.
+Это нужно, чтобы видеть причину saturation до guard-а и быстро валидировать фикс.
+
+------------
+Все 5 правок задачи 324.8 выполнены:
+
+normalization.py — защищённый IQR с fallback на Q10-Q90 + всегда сохраняем preclip_low/high
+normalization.py — transform_dynamic синхронизирован со static robust-веткой через scale_multiplier
+train_data.py — _log_dynamic_train_diagnostics использует ту же формулу что и runtime
+dataset.py — _apply_dynamic_transform добавляет мягкий pre-clip перед нормализацией
+train_data.py — диагностический print перед normalizer.fit() с raw/sym p01/p50/p99 и будущим IQR
+
+## Задача 324.9: Исправление - у вас сейчас узкое место одно: `delta_imb` (sat 19.18%).  
+Что править конкретно:
+
+1. В [normalization.py](/D:/MAX/PYTHON/NEURAL-BOTS/neirobot-lit/python_lab/src/normalization.py) в `Normalizer.fit(..., dynamic_data=...)` изменить выбор `iqr` для dynamic-каналов.
+Сейчас `delta_imb` берёт слишком узкий `q75-q25=0.0045`, из-за этого scale слишком маленький.
+Заменить логику:
+```python
+raw_iqr = q75 - q25
+alt_iqr = q90 - q10
+iqr_floor = 1e-3
+
+# было: iqr = raw_iqr (если не NaN)
+# сделать:
+if not np.isfinite(raw_iqr):
+    iqr = max(alt_iqr, iqr_floor)
+elif raw_iqr < max(iqr_floor, 0.35 * alt_iqr):
+    iqr = max(alt_iqr, iqr_floor)   # fallback на широкий robust-range
+else:
+    iqr = max(raw_iqr, iqr_floor)
+```
+
+2. В том же блоке `dynamic_data` сохранить preclip-границы (для runtime и диагностики), например:
+```python
+entry["preclip_low"] = float(np.quantile(arr, 0.01))
+entry["preclip_high"] = float(np.quantile(arr, 0.99))
+```
+(для `delta_imb` это особенно важно).
+
+3. В [normalization.py](/D:/MAX/PYTHON/NEURAL-BOTS/neirobot-lit/python_lab/src/normalization.py) в `transform_dynamic()` убрать `scale_multiplier` из dynamic-ветки.
+Для dynamic должно быть:
+```python
+scale = iqr + self.eps
+x = (data - median) / scale
+```
+Иначе `scale_multiplier=1.5` дополнительно раздувает значения и поднимает saturation.
+
+4. В [dataset.py](/D:/MAX/PYTHON/NEURAL-BOTS/neirobot-lit/python_lab/src/dataset.py) в `_apply_dynamic_transform()` применить preclip из `dynamic_params` до `transform_dynamic()`:
+```python
+sym = symlog_transform(raw)
+p = self.normalizer.dynamic_params.get(channel_name, {})
+if "preclip_low" in p and "preclip_high" in p:
+    sym = torch.clamp(sym, p["preclip_low"], p["preclip_high"])
+normed = self.normalizer.transform_dynamic(sym, channel_name)
+clipped = torch.clamp(normed, -4.0, 4.0)
+```
+
+5. В [train_data.py](/D:/MAX/PYTHON/NEURAL-BOTS/neirobot-lit/python_lab/src/train_data.py) в `_log_dynamic_train_diagnostics()` считать метрики точно тем же путём, что runtime:
+- preclip `sym_arr` (если есть `preclip_low/high`),
+- потом нормализация,
+- потом saturation относительно `clip_limit`.
+Иначе guard проверяет не тот pipeline.
+
+6. После этого повторный прогон: если всё ок, `delta_imb saturation` должен уйти ниже 10%.  
+Если всё ещё чуть выше, последний точечный тюнинг: для `delta_imb` повысить fallback-порог с `0.35*alt_iqr` до `0.5*alt_iqr`.
+
+
+
+==========
 
 ## Критерий завершения задачи
 

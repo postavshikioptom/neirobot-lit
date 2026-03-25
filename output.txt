@@ -1,1 +1,80 @@
-ПОСЛЕ ЗАДАЧИ 319
+ПОСЛЕ ЗАДАЧИ 324.8
+[Labeler] Labels distribution:
+  [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: 0.000500 (0.05%)
+  Horizons: [100], Threshold: 0.0005
+  single: {'label': [0, 1, 2], 'count': [247615, 60952, 62312]} | Masked: 0
+Initializing normalizer...
+Creating dataset in 'memory' mode (raw features)...
+[LOBDataset] Computing features from RAW data...
+[DEBUG] update_id_raw: shape=(370879,), dtype=int64
+[DEBUG] ofi raw (per-tick, non-cumulative): min=-2994303.000000, max=622184.625000, mean=14.205466
+[DEBUG] delta_imb (event-consistent): min=-0.825542, max=0.700583, mean=-0.000001
+[DEBUG] delta_spread (event-consistent): min=-0.003369, max=0.003244, mean=0.000000
+[DEBUG] past_ret raw (lag=10): min=-0.009178, max=0.007146
+[DEBUG] vib raw: min=-0.641032, max=0.802446
+[LOBDataset] First sample diagnostics skipped (normalizer not yet fitted)
+[LOBDataset] Loaded 370680 samples. Data mode: memory
+[LOBDataset] Label distribution:
+  Class 0: 247615 samples (66.8%)
+  Class 1: 60952 samples (16.4%)
+  Class 2: 62312 samples (16.8%)
+
+Chronological split verification:
+  Train: indices 0-259474 (259475 samples, 70.0%)
+  Val:   indices 259475-315076 (55602 samples, 15.0%)
+  Test:  indices 315077-370679 (55603 samples, 15.0%)
+
+Fitting normalizer on original training set (channels-based)...
+Static features dimension check: 400 features (8 static channels × 50 levels, dynamic channels fitted separately)
+[Normalizer] Normalization params saved to /kaggle/bots/FARTCOINUSDT/models/norm_params.json (Type: robust)
+✓ Normalizer fitted on 259475 samples
+
+======================================================================
+DYNAMIC CHANNEL TRAIN DIAGNOSTICS (после fit normalizer)
+======================================================================
+
+  [ofi]
+    fit params: median=0.000000, iqr=0.000000
+    min=-14912223.0000, max=13340994.0000, mean=-366522.0625, std=4134324.2500
+    p01=-10799159.0000, p50=0.0000, p99=10806455.0000, range(p99-p01)=21605614.0000
+    saturation: below=16.99%, above=9.72%, total=26.71%
+    zero%=73.29%
+
+  [delta_imb]
+    fit params: median=0.000000, iqr=0.004506
+    min=-133.5335, max=117.8023, mean=0.0003, std=4.8532
+    p01=-16.4390, p50=0.0000, p99=16.4149, range(p99-p01)=32.8539
+    saturation: below=6.75%, above=6.80%, total=13.56%
+    zero%=14.66%
+
+  [delta_spread]
+    fit params: median=0.000000, iqr=0.000000
+    min=-3363.6392, max=3238.6213, mean=-0.0006, std=39.4375
+    p01=-128.1506, p50=0.0000, p99=128.5257, range(p99-p01)=256.6763
+    saturation: below=6.99%, above=6.70%, total=13.68%
+    zero%=79.67%
+======================================================================
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/kaggle/working/src/train.py", line 216, in <module>
+    train()
+  File "/kaggle/working/src/train.py", line 60, in train
+    prepared = prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, horizon_weights)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/src/train_data.py", line 381, in prepare_training_data
+    _fit_normalizer_on_train(
+  File "/kaggle/working/src/train_data.py", line 134, in _fit_normalizer_on_train
+    _check_dynamic_scale_guard(diag_metrics, allow_bad_scale=allow_bad)
+  File "/kaggle/working/src/train_data.py", line 222, in _check_dynamic_scale_guard
+    raise RuntimeError(msg)
+RuntimeError: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+DYNAMIC SCALE GUARD: Обнаружены проблемы с нормализацией dynamic-каналов!
+Обучение остановлено. Исправьте pipeline или используйте --allow-bad-dynamic-scale.
+
+Нарушения:
+  [ofi] saturation=26.71% > 10.0% — слишком много значений за пределами clamp
+  [delta_imb] saturation=13.56% > 10.0% — слишком много значений за пределами clamp
+  [delta_spread] saturation=13.68% > 10.0% — слишком много значений за пределами clamp

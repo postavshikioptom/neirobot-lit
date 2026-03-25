@@ -1,0 +1,226 @@
+ПОСЛЕ ЗАДАЧИ 323
+
+Using past returns lags: [10, 50, 100]
+Total input channels: 11 (MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread)
+Data loading mode: memory
+Loading data for FARTCOINUSDT from /kaggle/bots/FARTCOINUSDT/data/raw...
+Engineering features...
+Adding labels...
+
+[Labeler] Labels distribution:
+  [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: 0.000500 (0.05%)
+  Horizons: [100], Threshold: 0.0005
+  single: {'label': [0, 1, 2], 'count': [247615, 60952, 62312]} | Masked: 0
+...
+[CLIP DIAG] Sample idx=10 saturation report:
+  Channel 0 (MicropriceDev): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+    post: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+    post: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+    post: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI): limit=4.0, %below=22.00, %above=7.00, %total=29.00
+    pre: min=-8857658.0000, max=11920869.0000, mean=-863121.6875, std=3556556.2500
+    post: min=-4.0000, max=4.0000, mean=-0.6000, std=2.0690
+  Channel 4 (VIB): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+    post: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+    post: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+    post: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+    post: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+    post: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb): limit=4.0, %below=19.00, %above=14.00, %total=33.00
+    pre: min=-122850.9766, max=569030.4375, mean=7160.3105, std=67999.6797
+    post: min=-4.0000, max=4.0000, mean=-0.2000, std=2.2893
+  Channel 10 (DeltaSpread): limit=4.0, %below=8.00, %above=8.00, %total=16.00
+    pre: min=-66.9703, max=3338.0659, mean=33.3707, std=333.3731
+    post: min=-4.0000, max=4.0000, mean=-0.0077, std=1.6012
+[LOBDataset] First Sample Statistics (z-score normalized, clipped [-5,5]):
+  Channel 0 (MicropriceDev): min=-0.4134, max=0.3673, mean=0.0287
+  Channel 1 (Vol): min=-2.3208, max=2.3194, mean=0.3170
+  Channel 2 (Imb): min=-1.6142, max=3.8219, mean=0.0456
+  Channel 3 (OFI): min=-4.0000, max=4.0000, mean=-0.6000
+  Channel 4 (VIB): min=-0.3540, max=0.8900, mean=0.2431
+  Channel 5 (Ret_10): min=-0.7849, max=1.0469, mean=0.1466
+  Channel 6 (Ret_50): min=0.0000, max=1.2702, mean=0.5327
+  Channel 7 (Ret_100): min=-0.4097, max=0.8708, mean=0.5133
+  Channel 8 (Spread): min=0.9494, max=2.5154, mean=1.2839
+  Channel 9 (DeltaImb): min=-4.0000, max=4.0000, mean=-0.2000
+  Channel 10 (DeltaSpread): min=-4.0000, max=4.0000, mean=-0.0077
+
+Проверка данных на NaN после нормализации (sampling)...
+
+[CLIP DIAG] Sample idx=10 saturation report:
+  Channel 0 (MicropriceDev): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+    post: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+    post: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+    post: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI): limit=4.0, %below=22.00, %above=7.00, %total=29.00
+    pre: min=-8857658.0000, max=11920869.0000, mean=-863121.6875, std=3556556.2500
+    post: min=-4.0000, max=4.0000, mean=-0.6000, std=2.0690
+  Channel 4 (VIB): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+    post: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+    post: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+    post: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+    post: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+    post: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb): limit=4.0, %below=19.00, %above=14.00, %total=33.00
+    pre: min=-122850.9766, max=569030.4375, mean=7160.3105, std=67999.6797
+    post: min=-4.0000, max=4.0000, mean=-0.2000, std=2.2893
+  Channel 10 (DeltaSpread): limit=4.0, %below=8.00, %above=8.00, %total=16.00
+    pre: min=-66.9703, max=3338.0659, mean=33.3707, std=333.3731
+    post: min=-4.0000, max=4.0000, mean=-0.0077, std=1.6012
+Sample Normalized Tensor (first 5 features of channel 0): tensor([[-3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01,
+         -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01,
+         -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01,
+         -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01,
+         -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01,
+         -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01, -3.8564e-01,
+ ....      
+[TRAIN] Epoch 1 started
+
+[VAL] Epoch 1 validation started
+[VAL] first validation batch received
+[VAL] batch 100
+[VAL] batch 200
+[VAL] batch 300
+[VAL] batch 400
+[VAL] batch 500
+[VAL] batch 600
+[VAL] batch 700
+[VAL] batch 800
+
+[VAL] Entering on_validation_epoch_end, samples collected: 869
+[VAL] Validation loop took 1m 14s, proceeding with epoch_end processing
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 16.59           | 47.83           | 35.58          
+Hit Rate (Точность)            | 0.8212          | 0.0912          | 0.1285         
+Процент пропущенных сигналов (%) | -               | 11.82           | 14.79          
+Ложные входы (%)               | -               | 48.61           | 33.90          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000019       | -0.000002      
+Directional Accuracy (DA) без Flat | 0.1071          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5415 | Уверенности при ложном: 0.5996 | Разница уверенности: -0.0581
+Корреляция с LOB Imbalance     | 0.0304          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 1 (7m 38s) Validation: MCC=0.0111, Macro-F1=0.2104, ECE=0.3609, MCE=0.9497
+  Vol-MSE=13.724398, Vol-MAE=3.155379
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0111, F1=0.2104, Samples=55602
+
+[VAL] on_validation_epoch_end completed in 0m 0s
+...
+[TRAIN] Epoch 5 started
+
+[VAL] Epoch 5 validation started
+[VAL] first validation batch received
+[VAL] batch 100
+[VAL] batch 200
+[VAL] batch 300
+[VAL] batch 400
+[VAL] batch 500
+[VAL] batch 600
+[VAL] batch 700
+[VAL] batch 800
+
+[VAL] Entering on_validation_epoch_end, samples collected: 869
+[VAL] Validation loop took 1m 13s, proceeding with epoch_end processing
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 50.58           | 28.55           | 20.87          
+Hit Rate (Точность)            | 0.7947          | 0.0924          | 0.1098         
+Процент пропущенных сигналов (%) | -               | 43.42           | 50.05          
+Ложные входы (%)               | -               | 28.55           | 19.85          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000034       | 0.000042       
+Directional Accuracy (DA) без Flat | 0.0997          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6636 | Уверенности при ложном: 0.6597 | Разница уверенности: 0.0039
+Корреляция с LOB Imbalance     | 0.0697          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 5 (7m 22s) Validation: MCC=0.0069, Macro-F1=0.3006, ECE=0.2119, MCE=0.3884
+  Vol-MSE=3.570602, Vol-MAE=1.489475
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0069, F1=0.3006, Samples=55602
+
+[VAL] on_validation_epoch_end completed in 0m 0s
+.....
+[TRAIN] Epoch 10 started
+
+[VAL] Epoch 10 validation started
+[VAL] first validation batch received
+[VAL] batch 100
+[VAL] batch 200
+[VAL] batch 300
+[VAL] batch 400
+[VAL] batch 500
+[VAL] batch 600
+[VAL] batch 700
+[VAL] batch 800
+
+[VAL] Entering on_validation_epoch_end, samples collected: 869
+[VAL] Validation loop took 1m 48s, proceeding with epoch_end processing
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 64.11           | 18.65           | 17.24          
+Hit Rate (Точность)            | 0.7917          | 0.0903          | 0.1183         
+Процент пропущенных сигналов (%) | -               | 58.34           | 62.27          
+Ложные входы (%)               | -               | 18.61           | 16.23          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000041       | 0.000030       
+Directional Accuracy (DA) без Flat | 0.1037          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.7261 | Уверенности при ложном: 0.6895 | Разница уверенности: 0.0366
+Корреляция с LOB Imbalance     | 0.0414          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 10 (11m 33s) Validation: MCC=0.0132, Macro-F1=0.3238, ECE=0.1648, MCE=0.2399
+  Vol-MSE=2.143013, Vol-MAE=0.986614
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0132, F1=0.3238, Samples=55602
+
+[VAL] on_validation_epoch_end completed in 0m 0s

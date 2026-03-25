@@ -90,11 +90,12 @@ class FeatureEngineer:
         ordered_feat_cols.extend([f"feat_bid_v_{i}" for i in range(self.n_levels)]) # 150-199: только объемы
 
         # Все остальное (метаданные и дополнительные признаки)
-        meta_cols = ["timestamp_ms", "mid_price", "last_update_id"]
+        # Задача 318.1: last_update_id переименован в feat_update_id в load_data()
+        meta_cols = ["timestamp_ms", "mid_price"]
         other_cols = [c for c in df.columns if c.startswith("feat_past_return_")]
         
-        # Добавляем OFI и VIB в дополнительные признаки (Задача 306)
-        extra_feats = ["feat_ofi_100", "feat_vib_100"]
+        # Добавляем OFI, VIB и feat_update_id в дополнительные признаки (Задача 306, 318.1)
+        extra_feats = ["feat_ofi_100", "feat_vib_100", "feat_update_id"]
         
         # Возвращаем DF, где ПРИЗНАКИ LOB ПЕРВЫМИ 200 КОЛОНКАМИ
         return df.select(

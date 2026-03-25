@@ -95,3 +95,20 @@ N/A
 - Сохранить прежнюю семантику multi-horizon: нормализация весов и `equal weights` по умолчанию.
 - Сохранить порядок этапов: parse CLI -> resolve horizons -> prepare data -> fit/save normalizer -> update metadata -> training/postprocess.
 - Не дублировать `enable_dropout` и другие post-training side effects между модулями.
+
+## Задача 324 | Дата: 2026-03-25 | Эпох: 0 (ошибка до обучения)
+
+### Изменения (из docs/000-tasks_list.md):
+Стабилизировать dynamic feature contract OFI, DeltaImb, DeltaSpread для LiT. Перевести DeltaImb и DeltaSpread на тот же event-consistent источник, что и OFI. Переделать fit dynamic-normalizer. Синхронизировать train-fit
+
+### Использованные каналы (11):
+0: MicropriceDev, 1: Vol, 2: Imb, 3: OFI, 4: VIB, 5: Ret_10, 6: Ret_50, 7: Ret_100, 8: Spread, 9: DeltaImb, 10: DeltaSpread
+
+### Лучшие метрики:
+- MCC: N/A (epoch N/A)
+- Macro-F1: N/A (epoch N/A)
+- DA: N/A
+- Hit Rate Up: N/A
+
+### Причина остановки:
+- RuntimeError: feat_update_id not found in DataFrame; required for OFI calculation

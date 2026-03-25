@@ -715,6 +715,11 @@ class LOBDataLoader:
             raise ValueError(f"Schema mismatch for {self.symbol}!\nMissing: {missing}\nExtra: {extra}")
 
         lf = lf.sort("timestamp_ms")
+        # Задача 318.1: Переименовываем last_update_id -> feat_update_id
+        # чтобы LOBDataset мог найти feat_update_id для расчёта OFI
+        actual_cols = lf.collect_schema().names()
+        if "last_update_id" in actual_cols:
+            lf = lf.rename({"last_update_id": "feat_update_id"})
         return lf if lazy else lf.collect()
 
     def load_trades(self, lazy: bool = False) -> Union[pl.LazyFrame, pl.DataFrame]:
@@ -841,11 +846,15 @@ class LOBDataset(Dataset):
             print(f"[{self.__class__.__name__}] Feature Map Verified: {n_channels} channels, {self.n_levels} levels. Total features: {n_channels * self.n_levels}. Status: OK")
 
         if len(self) > 0:
-            sample_x = self[0][0]
-            print(f"[{self.__class__.__name__}] First Sample Statistics (z-score normalized, clipped [-5,5]):")
-            for i in range(sample_x.shape[1]):
-                chan = sample_x[:, i, :]
-                print(f"  Channel {i} ({channel_names[i]}): min={chan.min():.4f}, max={chan.max():.4f}, mean={chan.mean():.4f}")
+            try:
+                sample_x = self[0][0]
+                print(f"[{self.__class__.__name__}] First Sample Statistics (z-score normalized, clipped [-5,5]):")
+                for i in range(sample_x.shape[1]):
+                    chan = sample_x[:, i, :]
+                    print(f"  Channel {i} ({channel_names[i]}): min={chan.min():.4f}, max={chan.max():.4f}, mean={chan.mean():.4f}")
+            except (ValueError, KeyError):
+                # Normalizer ещё не fitted — диагностика будет доступна после fit
+                print(f"[{self.__class__.__name__}] First sample diagnostics skipped (normalizer not yet fitted)")
         
         # Информационный лог о загрузке
         n_samples = len(self)
@@ -1710,13 +1719,20 @@ class LOBDataset(Dataset):
     def _apply_dynamic_transform(self, raw: 'torch.Tensor', channel_name: str):
         """
         Задача 324.3: Единая вспомогательная функция для нормализации dynamic-каналов.
-        Используется и при fit (через _compute_channels_for_normalization) и в runtime (_process_sample).
-        Порядок: symlog → robust normalize (dynamic_params) → clamp[-4, 4]
+        Порядок: symlog → pre-clip (p0.5/p99.5) → robust normalize → clamp[-4, 4]
 
         Returns:
             (normed, clipped): тензоры до и после clamp
         """
         sym = symlog_transform(raw)
+        # Задача 324.8: мягкий pre-clip в symlog-пространстве перед нормализацией
+        p = self.normalizer.dynamic_params.get(channel_name, {})
+        low = p.get("preclip_low")
+        high = p.get("preclip_high")
+        if low is not None and high is not None:
+            low_t = torch.tensor(low, device=sym.device, dtype=sym.dtype)
+            high_t = torch.tensor(high, device=sym.device, dtype=sym.dtype)
+            sym = torch.clamp(sym, low_t, high_t)
         normed = self.normalizer.transform_dynamic(sym, channel_name)
         clipped = torch.clamp(normed, -4.0, 4.0)
         return normed, clipped

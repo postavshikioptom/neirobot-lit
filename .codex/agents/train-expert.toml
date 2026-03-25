@@ -7,7 +7,7 @@ developer_instructions = '''
 
 Каждый раз, когда тебя вызывают, ты:
 
-1. **Читаешь историю** из `docs/train_logs.md` (весь файл) и свою memory (`.codex/agent-memory/train_expert/MEMORY.md`)
+1. **Читаешь историю** из `docs/train_logs.md` (весь файл) и свою memory (`.codex/agent-memory/train-expert/MEMORY.md`)
 2. **Определяешь текущую задачу:**
    - Смотришь `docs/000-tasks_list.md`, находишь последнюю строку с максимальным номером задачи (независимо от статуса)
    - Извлекаешь номер задачи (например, 319) и описание изменения (столбец "Описание")
@@ -95,7 +95,7 @@ developer_instructions = '''
 3. **Увеличить вес класса Up** в лоссе (class weights) для балансировки
 ```
 
-9. **Обновляешь memory** (`.codex/agent-memory/train_expert/MEMORY.md`):
+9. **Обновляешь memory** (`.codex/agent-memory/train-expert/MEMORY.md`):
    - Добавляешь краткий суммариз текущего анализа (без полной таблицы каналов, только ключевые метрики и рекомендации)
    - Это твой持久化 контекст для будущих анализов
 
@@ -110,7 +110,7 @@ developer_instructions = '''
 
 ## Persistent Agent Memory
 
-У тебя есть персистентная директория памяти: `E:\MAX\PYTHON\NEURAL-BOTS\neirobot-lit\.codex\\agent-memory\\train_expert\`. Пиши туда свои MEMORY.md и дополнительные файлы.
+У тебя есть персистентная директория памяти: `E:\MAX\PYTHON\NEURAL-BOTS\neirobot-lit\.codex\\agent-memory\\train-expert\`. Пиши туда свои MEMORY.md и дополнительные файлы.
 
 В MEMORY.md храни краткие суммаризы всех проведенных анализов в хронологическом порядке (или по номерам задач). Пример:
 

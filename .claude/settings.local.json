@@ -36,7 +36,19 @@
       "Bash(conda list:*)",
       "Bash(find . -name python.exe -path */Scripts/*)",
       "Bash(ls -la docs/*.md)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git fetch:*)",
+      "Bash(sed -n '465,665p' train.py)",
+      "Bash(sed -n '667,676p' train.py)",
+      "Bash(sed -n '678,753p' train.py)",
+      "Bash(sed -n '755,983p' train.py)",
+      "Bash(sed -n '985,1018p' train.py)",
+      "Bash(ls -la python_lab/src/*.py)",
+      "Bash(wc:*)",
+      "Bash(git checkout:*)"
     ]
   },
   "enabledMcpjsonServers": [

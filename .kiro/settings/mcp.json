@@ -6,6 +6,20 @@
       "env": {},
       "disabled": true,
       "autoApprove": []
+    },
+	"sequential-thinking": {
+      "url": "https://remote.mcpservers.org/sequentialthinking/mcp",
+      "disabled": false,
+      "autoApprove": [
+        "sequentialthinking"
+      ]
+    },
+	"Tavily": {
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=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",
+      "disabled": false,
+      "autoApprove": [
+        "Tavily"
+      ]
     }
   }
 }

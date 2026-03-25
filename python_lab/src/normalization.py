@@ -137,10 +137,25 @@ class Normalizer:
             for name, arr in dynamic_data.items():
                 arr = np.asarray(arr)
                 median = float(np.median(arr))
+                # Задача 324.8 + 324.9: защищённый IQR с fallback на Q10-Q90 и проверкой против 0.35*alt_iqr
+                q10 = float(np.quantile(arr, 0.10))
                 q25 = float(np.quantile(arr, 0.25))
                 q75 = float(np.quantile(arr, 0.75))
-                iqr = float(q75 - q25) if not math.isnan(q75 - q25) else 1.0
+                q90 = float(np.quantile(arr, 0.90))
+                raw_iqr = float(q75 - q25)
+                alt_iqr = float(q90 - q10)
+                iqr_floor = 1e-3
+                # Задача 324.9: если raw_iqr слишком узкий (< max(iqr_floor, 0.35*alt_iqr)), используем alt_iqr
+                if not np.isfinite(raw_iqr):
+                    iqr = max(alt_iqr, iqr_floor)
+                elif raw_iqr < max(iqr_floor, 0.35 * alt_iqr):
+                    iqr = max(alt_iqr, iqr_floor)
+                else:
+                    iqr = max(raw_iqr, iqr_floor)
                 entry = {"median": median, "iqr": iqr}
+                # Задача 324.9: preclip границы 0.01/0.99 вместо 0.005/0.995
+                entry["preclip_low"] = float(np.quantile(arr, 0.01))
+                entry["preclip_high"] = float(np.quantile(arr, 0.99))
                 if winsor_limits:
                     wlow = float(np.quantile(arr, winsor_limits[0]))
                     whigh = float(np.quantile(arr, winsor_limits[1]))
@@ -259,6 +274,8 @@ class Normalizer:
         """
         Применяет нормализацию к динамическому каналу (OFI, DeltaImb, DeltaSpread).
         Использует параметры из dynamic_params (median, iqr).
+
+        Задача 324.9: для dynamic-каналов scale_multiplier НЕ применяется (в отличие от static robust).
         """
         if channel_name not in self.dynamic_params:
             raise ValueError(f"Dynamic channel '{channel_name}' not fitted")
@@ -270,9 +287,13 @@ class Normalizer:
             import torch
             median_t = torch.tensor(median, device=data.device, dtype=data.dtype)
             iqr_t = torch.tensor(iqr, device=data.device, dtype=data.dtype)
-            return (data - median_t) / (iqr_t + self.eps)
+            # Задача 324.9: dynamic scale = iqr + eps (без scale_multiplier)
+            scale_t = iqr_t + self.eps
+            return (data - median_t) / scale_t
         else:
-            return (data - median) / (iqr + self.eps)
+            # Задача 324.9: dynamic scale = iqr + eps (без scale_multiplier)
+            scale = iqr + self.eps
+            return (data - median) / scale
 
     def winsorize(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], limits: List[float]) -> Union[pl.DataFrame, pl.LazyFrame, np.ndarray]:
         """
