@@ -148,14 +148,14 @@ def objective_seq_len_search(
 
     trial_checkpoint_callback = ModelCheckpoint(
         dirpath=base_path / "bots" / args.symbol / "models" / "optuna_checkpoints" / f"seq_len_{seq_len}",
-        filename="lit-{epoch:02d}-{val_mcc:.4f}",
+        filename="lit-{epoch:02d}-{val_mcc_primary:.4f}",
         save_top_k=1,
-        monitor="val_mcc",
+        monitor="val_mcc_primary",
         mode="max",
     )
 
     trial_callbacks = [
-        EarlyStopping(monitor="val_mcc", patience=5, mode="max"),
+        EarlyStopping(monitor="val_mcc_primary", patience=5, mode="max"),
         trial_checkpoint_callback,
         LearningRateMonitor(logging_interval="epoch"),
     ]

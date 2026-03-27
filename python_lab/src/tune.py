@@ -341,7 +341,7 @@ def objective(trial):
             
             # Настройка Trainer для фолда с pruning
             fold_callbacks = [
-                PyTorchLightningPruningCallback(trial, monitor="val_mcc"),
+                PyTorchLightningPruningCallback(trial, monitor="val_mcc_primary"),
                 EarlyStopping(monitor="val_loss", patience=3, mode="min")  # Меньше patience для ускорения
             ]
             
@@ -360,7 +360,7 @@ def objective(trial):
             fold_trainer.fit(fold_model, fold_train_loader, fold_val_loader)
             
             # Получаем MCC для фолда
-            fold_mcc = fold_trainer.callback_metrics.get("val_mcc", torch.tensor(0.0)).item()
+            fold_mcc = fold_trainer.callback_metrics.get("val_mcc_primary", torch.tensor(0.0)).item()
             fold_mccs.append(fold_mcc)
             
             # Промежуточный отчет для pruning
@@ -473,7 +473,7 @@ def objective(trial):
 
         # 6. Настройка Trainer с прунингом и EarlyStopping
         callbacks = [
-            PyTorchLightningPruningCallback(trial, monitor="val_mcc"),
+            PyTorchLightningPruningCallback(trial, monitor="val_mcc_primary"),
             EarlyStopping(monitor="val_loss", patience=5, mode="min")
         ]
         
@@ -513,7 +513,7 @@ def objective(trial):
         
         # Получаем метрики из trainer
         val_loss = trainer.callback_metrics["val_loss"].item()
-        val_mcc = trainer.callback_metrics["val_mcc"].item()
+        val_mcc = trainer.callback_metrics["val_mcc_primary"].item()
         
         # Целевая функция: максимизируем MCC (Задача 156, пункт 2)
         # Optuna настроен на максимизацию, поэтому возвращаем MCC напрямую
