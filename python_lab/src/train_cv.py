@@ -149,6 +149,9 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
             report_fee_bps=args.report_fee_bps,
             report_slippage_bps=args.report_slippage_bps,
             report_half_spread_bps=args.report_half_spread_bps,
+            enable_channel_attribution=args.enable_channel_attribution,
+            channel_attribution_samples=args.channel_attribution_samples,
+            channel_attribution_method=args.channel_attribution_method,
         )
 
         fold_checkpoint_dir = checkpoint_dir / f"fold_{fold_idx + 1}"
@@ -192,6 +195,9 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
         fold_model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
         fold_model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
         fold_model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
+        fold_model.hparams.enable_channel_attribution = args.enable_channel_attribution
+        fold_model.hparams.channel_attribution_samples = args.channel_attribution_samples
+        fold_model.hparams.channel_attribution_method = args.channel_attribution_method
         fold_trainer.fit(fold_model, fold_train_loader, fold_val_loader)
 
         best_fold_model_path = fold_checkpoint_callback.best_model_path

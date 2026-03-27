@@ -3,6 +3,7 @@ train_module.py — Training core: TrainSubset, ProfilerCallback, LiTModule.
 Вынесено из train.py в рамках задачи 322.1.
 """
 import json
+import csv
 import os
 import time
 import torch
@@ -10,6 +11,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
 from pathlib import Path
+from typing import Any
 from torch.profiler import profile, ProfilerActivity, schedule
 from torchmetrics.classification import (
     MulticlassF1Score,
@@ -17,9 +19,11 @@ from torchmetrics.classification import (
 )
 
 from .lit_model import LiTModel
+from .dataset import CHANNEL_CONTRACT
 from .utils import (
     compute_classification_metrics,
     compute_directional_metrics,
+    compute_desc_ranks,
     safe_matthews_corrcoef,
     FocalLoss,
     CalibrationMetrics,
@@ -152,6 +156,9 @@ class LiTModule(pl.LightningModule):
         report_fee_bps=0.0,
         report_slippage_bps=0.0,
         report_half_spread_bps=0.0,
+        enable_channel_attribution=False,
+        channel_attribution_samples=128,
+        channel_attribution_method="grad_x_input",
         **model_params
     ):
         super().__init__()
@@ -266,6 +273,7 @@ class LiTModule(pl.LightningModule):
 
         # Списки для накопления результатов валидации
         self._validation_accumulator = []
+        self._validation_attr_samples = []
 
         self.calibration_metrics = CalibrationMetrics(n_bins=15)
         self.class_weight_metadata = class_weight_metadata
@@ -322,8 +330,7 @@ class LiTModule(pl.LightningModule):
         if batch_idx != 0:
             return
         x, y, ts, mid, label, extra_data = batch
-        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread",
-                         "DeltaImb", "DeltaSpread"]
+        channel_names = list(CHANNEL_CONTRACT)
         print("\n[ДИАГНОСТИКА] Статистика каналов ПОСЛЕ нормализации:")
         for ch_idx, ch_name in enumerate(channel_names):
             if ch_idx < x.shape[2]:
@@ -548,6 +555,7 @@ class LiTModule(pl.LightningModule):
             loss_vol=loss_vol,
             mae_vol=mae_vol,
         )
+        self._accumulate_validation_attr_samples(x=x, labels=y)
 
         cls_weight = float(self.hparams.get("cls_loss_weight", self.cls_loss_weight))
         vol_weight = float(self.hparams.get("vol_loss_weight", self.vol_loss_weight))
@@ -928,6 +936,8 @@ class LiTModule(pl.LightningModule):
                     print(f"  Regime {regime}: MCC={regime_mcc:.4f}, F1={regime_f1:.4f}, Samples={len(regime_y_true)}")
             finalized["regime_metrics"] = regime_report
 
+        self._run_channel_attribution_epoch_end(validation_payload, y_pred)
+
         # 5. TensorBoard визуализация
         if self.logger and hasattr(self.logger, 'experiment'):
             writer = self.logger.experiment
@@ -969,6 +979,30 @@ class LiTModule(pl.LightningModule):
                 "loss_cls": loss_cls.detach().cpu(),
                 "loss_vol": loss_vol.detach().cpu(),
                 "mae_vol": mae_vol.detach().cpu(),
+            }
+        )
+
+    def _accumulate_validation_attr_samples(self, x, labels):
+        if not bool(self.hparams.get("enable_channel_attribution", False)):
+            return
+        max_samples = int(self.hparams.get("channel_attribution_samples", 128))
+        if max_samples <= 0:
+            return
+        if self.is_multi_horizon:
+            return
+        if x.ndim != 4:
+            return
+        collected = sum(int(item["x"].shape[0]) for item in self._validation_attr_samples)
+        if collected >= max_samples:
+            return
+        remaining = max_samples - collected
+        take = min(int(x.shape[0]), remaining)
+        if take <= 0:
+            return
+        self._validation_attr_samples.append(
+            {
+                "x": x[:take].detach().cpu(),
+                "labels": labels[:take].detach().cpu(),
             }
         )
 
@@ -1224,6 +1258,7 @@ class LiTModule(pl.LightningModule):
 
     def _reset_validation_state(self):
         self._validation_accumulator.clear()
+        self._validation_attr_samples.clear()
 
     def _log_extended_analytics(self, trade_metrics):
         if not trade_metrics:
@@ -1246,6 +1281,161 @@ class LiTModule(pl.LightningModule):
         print(f"{'Средняя Уверенность (C/W)':<30} | Уверенность при правильном: {trade_metrics['conf_correct']:.4f} | Уверенности при ложном: {trade_metrics['conf_wrong']:.4f} | Разница уверенности: {trade_metrics['conf_gap']:.4f}")
         print(f"{'Корреляция с LOB Imbalance':<30} | {trade_metrics['imb_corr']:<15.4f} (Corr with Signal -1/0/1)")
         print("="*85 + "\n")
+
+    def _run_channel_attribution_epoch_end(self, payload: dict[str, Any], y_pred):
+        if not bool(self.hparams.get("enable_channel_attribution", False)):
+            return
+        if self.is_multi_horizon:
+            print("[ATTR] Skip: channel attribution поддерживается только для single-horizon.")
+            return
+        if not self._validation_attr_samples:
+            print("[ATTR] Skip: нет сохранённых validation samples для attribution.")
+            return
+
+        x = torch.cat([item["x"] for item in self._validation_attr_samples], dim=0)
+        y_true = torch.cat([item["labels"] for item in self._validation_attr_samples], dim=0).long()
+        if x.shape[2] != len(CHANNEL_CONTRACT):
+            raise RuntimeError(
+                f"Channel contract mismatch for attribution: input has {x.shape[2]} channels, "
+                f"expected {len(CHANNEL_CONTRACT)}"
+            )
+
+        method = str(self.hparams.get("channel_attribution_method", "grad_x_input"))
+        attr_scores, pred_labels = self._compute_channel_attribution_scores(x, method=method)
+
+        stats = self._build_channel_attribution_stats(
+            attr_scores=attr_scores,
+            y_true=y_true.numpy(),
+            y_pred=pred_labels,
+        )
+        self._save_channel_attribution_artifacts(stats, method=method, sample_count=int(attr_scores.shape[0]))
+        self._print_channel_attribution_summary(stats)
+
+    def _compute_channel_attribution_scores(self, x_cpu: torch.Tensor, method: str) -> tuple[np.ndarray, np.ndarray]:
+        device = self.device
+        x = x_cpu.to(device=device, dtype=torch.float32)
+        self.model.eval()
+
+        with torch.no_grad():
+            base_logits, _ = self(x)
+            pred_labels = torch.argmax(base_logits, dim=1)
+            target_logits = base_logits.gather(1, pred_labels.unsqueeze(1)).squeeze(1)
+
+        if method == "grad_x_input":
+            x_grad = x.detach().clone().requires_grad_(True)
+            logits, _ = self(x_grad)
+            target = torch.argmax(logits, dim=1)
+            target_sum = logits.gather(1, target.unsqueeze(1)).sum()
+            grads = torch.autograd.grad(target_sum, x_grad, retain_graph=False, create_graph=False)[0]
+            attr = grads * x_grad
+            # x shape: [B, seq, channels, levels] -> aggregation to [B, channels]
+            scores = attr.mean(dim=(1, 3)).detach().cpu().numpy()
+            return scores, pred_labels.detach().cpu().numpy()
+
+        if method == "occlusion":
+            channel_count = x.shape[2]
+            scores = torch.zeros((x.shape[0], channel_count), device=device, dtype=torch.float32)
+            with torch.no_grad():
+                for ch_idx in range(channel_count):
+                    x_occ = x.clone()
+                    x_occ[:, :, ch_idx, :] = 0.0
+                    occ_logits, _ = self(x_occ)
+                    occ_target = occ_logits.gather(1, pred_labels.unsqueeze(1)).squeeze(1)
+                    scores[:, ch_idx] = target_logits - occ_target
+            return scores.detach().cpu().numpy(), pred_labels.detach().cpu().numpy()
+
+        raise ValueError(f"Unknown --channel_attribution_method: {method}")
+
+    def _build_channel_attribution_stats(self, attr_scores: np.ndarray, y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
+        class_names = {0: "Flat", 1: "Up", 2: "Down"}
+        stats: dict[str, Any] = {
+            "channels": list(CHANNEL_CONTRACT),
+            "groups": {},
+        }
+
+        def _add_group(group: str, mask: np.ndarray):
+            if mask.dtype != np.bool_:
+                mask = mask.astype(bool)
+            if mask.sum() == 0:
+                stats["groups"][group] = []
+                return
+            selected = attr_scores[mask]
+            mean_abs = np.mean(np.abs(selected), axis=0)
+            signed_mean = np.mean(selected, axis=0)
+            ranks = compute_desc_ranks(mean_abs)
+            rows = []
+            for idx, channel in enumerate(CHANNEL_CONTRACT):
+                rows.append(
+                    {
+                        "channel": channel,
+                        "mean_abs_attr": float(mean_abs[idx]),
+                        "signed_attr_mean": float(signed_mean[idx]),
+                        "rank": int(ranks[idx]),
+                        "group": group,
+                    }
+                )
+            stats["groups"][group] = rows
+
+        n = attr_scores.shape[0]
+        _add_group("general", np.ones(n, dtype=bool))
+        for class_id, class_name in class_names.items():
+            _add_group(f"predicted:{class_name}", y_pred == class_id)
+        for class_id, class_name in class_names.items():
+            _add_group(f"true:{class_name}", y_true == class_id)
+        correct_mask = y_pred == y_true
+        _add_group("correctness:correct", correct_mask)
+        _add_group("correctness:wrong", ~correct_mask)
+        return stats
+
+    def _save_channel_attribution_artifacts(self, stats: dict[str, Any], method: str, sample_count: int):
+        symbol = getattr(self.trainer, "symbol", "UNKNOWN")
+        base_path = Path(__file__).parent.parent.parent
+        out_dir = base_path / "artifacts" / symbol / "attribution"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        json_path = out_dir / f"epoch_{self.current_epoch}.json"
+        csv_path = out_dir / f"epoch_{self.current_epoch}.csv"
+
+        json_payload = {
+            "epoch": int(self.current_epoch),
+            "method": method,
+            "sample_count": int(sample_count),
+            "channels": list(CHANNEL_CONTRACT),
+            "groups": stats["groups"],
+        }
+        json_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
+
+        csv_rows = []
+        for group_name, rows in stats["groups"].items():
+            for row in rows:
+                csv_rows.append(
+                    {
+                        "group": group_name,
+                        "channel": row["channel"],
+                        "mean_abs_attr": row["mean_abs_attr"],
+                        "signed_attr_mean": row["signed_attr_mean"],
+                        "rank": row["rank"],
+                    }
+                )
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["group", "channel", "mean_abs_attr", "signed_attr_mean", "rank"],
+            )
+            writer.writeheader()
+            writer.writerows(csv_rows)
+
+    def _print_channel_attribution_summary(self, stats: dict[str, Any]):
+        print("\n[ATTR] High-signal channel attribution summary:")
+        for class_name in ("Flat", "Up", "Down"):
+            group = f"predicted:{class_name}"
+            rows = stats["groups"].get(group, [])
+            if not rows:
+                print(f"[ATTR] Top-5 {class_name}: no samples")
+                continue
+            top5 = sorted(rows, key=lambda item: item["rank"])[:5]
+            summary = ", ".join(f"{row['channel']}({row['mean_abs_attr']:.4f})" for row in top5)
+            print(f"[ATTR] Top-5 {class_name}: {summary}")
 
     def configure_optimizers(self):
         lr = self.hparams.get("lr", 1e-4)

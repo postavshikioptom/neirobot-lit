@@ -308,6 +308,18 @@ def safe_matthews_corrcoef(y_true, y_pred):
     return float(value) if np.isfinite(value) else 0.0
 
 
+def compute_desc_ranks(values: np.ndarray) -> np.ndarray:
+    """
+    Возвращает 1-based ранги по убыванию значений.
+    Наибольшее значение получает rank=1.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    order = np.argsort(-values)
+    ranks = np.empty_like(order)
+    ranks[order] = np.arange(1, len(order) + 1)
+    return ranks
+
+
 def compute_directional_metrics(
     y_true,
     y_pred,

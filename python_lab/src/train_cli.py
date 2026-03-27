@@ -230,6 +230,13 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable_tb_embeddings", action=argparse.BooleanOptionalAction, default=False, help="Enable TensorBoard embeddings logging")
     parser.add_argument("--enable_epoch_end_plots", action=argparse.BooleanOptionalAction, default=False, help="Enable heavy epoch-end plots")
     parser.add_argument("--skip_epoch0_artifacts", action=argparse.BooleanOptionalAction, default=True, help="Skip heavy artifacts on epoch 0")
+    parser.add_argument("--enable_channel_attribution", action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable post-hoc channel attribution logging on validation epoch end")
+    parser.add_argument("--channel_attribution_samples", type=int, default=128,
+                        help="Maximum number of validation samples used for channel attribution per epoch")
+    parser.add_argument("--channel_attribution_method", type=str, default="grad_x_input",
+                        choices=["grad_x_input", "occlusion"],
+                        help="Channel attribution method: gradient x input or channel occlusion")
     parser.add_argument("--val_batch_log_interval", type=int, default=100, help="Log validation progress every N batches")
     parser.add_argument("--train_batch_log_interval", type=int, default=0, help="Log training batch statistics every N batches")
     parser.add_argument("--enable_vol_debug", action=argparse.BooleanOptionalAction, default=False, help="Enable volume debug prints")
@@ -281,6 +288,8 @@ def parse_train_args(argv=None):
         raise ValueError("--training_window_days must be > 0")
     if args.split_strategy == "walk_forward" and args.mode == "cv":
         raise ValueError("--split_strategy walk_forward несовместим с --mode cv")
+    if args.channel_attribution_samples <= 0:
+        raise ValueError("--channel_attribution_samples must be > 0")
     return args
 
 

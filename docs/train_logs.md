@@ -265,3 +265,60 @@ N/A
 - Для label diagnostics логируются `label_mode`, `time_mode`, `effective_threshold_p50`, `effective_threshold_p95`, `row_gap_median_seconds`, `event_gap_median_seconds`.
 - Проверочный скрипт `scripts/event_time_label_check.py` должен печатать `counts(row)`, `counts(event)`, `counts(exec)`, `num_different`.
 - Class weights должны считаться только по train split и по тем же label columns, которые реально попадают в dataset/model contract.
+
+## Задача 324 | Дата: 2026-03-27 | Эпох: 10
+
+### Изменения (из docs/000-tasks_list.md):
+Стабилизировать dynamic feature contract OFI, DeltaImb, DeltaSpread для LiT. Перевести DeltaImb и DeltaSpread на тот же event-consistent источник, что и OFI. Переделать fit dynamic-normalizer. Синхронизировать train-fit
+
+### Использованные каналы (11):
+0: MicropriceDev, 1: Vol, 2: Imb, 3: OFI, 4: VIB, 5: Ret_10, 6: Ret_50, 7: Ret_100, 8: Spread, 9: DeltaImb, 10: DeltaSpread
+
+### Эпохи и метрики:
+- Epoch 1: MCC=-0.0077, Macro-F1=0.2000
+- Epoch 5: MCC=0.0099, Macro-F1=0.2903
+- Epoch 10: MCC=0.0189, Macro-F1=0.3310
+
+### Лучшие метрики:
+- MCC: 0.0189 (epoch 10)
+- Macro-F1: 0.3310 (epoch 10)
+- DA: 0.1173
+- Hit Rate Up: 11.13%
+
+### Статистика каналов (после CLAMP, усреднение по последней эпохе):
+| Канал | mean | std | min | max |
+|-------|------|-----|-----|-----|
+| MicropriceDev | 0.0314 | 0.2516 | -0.4134 | 0.3673 |
+| Vol | 0.3166 | 0.6946 | -2.3208 | 2.3194 |
+| Imb | 0.0464 | 0.5654 | -1.6142 | 3.8219 |
+| OFI | -0.1268 | 0.5251 | -1.3288 | 1.6212 |
+| VIB | 0.2453 | 0.3326 | -0.3540 | 0.8900 |
+| Ret_10 | 0.1518 | 0.3474 | -0.7849 | 1.0469 |
+| Ret_50 | 0.5299 | 0.4232 | 0.0000 | 1.2702 |
+| Ret_100 | 0.5174 | 0.4445 | -0.4097 | 0.8708 |
+| Spread | 1.2839 | 0.4150 | 0.9494 | 2.5154 |
+| DeltaImb | 0.0236 | 0.6674 | -3.2487 | 3.2439 |
+| DeltaSpread | -0.0001 | 0.0281 | -0.0669 | 0.1284 |
+
+### Примечание по контексту:
+- В `docs/000-tasks_list.md` последняя задача: 328, но в `output.txt` текущий запуск помечен как "После задачи 324".
+
+## Задача 330 | Дата: 2026-03-28 | Channel Attribution Logging
+
+### Что добавлено:
+- CLI-флаги для post-hoc attribution: `--enable_channel_attribution`, `--channel_attribution_samples`, `--channel_attribution_method={grad_x_input,occlusion}`.
+- Единый channel contract из 11 каналов зафиксирован как `CHANNEL_CONTRACT` и используется в train/dataset.
+- В `on_validation_epoch_end` добавлен расчёт attribution по срезам:
+  - `general`
+  - `predicted:{Flat,Up,Down}`
+  - `true:{Flat,Up,Down}`
+  - `correctness:{correct,wrong}`
+- Артефакты по эпохам:
+  - `artifacts/<symbol>/attribution/epoch_{epoch}.json`
+  - `artifacts/<symbol>/attribution/epoch_{epoch}.csv`
+- В stdout выводится только high-signal summary: top-5 каналов для `Flat`, `Up`, `Down`.
+
+### Контракт атрибуции:
+- Атрибуция не используется как training signal и считается только post-hoc.
+- Для каждого канала в артефактах сохраняются: `mean_abs_attr`, `signed_attr_mean`, `rank`, `group`.
+- Порядок каналов в attribution строго совпадает с dataset contract (11 каналов).

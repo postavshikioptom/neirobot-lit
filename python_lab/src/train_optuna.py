@@ -144,6 +144,9 @@ def objective_seq_len_search(
         input_noise_std=args.input_noise_std,
         scaler_type=args.scaler_type,
         winsor_limits=list(tuple([float(x.strip()) for x in args.winsor_limits.split(",")])) if args.winsor_limits else None,
+        enable_channel_attribution=args.enable_channel_attribution,
+        channel_attribution_samples=args.channel_attribution_samples,
+        channel_attribution_method=args.channel_attribution_method,
     )
 
     trial_checkpoint_callback = ModelCheckpoint(
@@ -183,6 +186,9 @@ def objective_seq_len_search(
         trial_model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
         trial_model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
         trial_model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
+        trial_model.hparams.enable_channel_attribution = args.enable_channel_attribution
+        trial_model.hparams.channel_attribution_samples = args.channel_attribution_samples
+        trial_model.hparams.channel_attribution_method = args.channel_attribution_method
         trial_trainer.fit(trial_model, trial_train_loader, trial_val_loader)
     except Exception as e:
         print(f"[Optuna Trial] Training failed for seq_len={seq_len}: {e}")

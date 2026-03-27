@@ -12,6 +12,21 @@ import onnx
 
 from .normalization import Normalizer, symlog_transform
 
+# Единый channel contract проекта для LiT-пайплайна (Задача 330.2)
+CHANNEL_CONTRACT = [
+    "microprice_dev",
+    "volume",
+    "imbalance",
+    "ofi",
+    "vib",
+    "ret_10",
+    "ret_50",
+    "ret_100",
+    "spread",
+    "delta_imb",
+    "delta_spread",
+]
+
 # ============================================================================
 # Константы для аугментации LOB данных
 # ============================================================================
@@ -791,7 +806,7 @@ class LOBDataset(Dataset):
         self.generator = torch.Generator().manual_seed(aug_seed)
 
         # Задача 320.5: Диагностика saturation каналов
-        self.channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread", "DeltaImb", "DeltaSpread"]
+        self.channel_names = list(CHANNEL_CONTRACT)
         self._clip_diag_prints = 0
         self.max_clip_diag_prints = 2  # Ограничиваем логирование первыми 2 сэмплами
 
@@ -836,7 +851,7 @@ class LOBDataset(Dataset):
             raise ValueError(f"Unknown data_mode: {data_mode}. Only 'memory' mode is supported.")
 
         # Задача 307.6: Аудит целостности признаков и логирование первого сэмпла
-        channel_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread", "DeltaImb", "DeltaSpread"]
+        channel_names = list(CHANNEL_CONTRACT)
         n_channels = len(channel_names)
         expected_cols = [f"feat_{i}" for i in range(n_channels * self.n_levels)]
         actual_cols = self.feat_cols if hasattr(self, 'feat_cols') else []
@@ -1861,8 +1876,7 @@ class LOBDataset(Dataset):
                     p = self.normalizer.params.get(f"feat_{ch_idx*50}", {})
                     print(f"    {name}: mean={p.get('mean', 0.0):.6f}, std={p.get('std', 1.0):.6f}")
 
-            channels_names = ["MicropriceDev", "Vol", "Imb", "OFI", "VIB", "Ret_10", "Ret_50", "Ret_100", "Spread",
-                              "DeltaImb", "DeltaSpread"]
+            channels_names = list(CHANNEL_CONTRACT)
             for i, name in enumerate(channels_names):
                 ch = x_final[:, i, :]
                 print(f"  Channel {i} ({name}) ПОСЛЕ CLAMP: min={ch.min():.4f}, max={ch.max():.4f}, mean={ch.mean():.4f}, std={ch.std():.4f}")

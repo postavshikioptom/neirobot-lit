@@ -194,6 +194,9 @@ def _fit_model(
     model.hparams.enable_epoch_end_plots = args.enable_epoch_end_plots
     model.hparams.skip_epoch0_artifacts = args.skip_epoch0_artifacts
     model.hparams.enable_tb_embeddings = args.enable_tb_embeddings
+    model.hparams.enable_channel_attribution = args.enable_channel_attribution
+    model.hparams.channel_attribution_samples = args.channel_attribution_samples
+    model.hparams.channel_attribution_method = args.channel_attribution_method
 
     _sanity_check_prepared(prepared, args)
     print("Starting training...")
