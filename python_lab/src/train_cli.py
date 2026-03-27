@@ -26,7 +26,7 @@ def build_train_parser() -> argparse.ArgumentParser:
                         help="Validation metric contract preset stored in checkpoint hparams")
     parser.add_argument("--metric_log_prefix", type=str, default="val",
                         help="Prefix metadata for validation metric contract reproduction")
-    parser.add_argument("--metric_directional_base", type=str, default="predicted",
+    parser.add_argument("--metric_directional_base", type=str, default="predicted", choices=["predicted", "truth", "union"],
                         help="Directional-base metadata stored with validation contract")
     parser.add_argument("--report_fee_bps", type=float, default=0.0,
                         help="Fee in bps used for cost-aware validation edge reporting")

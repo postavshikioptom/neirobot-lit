@@ -295,12 +295,26 @@ def compute_classification_metrics(y_true, y_pred, class_weights=None):
     return metrics
 
 
+def safe_matthews_corrcoef(y_true, y_pred):
+    """Безопасный MCC для пустых и вырожденных выборок."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    if y_true.size == 0 or y_pred.size == 0:
+        return 0.0
+    try:
+        value = matthews_corrcoef(y_true, y_pred)
+    except ValueError:
+        return 0.0
+    return float(value) if np.isfinite(value) else 0.0
+
+
 def compute_directional_metrics(
     y_true,
     y_pred,
     logits,
     f_ret,
     imbalance,
+    directional_base="predicted",
     fee_bps=0.0,
     slippage_bps=0.0,
     half_spread_bps=0.0,
@@ -327,6 +341,13 @@ def compute_directional_metrics(
     directional_mask = preds != 0
     long_mask = preds == 1
     short_mask = preds == 2
+    if directional_base == "truth":
+        directional_eval_mask = labels != 0
+    elif directional_base == "union":
+        directional_eval_mask = (labels != 0) | directional_mask
+    else:
+        directional_eval_mask = directional_mask
+    direction_only_mask = (labels != 0) & directional_mask
 
     gross_edge_long = float(np.mean(future_returns[long_mask])) if np.any(long_mask) else 0.0
     gross_edge_short = float(np.mean(-future_returns[short_mask])) if np.any(short_mask) else 0.0
@@ -379,7 +400,8 @@ def compute_directional_metrics(
         "roundtrip_cost": roundtrip_cost,
         "edge_up": gross_edge_long,
         "edge_down_signed": gross_edge_short,
-        "da_without_flat": float(np.mean(labels[directional_mask] == preds[directional_mask])) if np.any(directional_mask) else 0.0,
+        "da_without_flat": float(np.mean(labels[directional_eval_mask] == preds[directional_eval_mask])) if np.any(directional_eval_mask) else 0.0,
+        "direction_mcc": safe_matthews_corrcoef(labels[direction_only_mask], preds[direction_only_mask]),
         "conf_correct": float(np.mean(np.max(probs[correct_mask], axis=1))) if np.any(correct_mask) else 0.0,
         "conf_wrong": float(np.mean(np.max(probs[wrong_mask], axis=1))) if np.any(wrong_mask) else 0.0,
         "conf_gap": float(
