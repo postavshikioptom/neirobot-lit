@@ -12,7 +12,14 @@ import torch
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from .train_cli import parse_train_args, parse_winsor_limits, resolve_horizon_config
+from .train_cli import (
+    APPROVED_LABEL_CONTRACT_VERSION,
+    APPROVED_METRICS_CONTRACT_VERSION,
+    BASELINE_PROFILE,
+    parse_train_args,
+    parse_winsor_limits,
+    resolve_horizon_config,
+)
 from .train_cv import run_cross_validation
 from .train_data import (
     clone_args_with_overrides,
@@ -42,6 +49,98 @@ from .train_runtime import (
     seed_training,
     warn_if_dataset_may_exceed_ram,
 )
+
+ARTIFACT_TREE_DIRS = ("labels", "validation", "calibration", "attribution", "walk_forward")
+
+
+def _ensure_artifact_tree(base_path: Path, symbol: str) -> Path:
+    symbol_root = base_path / "artifacts" / symbol
+    symbol_root.mkdir(parents=True, exist_ok=True)
+    for subdir in ARTIFACT_TREE_DIRS:
+        (symbol_root / subdir).mkdir(parents=True, exist_ok=True)
+    return symbol_root
+
+
+def _validate_decision_rule_calibration_compatibility(args):
+    # Decision rules consume calibrated probabilities and need valid thresholds.
+    if args.decision_rule == "confidence_gap" and args.margin_threshold <= 0.0:
+        raise ValueError(
+            "decision_rule=confidence_gap требует margin_threshold > 0.0 для calibration-aware фильтра."
+        )
+    if args.decision_rule == "class_specific_thresholds":
+        if min(args.flat_prob_threshold, args.up_prob_threshold, args.down_prob_threshold) <= 0.0:
+            raise ValueError(
+                "decision_rule=class_specific_thresholds требует положительные probability thresholds."
+            )
+    if args.decision_rule == "flat_bias" and args.decision_hold_threshold <= 0.0:
+        raise ValueError(
+            "decision_rule=flat_bias требует decision_hold_threshold > 0.0."
+        )
+
+
+def _validate_startup_invariants(args, *, num_horizons: int):
+    if args.label_contract_version != APPROVED_LABEL_CONTRACT_VERSION:
+        raise ValueError(
+            "Unsupported label contract version: "
+            f"{args.label_contract_version}. Approved={APPROVED_LABEL_CONTRACT_VERSION}"
+        )
+    if args.metrics_contract_version != APPROVED_METRICS_CONTRACT_VERSION:
+        raise ValueError(
+            "Unsupported metrics contract version: "
+            f"{args.metrics_contract_version}. Approved={APPROVED_METRICS_CONTRACT_VERSION}"
+        )
+    if args.profile == BASELINE_PROFILE and args.split_strategy != "purged_holdout":
+        raise ValueError(
+            "Stable baseline profile requires --split_strategy purged_holdout."
+        )
+    if args.profile == BASELINE_PROFILE and num_horizons != 1:
+        raise ValueError(
+            "Stable baseline profile forbids multi-horizon configuration."
+        )
+    _validate_decision_rule_calibration_compatibility(args)
+
+
+def _build_pipeline_state(args, *, num_horizons: int) -> dict:
+    return {
+        "profile": args.profile,
+        "freeze_experimental_features": bool(args.freeze_experimental_features),
+        "frozen_branches": [
+            "multi_horizon",
+            "distillation",
+            "legacy_dynamic_threshold",
+            "legacy_balance_method",
+        ] if args.freeze_experimental_features else [],
+        "metrics_contract": args.metric_contract,
+        "metrics_contract_version": args.metrics_contract_version,
+        "label_contract_mode": args.label_mode,
+        "label_contract_version": args.label_contract_version,
+        "split_strategy": args.split_strategy,
+        "decision_rule": args.decision_rule,
+        "num_horizons": int(num_horizons),
+    }
+
+
+def _append_pipeline_state_docs(base_path: Path, state: dict):
+    lines = [
+        "",
+        "## Pipeline State (Задача 331)",
+        "",
+        f"- profile: `{state['profile']}`",
+        f"- frozen_branches: `{', '.join(state['frozen_branches']) if state['frozen_branches'] else 'none'}`",
+        f"- metrics_contract: `{state['metrics_contract']}`",
+        f"- metrics_contract_version: `{state['metrics_contract_version']}`",
+        f"- label_contract_mode: `{state['label_contract_mode']}`",
+        f"- label_contract_version: `{state['label_contract_version']}`",
+        f"- split_strategy: `{state['split_strategy']}`",
+    ]
+    block = "\n".join(lines) + "\n"
+
+    for rel_path in ("docs/train_logs.md", "docs/baselines.md"):
+        doc_path = base_path / rel_path
+        existing = doc_path.read_text(encoding="utf-8") if doc_path.exists() else ""
+        if "## Pipeline State (Задача 331)" in existing:
+            continue
+        doc_path.write_text(existing.rstrip() + "\n" + block, encoding="utf-8")
 
 
 def _build_logger(tb_dir: str):
@@ -294,6 +393,8 @@ def _extract_trainer_metric(trainer, metric_name: str) -> float:
 
 
 def _run_walk_forward(args, paths, winsor_limits, horizons, num_horizons, horizon_weights):
+    walk_forward_root = paths.base_path / "artifacts" / args.symbol / "walk_forward"
+    walk_forward_root.mkdir(parents=True, exist_ok=True)
     feature_df = load_feature_frame(args, paths, use_event_rows=False)
     timestamps = feature_df["timestamp_ms"].to_numpy()
     if len(timestamps) == 0:
@@ -333,7 +434,7 @@ def _run_walk_forward(args, paths, winsor_limits, horizons, num_horizons, horizo
             feature_df=window_df,
         )
         run_tag = f"{args.symbol}_wf_{window_idx:02d}"
-        checkpoint_dir = paths.base_path / "artifacts" / run_tag / "checkpoints"
+        checkpoint_dir = walk_forward_root / f"window_{window_idx:02d}" / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         tb_dir = str(paths.base_path / "runs" / run_tag)
         trainer, _, _, _ = _fit_model(
@@ -376,7 +477,7 @@ def _run_walk_forward(args, paths, winsor_limits, horizons, num_horizons, horizo
     if not window_results:
         raise ValueError("Walk-forward produced no valid windows. Check holdout_days/training_window_days and data span.")
 
-    out_path = paths.base_path / "bots" / args.symbol / "models" / "walk_forward_results.json"
+    out_path = walk_forward_root / "walk_forward_results.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "split_strategy": "walk_forward",
@@ -485,6 +586,7 @@ def train():
         )
     winsor_limits = parse_winsor_limits(args.winsor_limits)
     horizons, num_horizons, horizon_weights = resolve_horizon_config(args)
+    _validate_startup_invariants(args, num_horizons=num_horizons)
     print(f"Scaler configuration: type={args.scaler_type}, winsor_limits={winsor_limits}")
 
     if args.prune_mode != "none":
@@ -499,6 +601,9 @@ def train():
 
     seed_training()
     paths = build_train_paths(__file__, args.symbol)
+    _ensure_artifact_tree(paths.base_path, args.symbol)
+    pipeline_state = _build_pipeline_state(args, num_horizons=num_horizons)
+    _append_pipeline_state_docs(paths.base_path, pipeline_state)
     warn_if_dataset_may_exceed_ram(paths, args.symbol, args.seq_len)
 
     if is_sweep_mode(args):

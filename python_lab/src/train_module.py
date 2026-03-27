@@ -159,6 +159,7 @@ class LiTModule(pl.LightningModule):
         enable_channel_attribution=False,
         channel_attribution_samples=128,
         channel_attribution_method="grad_x_input",
+        freeze_experimental_features=False,
         **model_params
     ):
         super().__init__()
@@ -199,6 +200,11 @@ class LiTModule(pl.LightningModule):
         self.is_distillation = teacher_model is not None
         self.num_horizons = num_horizons
         self.is_multi_horizon = (num_horizons > 1)
+        self.freeze_experimental_features = bool(freeze_experimental_features)
+        if self.freeze_experimental_features and self.is_distillation:
+            raise ValueError("Experimental distillation path is frozen for this run.")
+        if self.freeze_experimental_features and self.is_multi_horizon:
+            raise ValueError("Experimental multi-horizon path is frozen for this run.")
         self.enable_multi_task = bool(multi_task)
         self.cls_loss_weight = float(cls_loss_weight)
         self.vol_loss_weight = float(vol_loss_weight)

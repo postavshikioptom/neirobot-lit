@@ -4,27 +4,107 @@ Extracted from train.py during task 322.2.
 """
 import argparse
 
+BASELINE_PROFILE = "lit_scalping_baseline"
+PROFILE_NONE = "none"
+APPROVED_LABEL_CONTRACT_VERSION = "label_contract_v2"
+APPROVED_METRICS_CONTRACT_VERSION = "metrics_contract_v2"
+
+# Stable profile contract: freeze dof and keep one reproducible baseline path.
+PROFILE_OVERRIDES = {
+    BASELINE_PROFILE: {
+        "horizons": None,
+        "use_horizon_embedding": False,
+        "label_mode": "execution_mid_return",
+        "split_strategy": "purged_holdout",
+        "loss_type": "focal",
+        "decision_rule": "argmax",
+        "enable_channel_attribution": False,
+    }
+}
+
+
+def _apply_profile_overrides(args):
+    overrides = PROFILE_OVERRIDES.get(args.profile)
+    if overrides is None:
+        return
+    for key, value in overrides.items():
+        setattr(args, key, value)
+
+
+def _validate_frozen_experimental_paths(args):
+    if not args.freeze_experimental_features:
+        return
+    if args.horizons is not None:
+        raise ValueError(
+            "Multi-horizon path is frozen: --horizons запрещён при --freeze_experimental_features."
+        )
+    if args.use_horizon_embedding:
+        raise ValueError(
+            "Experimental horizon embedding frozen: отключите --use_horizon_embedding."
+        )
+    if args.mode == "distill":
+        raise ValueError(
+            "Distillation path is frozen: --mode distill запрещён при --freeze_experimental_features."
+        )
+    if args.dynamic_threshold:
+        raise ValueError(
+            "Legacy dynamic threshold frozen: --dynamic_threshold запрещён при --freeze_experimental_features."
+        )
+    if args.balance_method != "none":
+        raise ValueError(
+            "Legacy balancing branch frozen: используйте --balance_method none."
+        )
+
 
 def build_train_parser() -> argparse.ArgumentParser:
     """Create and return ArgumentParser with all training flags."""
     parser = argparse.ArgumentParser(description="Train LiT model on LOB data")
+    stable_group = parser.add_argument_group("stable")
+    experimental_group = parser.add_argument_group("experimental")
+    deprecated_group = parser.add_argument_group("deprecated")
+
+    stable_group.add_argument(
+        "--profile",
+        type=str,
+        default=PROFILE_NONE,
+        choices=[PROFILE_NONE, BASELINE_PROFILE],
+        help="Training profile. lit_scalping_baseline forces stable production contract.",
+    )
+    stable_group.add_argument(
+        "--freeze_experimental_features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze multi-horizon/distillation/legacy branches.",
+    )
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on")
     parser.add_argument("--seq_len", type=int, default=100, help="Sequence length for the model")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--epochs", type=int, default=100, help="Maximum number of epochs")
-    parser.add_argument("--horizon", type=int, default=100, help="Prediction horizon for labels (single horizon, deprecated)")
-    parser.add_argument("--horizons", type=str, default=None, help="Comma-separated list of horizons for multi-horizon prediction (e.g., '10,50,100')")
-    parser.add_argument("--horizon_weights", type=str, default=None, help="Comma-separated list of weights for each horizon (e.g., '0.4,0.3,0.3')")
-    parser.add_argument("--use_horizon_embedding", action="store_true", help="Use Horizon Embedding instead of separate heads")
+    deprecated_group.add_argument("--horizon", type=int, default=100, help="Prediction horizon for labels (single horizon, deprecated)")
+    experimental_group.add_argument("--horizons", type=str, default=None, help="Comma-separated list of horizons for multi-horizon prediction (e.g., '10,50,100')")
+    experimental_group.add_argument("--horizon_weights", type=str, default=None, help="Comma-separated list of weights for each horizon (e.g., '0.4,0.3,0.3')")
+    experimental_group.add_argument("--use_horizon_embedding", action="store_true", help="Use Horizon Embedding instead of separate heads")
     parser.add_argument("--threshold", type=float, default=0.0005, help="Static return threshold (0.0005 = 0.05%)")
-    parser.add_argument("--dynamic_threshold", action=argparse.BooleanOptionalAction, default=False,
+    deprecated_group.add_argument("--dynamic_threshold", action=argparse.BooleanOptionalAction, default=False,
                         help="Use legacy rolling_std*K threshold. Forbidden with --label_mode execution_mid_return.")
-    parser.add_argument("--label_mode", type=str, default="legacy_mid_return",
+    stable_group.add_argument("--label_mode", type=str, default="legacy_mid_return",
                         choices=["legacy_mid_return", "execution_mid_return"],
                         help="Label contract: legacy mid-return or execution-aware mid-return")
-    parser.add_argument("--time_mode", type=str, default="row", choices=["row", "event", "ms"],
+    stable_group.add_argument("--time_mode", type=str, default="row", choices=["row", "event", "ms"],
                         help="How horizon is interpreted: rows, update events, or milliseconds")
+    stable_group.add_argument(
+        "--label_contract_version",
+        type=str,
+        default=APPROVED_LABEL_CONTRACT_VERSION,
+        help="Label contract version marker for startup invariants.",
+    )
+    stable_group.add_argument(
+        "--metrics_contract_version",
+        type=str,
+        default=APPROVED_METRICS_CONTRACT_VERSION,
+        help="Metrics contract version marker for startup invariants.",
+    )
     parser.add_argument("--event_time_column", type=str, default="feat_update_id",
                         help="Column used for event-time indexing; ms mode still uses timestamp_ms")
     parser.add_argument("--cost_floor_bps", type=float, default=0.0,
@@ -53,7 +133,7 @@ def build_train_parser() -> argparse.ArgumentParser:
                         help="Limit number of val batches per mini-train epoch in sweep mode (0 = no limit)")
     parser.add_argument("--class_weight_smooth", type=float, default=1.0, help="Smoothing for class weights calculation")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing for CrossEntropyLoss")
-    parser.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
+    stable_group.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
     parser.add_argument("--focal_gamma", type=float, default=3.0, help="Gamma parameter for Focal Loss")
     parser.add_argument("--use_class_weights", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable/disable class weights in classification loss")
@@ -61,13 +141,13 @@ def build_train_parser() -> argparse.ArgumentParser:
                         help="Enable/disable multi-task loss (classification + volatility)")
     parser.add_argument("--cls_loss_weight", type=float, default=1.0, help="Weight for classification loss")
     parser.add_argument("--vol_loss_weight", type=float, default=1.0, help="Weight for volatility loss (ignored if --no-multi_task)")
-    parser.add_argument("--metric_contract", type=str, default="standard", choices=["standard", "hft", "strict"],
+    stable_group.add_argument("--metric_contract", type=str, default="standard", choices=["standard", "hft", "strict"],
                         help="Validation metric contract preset stored in checkpoint hparams")
     parser.add_argument("--metric_log_prefix", type=str, default="val",
                         help="Prefix metadata for validation metric contract reproduction")
     parser.add_argument("--metric_directional_base", type=str, default="predicted", choices=["predicted", "truth", "union"],
                         help="Directional-base metadata stored with validation contract")
-    parser.add_argument("--decision_rule", type=str, default="argmax",
+    stable_group.add_argument("--decision_rule", type=str, default="argmax",
                         choices=["argmax", "confidence_gap", "class_specific_thresholds", "flat_bias"],
                         help="Decision rule applied over calibrated probabilities")
     parser.add_argument("--decision_confidence", type=float, default=0.5,
@@ -127,21 +207,21 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--volume_jitter_range", type=float, default=0.1, help="Max relative volume change")
     parser.add_argument("--aug_seed", type=int, default=42, help="Seed for reproducible augmentation")
 
-    parser.add_argument("--balance_method", type=str, default="none", choices=["none", "smote", "bgmm", "adasyn"], help="Dataset balancing method (deprecated)")
+    deprecated_group.add_argument("--balance_method", type=str, default="none", choices=["none", "smote", "bgmm", "adasyn"], help="Dataset balancing method (deprecated)")
     parser.add_argument("--balance_ratio", type=float, default=0.5, help="Target ratio for minority classes")
 
     # Knowledge distillation
-    parser.add_argument("--mode", type=str, default="train", choices=["train", "distill", "cv"], help="Training mode: train, distill, or cv")
-    parser.add_argument("--teacher_path", type=str, default=None, help="Path to teacher model checkpoint (required for distill mode)")
-    parser.add_argument("--alpha", type=float, default=0.9, help="Weight for soft loss in distillation")
-    parser.add_argument("--temperature", type=float, default=3.0, help="Temperature for softening logits in distillation")
-    parser.add_argument("--student_d_model", type=int, default=64, help="Student model d_model")
-    parser.add_argument("--student_nhead", type=int, default=4, help="Student model number of attention heads")
-    parser.add_argument("--student_num_layers", type=int, default=2, help="Student model number of transformer layers")
+    experimental_group.add_argument("--mode", type=str, default="train", choices=["train", "distill", "cv"], help="Training mode: train, distill, or cv")
+    experimental_group.add_argument("--teacher_path", type=str, default=None, help="Path to teacher model checkpoint (required for distill mode)")
+    experimental_group.add_argument("--alpha", type=float, default=0.9, help="Weight for soft loss in distillation")
+    experimental_group.add_argument("--temperature", type=float, default=3.0, help="Temperature for softening logits in distillation")
+    experimental_group.add_argument("--student_d_model", type=int, default=64, help="Student model d_model")
+    experimental_group.add_argument("--student_nhead", type=int, default=4, help="Student model number of attention heads")
+    experimental_group.add_argument("--student_num_layers", type=int, default=2, help="Student model number of transformer layers")
 
     # Purged K-Fold CV
     parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for cross-validation")
-    parser.add_argument(
+    stable_group.add_argument(
         "--split_strategy",
         type=str,
         default="purged_holdout",
@@ -230,7 +310,7 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable_tb_embeddings", action=argparse.BooleanOptionalAction, default=False, help="Enable TensorBoard embeddings logging")
     parser.add_argument("--enable_epoch_end_plots", action=argparse.BooleanOptionalAction, default=False, help="Enable heavy epoch-end plots")
     parser.add_argument("--skip_epoch0_artifacts", action=argparse.BooleanOptionalAction, default=True, help="Skip heavy artifacts on epoch 0")
-    parser.add_argument("--enable_channel_attribution", action=argparse.BooleanOptionalAction, default=False,
+    stable_group.add_argument("--enable_channel_attribution", action=argparse.BooleanOptionalAction, default=False,
                         help="Enable post-hoc channel attribution logging on validation epoch end")
     parser.add_argument("--channel_attribution_samples", type=int, default=128,
                         help="Maximum number of validation samples used for channel attribution per epoch")
@@ -256,6 +336,8 @@ def parse_train_args(argv=None):
     """Parse command-line arguments and return namespace."""
     parser = build_train_parser()
     args = parser.parse_args(argv)
+    _apply_profile_overrides(args)
+    _validate_frozen_experimental_paths(args)
     if args.label_mode == "execution_mid_return" and args.dynamic_threshold:
         raise ValueError(
             "--label_mode execution_mid_return несовместим с --dynamic_threshold. "

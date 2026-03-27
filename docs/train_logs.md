@@ -322,3 +322,11 @@ N/A
 - Атрибуция не используется как training signal и считается только post-hoc.
 - Для каждого канала в артефактах сохраняются: `mean_abs_attr`, `signed_attr_mean`, `rank`, `group`.
 - Порядок каналов в attribution строго совпадает с dataset contract (11 каналов).
+
+## Pipeline State (Задача 331)
+
+- profile: `lit_scalping_baseline` (для stable baseline запускается явно через `--profile lit_scalping_baseline`)
+- frozen branches (по `--freeze_experimental_features`): `multi_horizon`, `distillation`, `legacy_dynamic_threshold`, `legacy_balance_method`
+- metrics contract: `metric_contract` + `metrics_contract_version`
+- label contract: `label_mode` + `label_contract_version`
+- split strategy: `split_strategy`

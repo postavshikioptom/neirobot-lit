@@ -30,3 +30,23 @@ Objective ablation сохраняется в `objective_ablation.csv` в кор�
 - `coverage_directional`
 - `net_edge_total`
 - `ece`
+
+## Stable Artifact Tree (Задача 331)
+
+Единая структура артефактов для stable pipeline:
+
+- `artifacts/<symbol>/labels`
+- `artifacts/<symbol>/validation`
+- `artifacts/<symbol>/calibration`
+- `artifacts/<symbol>/attribution`
+- `artifacts/<symbol>/walk_forward`
+
+## Pipeline State (Задача 331)
+
+Для каждого baseline-запуска фиксируется:
+
+- `profile`
+- `frozen_branches`
+- `metrics_contract` и `metrics_contract_version`
+- `label_contract_mode` и `label_contract_version`
+- `split_strategy`
