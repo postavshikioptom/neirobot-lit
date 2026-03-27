@@ -1,4 +1,4 @@
-import optuna
+﻿import optuna
 from optuna.integration import PyTorchLightningPruningCallback
 import pytorch_lightning as pl
 import torch
@@ -342,7 +342,7 @@ def objective(trial):
             # Настройка Trainer для фолда с pruning
             fold_callbacks = [
                 PyTorchLightningPruningCallback(trial, monitor="val_mcc_primary"),
-                EarlyStopping(monitor="val_loss", patience=3, mode="min")  # Меньше patience для ускорения
+                EarlyStopping(monitor="val_mcc_primary", patience=3, mode="max")
             ]
             
             fold_trainer = pl.Trainer(
@@ -474,7 +474,7 @@ def objective(trial):
         # 6. Настройка Trainer с прунингом и EarlyStopping
         callbacks = [
             PyTorchLightningPruningCallback(trial, monitor="val_mcc_primary"),
-            EarlyStopping(monitor="val_loss", patience=5, mode="min")
+            EarlyStopping(monitor="val_mcc_primary", patience=5, mode="max")
         ]
         
         trainer = pl.Trainer(
@@ -671,3 +671,4 @@ def run_tuning():
 
 if __name__ == "__main__":
     run_tuning()
+
