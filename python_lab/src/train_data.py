@@ -241,7 +241,7 @@ def collect_sweep_baseline(feature_df: pl.DataFrame, *, horizons: list[int], thr
                 )
             )
 
-    dynamic_df = build_labeled_frame(feature_df, horizon=100, threshold=0.0005, dynamic_threshold=True)
+    dynamic_df = build_labeled_frame(working_df, horizon=100, threshold=0.0005, dynamic_threshold=True)
     dyn_flat, dyn_up, dyn_down, _ = _extract_label_shares(dynamic_df)
     dynamic_reference = SweepDynamicReference(
         horizon=100,
