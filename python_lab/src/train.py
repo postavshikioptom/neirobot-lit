@@ -22,6 +22,7 @@ from .train_cli import (
 )
 from .train_cv import run_cross_validation
 from .train_data import (
+    _label_contract_from_args,
     clone_args_with_overrides,
     collect_sweep_baseline,
     export_sweep_baseline,
@@ -135,12 +136,48 @@ def _append_pipeline_state_docs(base_path: Path, state: dict):
     ]
     block = "\n".join(lines) + "\n"
 
+    header = "## Pipeline State (Задача 331)"
     for rel_path in ("docs/train_logs.md", "docs/baselines.md"):
         doc_path = base_path / rel_path
         existing = doc_path.read_text(encoding="utf-8") if doc_path.exists() else ""
-        if "## Pipeline State (Задача 331)" in existing:
-            continue
-        doc_path.write_text(existing.rstrip() + "\n" + block, encoding="utf-8")
+        if header in existing:
+            start = existing.index(header)
+            tail = existing[start:]
+            next_section = tail.find("\n## ", len(header))
+            end = start + next_section if next_section != -1 else len(existing)
+            updated = existing[:start].rstrip() + "\n" + block
+            if end < len(existing):
+                updated += "\n" + existing[end:].lstrip("\n")
+            doc_path.write_text(updated, encoding="utf-8")
+        else:
+            doc_path.write_text(existing.rstrip() + "\n" + block, encoding="utf-8")
+
+
+def _save_labels_artifacts(prepared, args, base_path: Path):
+    """Save labels, splits and label contract into artifacts/<symbol>/labels."""
+    labels_dir = base_path / "artifacts" / args.symbol / "labels"
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    np.save(labels_dir / "labels.npy", prepared.full_dataset.labels)
+
+    splits = {
+        "train_indices": list(prepared.train_ds.indices),
+        "val_indices": list(prepared.val_ds.indices),
+        "test_indices": list(prepared.test_ds.indices),
+        "train_size": len(prepared.train_ds),
+        "val_size": len(prepared.val_ds),
+        "test_size": len(prepared.test_ds),
+    }
+    (labels_dir / "splits.json").write_text(
+        json.dumps(splits, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    label_contract = _label_contract_from_args(args)
+    (labels_dir / "label_contract.json").write_text(
+        json.dumps(label_contract, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _build_logger(tb_dir: str):
@@ -617,12 +654,14 @@ def train():
     prepared = prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, horizon_weights)
     update_model_metadata(paths.base_path, args.symbol, args, winsor_limits, paths.norm_params_path)
 
-    if args.optuna_seq_len_search:
-        prepared = run_optuna_seq_len_search(args, paths, prepared, winsor_limits)
-
     if args.mode == "cv":
         run_cross_validation(args, paths, prepared, winsor_limits)
         return
+
+    if args.optuna_seq_len_search:
+        prepared = run_optuna_seq_len_search(args, paths, prepared, winsor_limits)
+
+    _save_labels_artifacts(prepared, args, paths.base_path)
 
     checkpoint_dir = paths.checkpoint_dir
     trainer, model, teacher_model, checkpoint_callback = _fit_model(
