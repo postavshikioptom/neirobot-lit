@@ -119,6 +119,11 @@ def _build_trainer(args, callbacks, logger, *, max_epochs: int, limit_train_batc
 
 def _prepare_model_for_fit(args, prepared, winsor_limits):
     model_class_weights = None if args.use_time_weighting else prepared.class_weights
+    if prepared.class_weight_metadata.get("label_mode") != args.label_mode:
+        raise ValueError(
+            "Class weight label_mode mismatch: "
+            f"weights={prepared.class_weight_metadata.get('label_mode')} vs args={args.label_mode}"
+        )
     built = build_training_module(
         args,
         in_channels=prepared.in_channels,
@@ -130,6 +135,8 @@ def _prepare_model_for_fit(args, prepared, winsor_limits):
         regime_weights=prepared.regime_weights,
         num_regimes=prepared.num_regimes,
         winsor_limits=winsor_limits,
+        label_columns=prepared.label_columns,
+        class_weight_metadata=prepared.class_weight_metadata,
     )
     return built.module, built.teacher_model
 
@@ -313,6 +320,11 @@ def _run_sweep_mode(args, paths, winsor_limits):
 
 def train():
     args = parse_train_args()
+    if args.label_mode == "execution_mid_return" and args.dynamic_threshold:
+        raise ValueError(
+            "dynamic_threshold разрешен только для legacy/debug режима. "
+            "Сочетание execution_mid_return + dynamic_threshold запрещено."
+        )
     winsor_limits = parse_winsor_limits(args.winsor_limits)
     horizons, num_horizons, horizon_weights = resolve_horizon_config(args)
     print(f"Scaler configuration: type={args.scaler_type}, winsor_limits={winsor_limits}")

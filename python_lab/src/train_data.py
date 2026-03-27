@@ -98,6 +98,8 @@ class PreparedTrainingData:
     # Вспомогательные поля для пересоздания датасетов (Optuna)
     n_past_returns: int = 0
     time_weighting_params: dict = field(default_factory=dict)
+    label_columns: list[str] = field(default_factory=list)
+    class_weight_metadata: dict = field(default_factory=dict)
 
 
 def _parse_past_returns_lags(raw: str) -> list:
@@ -164,14 +166,56 @@ def load_feature_frame(args, paths, *, use_event_rows: bool = False) -> pl.DataF
 
 
 def build_labeled_frame(feature_df: pl.DataFrame, *, horizon: int | list[int], threshold: float,
-                        dynamic_threshold: bool = False) -> pl.DataFrame:
+                        dynamic_threshold: bool = False, args=None) -> pl.DataFrame:
     """Apply Labeler on an already engineered feature frame."""
+    if getattr(args, "label_mode", "legacy_mid_return") == "execution_mid_return" and dynamic_threshold:
+        raise ValueError(
+            "dynamic_threshold разрешен только для legacy/debug режима. "
+            "Сочетание execution_mid_return + dynamic_threshold запрещено."
+        )
     labeler = Labeler(
         horizon=horizon,
         threshold=threshold,
         dynamic_threshold=dynamic_threshold,
+        label_mode=getattr(args, "label_mode", "legacy_mid_return"),
+        time_mode=getattr(args, "time_mode", "row"),
+        event_time_column=getattr(args, "event_time_column", "feat_update_id"),
+        cost_floor_bps=getattr(args, "cost_floor_bps", 0.0),
+        fee_bps=getattr(args, "fee_bps", 0.0),
+        slippage_bps=getattr(args, "slippage_bps", 0.0),
+        use_spread_floor=getattr(args, "use_spread_floor", False),
     )
     return labeler.add_labels(feature_df)
+
+
+def _label_contract_from_args(args) -> dict:
+    return {
+        "label_mode": getattr(args, "label_mode", "legacy_mid_return"),
+        "time_mode": getattr(args, "time_mode", "row"),
+        "event_time_column": getattr(args, "event_time_column", "feat_update_id"),
+        "dynamic_threshold": bool(getattr(args, "dynamic_threshold", False)),
+        "threshold": float(getattr(args, "threshold", 0.0005)),
+        "cost_floor_bps": float(getattr(args, "cost_floor_bps", 0.0)),
+        "fee_bps": float(getattr(args, "fee_bps", 0.0)),
+        "slippage_bps": float(getattr(args, "slippage_bps", 0.0)),
+        "use_spread_floor": bool(getattr(args, "use_spread_floor", False)),
+    }
+
+
+def _resolve_dataset_label_columns(full_dataset) -> list[str]:
+    label_cols = list(getattr(full_dataset, "label_cols", []) or [])
+    return label_cols or ["label"]
+
+
+def _resolve_train_label_indices(full_dataset, train_ds) -> np.ndarray:
+    dataset_indices = np.asarray(train_ds.indices, dtype=np.int64)
+    label_indices = dataset_indices + int(full_dataset.seq_len) - 1
+    if label_indices.size and label_indices[-1] >= len(full_dataset.labels):
+        raise ValueError(
+            "Train split label indices exceed dataset.labels length. "
+            "Cannot compute class weights safely."
+        )
+    return label_indices
 
 
 def _extract_label_shares(labeled_df: pl.DataFrame, label_col: str = "label") -> tuple[float, float, float, int]:
@@ -981,8 +1025,22 @@ def _run_normalized_nan_checks(train_ds, full_dataset):
 def _compute_class_weights(full_dataset, train_ds, args):
     """Вычисляет веса классов на основе тренировочного набора."""
     print("Calculating class weights from training set...")
-    train_labels = full_dataset.labels[train_ds.indices]
-    classes, counts_list = np.unique(train_labels, return_counts=True)
+    expected_label_cols = _resolve_dataset_label_columns(full_dataset)
+    label_contract = _label_contract_from_args(args)
+    label_indices = _resolve_train_label_indices(full_dataset, train_ds)
+
+    train_labels = full_dataset.labels[label_indices]
+    flattened_labels = train_labels.reshape(-1) if train_labels.ndim > 1 else train_labels
+    valid_labels = flattened_labels[(flattened_labels >= 0) & (flattened_labels <= 2)]
+    if valid_labels.size == 0:
+        raise ValueError("No valid train labels found for class weights calculation.")
+
+    if train_labels.ndim > 1 and train_labels.shape[1] != len(expected_label_cols):
+        raise ValueError(
+            "Class weights contract mismatch: labels tensor shape does not match dataset label columns."
+        )
+
+    classes, counts_list = np.unique(valid_labels, return_counts=True)
 
     counts = np.zeros(3, dtype=np.int64)
     for cls, count in zip(classes, counts_list):
@@ -1004,7 +1062,19 @@ def _compute_class_weights(full_dataset, train_ds, args):
         weights[2] *= amplification
 
     print(f"Effective class weights: [Flat: {weights[0]:.2f}, Up: {weights[1]:.2f}, Down: {weights[2]:.2f}]")
-    return weights
+    metadata = {
+        "label_cols": expected_label_cols,
+        "label_mode": label_contract["label_mode"],
+        "time_mode": label_contract["time_mode"],
+        "dynamic_threshold": label_contract["dynamic_threshold"],
+        "train_samples": int(valid_labels.size),
+    }
+    print(
+        "Class weight contract: "
+        f"label_cols={metadata['label_cols']}, "
+        f"label_mode={metadata['label_mode']}, time_mode={metadata['time_mode']}"
+    )
+    return weights, metadata
 
 
 def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, horizon_weights,
@@ -1047,7 +1117,8 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
         df,
         horizon=horizons,
         threshold=args.threshold,
-        dynamic_threshold=False,
+        dynamic_threshold=args.dynamic_threshold,
+        args=args,
     )
 
     # 5. Инициализация Normalizer (fit будет позже на train set)
@@ -1114,7 +1185,14 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
     test_loader = DataLoader(test_ds, **build_dataloader_kwargs(args, shuffle=False))
 
     # 12. Веса классов
-    class_weights = _compute_class_weights(full_dataset, train_ds, args)
+    class_weights, class_weight_metadata = _compute_class_weights(full_dataset, train_ds, args)
+
+    label_columns = list(getattr(full_dataset, "label_cols", []))
+    if class_weight_metadata.get("label_cols") != label_columns:
+        raise ValueError(
+            "Class weights were computed for different label columns than dataset uses: "
+            f"weights={class_weight_metadata.get('label_cols')} vs dataset={label_columns}"
+        )
 
     return PreparedTrainingData(
         df=df,
@@ -1136,4 +1214,6 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
         num_regimes=num_regimes,
         n_past_returns=n_past_returns,
         time_weighting_params=time_weighting_params,
+        label_columns=label_columns,
+        class_weight_metadata=class_weight_metadata,
     )

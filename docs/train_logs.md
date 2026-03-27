@@ -256,3 +256,12 @@ N/A
 - в отчёте обязаны быть `threshold_bps`, `median_spread_bps`, `threshold_to_spread_ratio`, `subspread_target`;
 - `rolling_std * 0.5` для `h=100` фиксируется отдельно как unsafe reference и не подменяет static grid;
 - shortlist top-k кандидатов должен содержать `mini_train_mcc`, `mini_train_coverage_directional`, `mini_train_net_edge_total`.
+
+## Label Contract (Задача 327)
+
+- Новый `Labeler` поддерживает `label_mode={legacy_mid_return, execution_mid_return}` и `time_mode={row, event, ms}`.
+- В execution-aware режиме используется `effective_threshold = max(static_threshold, spread_floor, cost_floor)`.
+- `dynamic_threshold` разрешён только для legacy/debug режима; сочетание с `label_mode=execution_mid_return` должно падать с `ValueError`.
+- Для label diagnostics логируются `label_mode`, `time_mode`, `effective_threshold_p50`, `effective_threshold_p95`, `row_gap_median_seconds`, `event_gap_median_seconds`.
+- Проверочный скрипт `scripts/event_time_label_check.py` должен печатать `counts(row)`, `counts(event)`, `counts(exec)`, `num_different`.
+- Class weights должны считаться только по train split и по тем же label columns, которые реально попадают в dataset/model contract.

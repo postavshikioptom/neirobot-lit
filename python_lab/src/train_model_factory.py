@@ -26,6 +26,8 @@ def build_training_module(
     regime_weights,
     num_regimes,
     winsor_limits,
+    label_columns,
+    class_weight_metadata,
 ) -> BuiltTrainingModel:
     """
     Собирает LiTModule для режимов train или distill.
@@ -118,6 +120,10 @@ def build_training_module(
             report_fee_bps=args.report_fee_bps,
             report_slippage_bps=args.report_slippage_bps,
             report_half_spread_bps=args.report_half_spread_bps,
+            label_mode=args.label_mode,
+            time_mode=args.time_mode,
+            model_label_columns=list(label_columns),
+            class_weight_metadata=dict(class_weight_metadata),
         )
 
         student_params = count_parameters(module.model)
@@ -196,6 +202,10 @@ def build_training_module(
             report_fee_bps=args.report_fee_bps,
             report_slippage_bps=args.report_slippage_bps,
             report_half_spread_bps=args.report_half_spread_bps,
+            label_mode=args.label_mode,
+            time_mode=args.time_mode,
+            model_label_columns=list(label_columns),
+            class_weight_metadata=dict(class_weight_metadata),
         )
 
     return BuiltTrainingModel(

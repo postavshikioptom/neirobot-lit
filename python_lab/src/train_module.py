@@ -101,6 +101,26 @@ class LiTModule(pl.LightningModule):
     def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, use_gradient_checkpointing=False, metric_contract="standard", metric_log_prefix="val", metric_directional_base="predicted", report_fee_bps=0.0, report_slippage_bps=0.0, report_half_spread_bps=0.0, **model_params):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
+        class_weight_metadata = model_params.pop("class_weight_metadata", {})
+        model_label_columns = model_params.pop("model_label_columns", [])
+        label_mode = model_params.pop("label_mode", "legacy_mid_return")
+        time_mode = model_params.pop("time_mode", "row")
+        if class_weight_metadata:
+            if class_weight_metadata.get("label_cols") != model_label_columns:
+                raise ValueError(
+                    "Class weight label columns do not match model label columns: "
+                    f"{class_weight_metadata.get('label_cols')} vs {model_label_columns}"
+                )
+            if class_weight_metadata.get("label_mode") != label_mode:
+                raise ValueError(
+                    "Class weight label_mode does not match model label_mode: "
+                    f"{class_weight_metadata.get('label_mode')} vs {label_mode}"
+                )
+            if class_weight_metadata.get("time_mode") != time_mode:
+                raise ValueError(
+                    "Class weight time_mode does not match model time_mode: "
+                    f"{class_weight_metadata.get('time_mode')} vs {time_mode}"
+                )
         self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, use_gradient_checkpointing=use_gradient_checkpointing, **model_params)
         self.use_time_weighting = use_time_weighting
         self.use_regime_weighting = use_regime_weighting
@@ -108,6 +128,8 @@ class LiTModule(pl.LightningModule):
         self.is_distillation = teacher_model is not None
         self.num_horizons = num_horizons
         self.is_multi_horizon = (num_horizons > 1)
+        self.label_mode = label_mode
+        self.time_mode = time_mode
 
         # Параметры Curvature Regularization (Задача 238)
         self.use_curvature_reg = use_curvature_reg
@@ -179,6 +201,8 @@ class LiTModule(pl.LightningModule):
         self._validation_accumulator = []
 
         self.calibration_metrics = CalibrationMetrics(n_bins=15)
+        self.class_weight_metadata = class_weight_metadata
+        self.model_label_columns = model_label_columns
 
     def forward(self, x, regime_id=None):
         return self.model(x, regime_id=regime_id)

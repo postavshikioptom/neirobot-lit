@@ -18,6 +18,23 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon_weights", type=str, default=None, help="Comma-separated list of weights for each horizon (e.g., '0.4,0.3,0.3')")
     parser.add_argument("--use_horizon_embedding", action="store_true", help="Use Horizon Embedding instead of separate heads")
     parser.add_argument("--threshold", type=float, default=0.0005, help="Static return threshold (0.0005 = 0.05%)")
+    parser.add_argument("--dynamic_threshold", action=argparse.BooleanOptionalAction, default=False,
+                        help="Use legacy rolling_std*K threshold. Forbidden with --label_mode execution_mid_return.")
+    parser.add_argument("--label_mode", type=str, default="legacy_mid_return",
+                        choices=["legacy_mid_return", "execution_mid_return"],
+                        help="Label contract: legacy mid-return or execution-aware mid-return")
+    parser.add_argument("--time_mode", type=str, default="row", choices=["row", "event", "ms"],
+                        help="How horizon is interpreted: rows, update events, or milliseconds")
+    parser.add_argument("--event_time_column", type=str, default="feat_update_id",
+                        help="Column used for event-time indexing; ms mode still uses timestamp_ms")
+    parser.add_argument("--cost_floor_bps", type=float, default=0.0,
+                        help="Minimum execution-aware cost floor in bps")
+    parser.add_argument("--fee_bps", type=float, default=0.0,
+                        help="Per-side fee in bps for execution-aware labels")
+    parser.add_argument("--slippage_bps", type=float, default=0.0,
+                        help="Slippage floor in bps for execution-aware labels")
+    parser.add_argument("--use_spread_floor", action=argparse.BooleanOptionalAction, default=False,
+                        help="Include current spread floor into execution-aware effective threshold")
     parser.add_argument("--horizon_sweep", type=str, default=None,
                         help="Comma-separated sweep horizons (e.g. '10,20,50,100')")
     parser.add_argument("--threshold_sweep", type=str, default=None,
@@ -185,7 +202,13 @@ def build_train_parser() -> argparse.ArgumentParser:
 def parse_train_args(argv=None):
     """Parse command-line arguments and return namespace."""
     parser = build_train_parser()
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.label_mode == "execution_mid_return" and args.dynamic_threshold:
+        raise ValueError(
+            "--label_mode execution_mid_return несовместим с --dynamic_threshold. "
+            "Legacy dynamic threshold разрешён только для legacy/debug режима."
+        )
+    return args
 
 
 def parse_winsor_limits(raw_value: str) -> tuple:
