@@ -28,6 +28,7 @@ DEFAULT_SWEEP_THRESHOLDS = [0.0001, 0.0002, 0.0003, 0.0005, 0.0008, 0.0010, 0.00
 SWEEP_MIN_TRADE_SHARE = 0.05
 SWEEP_MAX_TRADE_SHARE = 0.60
 SWEEP_MIN_DIRECTION_SHARE = 0.02
+SWEEP_MAX_FLAT_SHARE = 0.90
 
 
 @dataclass
@@ -290,6 +291,7 @@ def shortlist_sweep_candidates(grid: list[SweepBaselineRow], topk: int) -> list[
         row for row in grid
         if not row.subspread_target
         and SWEEP_MIN_TRADE_SHARE <= row.trade_share <= SWEEP_MAX_TRADE_SHARE
+        and row.share_flat <= SWEEP_MAX_FLAT_SHARE
         and row.share_up >= SWEEP_MIN_DIRECTION_SHARE
         and row.share_down >= SWEEP_MIN_DIRECTION_SHARE
     ]
@@ -373,6 +375,7 @@ def render_baselines_markdown(artifacts: SweepBaselineArtifacts) -> str:
             "",
             f"- horizon: `{dyn.horizon}`",
             f"- threshold_mode: `{dyn.threshold_mode}`",
+            f"- unsafe_reference: `{str(dyn.unsafe_reference).lower()}`",
             f"- share_flat / share_up / share_down: `{dyn.share_flat * 100.0:.2f} / {dyn.share_up * 100.0:.2f} / {dyn.share_down * 100.0:.2f}`",
             f"- note: {dyn.note}",
             "",

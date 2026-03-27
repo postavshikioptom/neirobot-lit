@@ -22,7 +22,7 @@ def build_train_parser() -> argparse.ArgumentParser:
                         help="Comma-separated sweep horizons (e.g. '10,20,50,100')")
     parser.add_argument("--threshold_sweep", type=str, default=None,
                         help="Comma-separated sweep thresholds (e.g. '0.0001,0.0005,0.0015')")
-    parser.add_argument("--sweep_baseline_path", type=str, default="docs/sweep_baseline",
+    parser.add_argument("--sweep_baseline_path", type=str, default=None,
                         help="Base path for sweep artifacts without extension")
     parser.add_argument("--sweep_use_event_rows", action=argparse.BooleanOptionalAction, default=False,
                         help="Use deduplicated event rows (feat_update_id changes only) for sweep baseline and mini-train")
