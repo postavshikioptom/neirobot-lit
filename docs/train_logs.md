@@ -241,3 +241,18 @@ N/A
 - `val_ece`, `val_mce`: calibration metrics из единого epoch-end отчета.
 - `precision_flat|up|down`, `recall_flat|up|down`: явная class table вместо двусмысленного `Hit Rate`.
 - JSON-артефакт эпохи сохраняется в `artifacts/<symbol>/validation/validation_report_epoch_{epoch}.json`.
+
+## Задача 326 | Baseline sweep
+
+- Артефакты baseline sweep теперь генерируются отдельным sweep-режимом в `python_lab/src/train.py`.
+- Ожидаемые выходы: `docs/sweep_baseline.csv`, `docs/sweep_baseline.json`, `docs/baselines.md`.
+- Sweep сохраняет relation threshold-to-spread и отдельный `dynamic_threshold_reference`.
+- Для shortlist top-k кандидатов sweep-режим пишет `mini_train_mcc`, `mini_train_coverage_directional`, `mini_train_net_edge_total`.
+
+## Sweep Baseline Contract (Задача 326)
+
+- baseline sweep строится отдельно от обычного train loop;
+- grid должен сохранять `share_flat`, `share_up`, `share_down`, `trade_share`;
+- в отчёте обязаны быть `threshold_bps`, `median_spread_bps`, `threshold_to_spread_ratio`, `subspread_target`;
+- `rolling_std * 0.5` для `h=100` фиксируется отдельно как unsafe reference и не подменяет static grid;
+- shortlist top-k кандидатов должен содержать `mini_train_mcc`, `mini_train_coverage_directional`, `mini_train_net_edge_total`.
