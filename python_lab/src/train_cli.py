@@ -141,8 +141,33 @@ def build_train_parser() -> argparse.ArgumentParser:
 
     # Purged K-Fold CV
     parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for cross-validation")
+    parser.add_argument(
+        "--split_strategy",
+        type=str,
+        default="purged_holdout",
+        choices=["chronological", "purged_holdout", "walk_forward"],
+        help="Data split strategy for single-run training/evaluation",
+    )
+    parser.add_argument(
+        "--embargo_seconds",
+        type=int,
+        default=0,
+        help="Embargo duration in seconds near validation/test boundaries",
+    )
     parser.add_argument("--purge_buffer_events", type=int, default=100, help="Number of events to purge before validation fold")
     parser.add_argument("--embargo_buffer_events", type=int, default=50, help="Number of events to embargo after validation fold")
+    parser.add_argument(
+        "--holdout_days",
+        type=int,
+        default=1,
+        help="Validation/test holdout window size in days for purged_holdout/walk_forward",
+    )
+    parser.add_argument(
+        "--training_window_days",
+        type=int,
+        default=7,
+        help="Training window size in days for walk_forward",
+    )
 
     # Optuna pruning
     parser.add_argument("--pruner_type", type=str, default="median", choices=["median", "hyperband", "patience"],
@@ -244,6 +269,18 @@ def parse_train_args(argv=None):
     _validate_prob("up_prob_threshold", args.up_prob_threshold)
     _validate_prob("down_prob_threshold", args.down_prob_threshold)
     _validate_prob("margin_threshold", args.margin_threshold)
+    if args.embargo_seconds < 0:
+        raise ValueError("--embargo_seconds must be >= 0")
+    if args.purge_buffer_events < 0:
+        raise ValueError("--purge_buffer_events must be >= 0")
+    if args.embargo_buffer_events < 0:
+        raise ValueError("--embargo_buffer_events must be >= 0")
+    if args.holdout_days <= 0:
+        raise ValueError("--holdout_days must be > 0")
+    if args.training_window_days <= 0:
+        raise ValueError("--training_window_days must be > 0")
+    if args.split_strategy == "walk_forward" and args.mode == "cv":
+        raise ValueError("--split_strategy walk_forward несовместим с --mode cv")
     return args
 
 

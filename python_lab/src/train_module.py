@@ -532,11 +532,15 @@ class LiTModule(pl.LightningModule):
         mae_vol = nn.functional.l1_loss(vol_pred, vol_target)
 
         current_imbalance = x[:, -1, 2, 0]
+        spread_proxy = x[:, -1, 8, :].mean(dim=1)
+        activity_proxy = x[:, -1, 3, :].abs().mean(dim=1)
         self._accumulate_validation_outputs(
             logits=logits,
             labels=y,
             f_ret=f_ret,
             imbalance=current_imbalance,
+            spread_proxy=spread_proxy,
+            activity_proxy=activity_proxy,
             regime_id=regime_id,
             vol_true=vol_target,
             vol_pred=vol_pred,
@@ -746,6 +750,10 @@ class LiTModule(pl.LightningModule):
                 },
                 "class_metrics": {},
                 "regime_metrics": {},
+                "market_regime_buckets": self._build_market_regime_bucket_report(
+                    validation_payload,
+                    decision_preds if decision_rule != "argmax" else argmax_preds,
+                ),
                 "argmax_metrics": argmax_metrics,
                 "decision_rule_metrics": decision_metrics,
             }
@@ -946,13 +954,15 @@ class LiTModule(pl.LightningModule):
         epoch_end_str = f"{int(epoch_end_duration // 60)}m {int(epoch_end_duration % 60)}s"
         print(f"\n[{phase}] on_validation_epoch_end completed in {epoch_end_str}")
 
-    def _accumulate_validation_outputs(self, logits, labels, f_ret, imbalance, regime_id, vol_true, vol_pred, loss_cls, loss_vol, mae_vol):
+    def _accumulate_validation_outputs(self, logits, labels, f_ret, imbalance, spread_proxy, activity_proxy, regime_id, vol_true, vol_pred, loss_cls, loss_vol, mae_vol):
         self._validation_accumulator.append(
             {
                 "logits": logits.detach().cpu(),
                 "labels": labels.detach().cpu(),
                 "f_ret": f_ret.detach().cpu(),
                 "imbalance": imbalance.detach().cpu(),
+                "spread_proxy": spread_proxy.detach().cpu(),
+                "activity_proxy": activity_proxy.detach().cpu(),
                 "regime_id": regime_id.detach().cpu() if regime_id is not None else None,
                 "vol_true": vol_true.detach().cpu(),
                 "vol_pred": vol_pred.detach().cpu(),
@@ -968,6 +978,8 @@ class LiTModule(pl.LightningModule):
             "y_true": np.concatenate([item["labels"].numpy() for item in self._validation_accumulator]),
             "f_ret": np.concatenate([item["f_ret"].numpy() for item in self._validation_accumulator]),
             "imbalance": np.concatenate([item["imbalance"].numpy() for item in self._validation_accumulator]),
+            "spread_proxy": np.concatenate([item["spread_proxy"].numpy() for item in self._validation_accumulator]),
+            "activity_proxy": np.concatenate([item["activity_proxy"].numpy() for item in self._validation_accumulator]),
             "vol_true": np.concatenate([item["vol_true"].numpy() for item in self._validation_accumulator]),
             "vol_pred": np.concatenate([item["vol_pred"].numpy() for item in self._validation_accumulator]),
             "loss_cls": torch.stack([item["loss_cls"] for item in self._validation_accumulator]).mean().item(),
@@ -979,6 +991,91 @@ class LiTModule(pl.LightningModule):
         regime_values = [item["regime_id"].numpy() for item in self._validation_accumulator if item["regime_id"] is not None]
         payload["regime_ids"] = np.concatenate(regime_values) if regime_values else None
         return payload
+
+    def _build_market_regime_bucket_report(self, payload, y_pred, probs=None):
+        from .utils import compute_directional_metrics
+
+        y_true = payload["y_true"]
+        logits_np = payload["logits"].numpy()
+        f_ret = payload["f_ret"]
+        imbalance = payload["imbalance"]
+
+        if y_true.ndim > 1:
+            y_true = y_true[:, 0]
+            y_pred = y_pred[:, 0] if y_pred.ndim > 1 else y_pred
+            f_ret = f_ret[:, 0] if f_ret.ndim > 1 else f_ret
+            logits_np = logits_np[:, 0, :] if logits_np.ndim == 3 else logits_np
+
+        valid_mask = y_true != -100
+        if not np.any(valid_mask):
+            return {}
+
+        y_true = y_true[valid_mask]
+        y_pred = y_pred[valid_mask]
+        f_ret = f_ret[valid_mask]
+        imbalance = imbalance[valid_mask]
+        logits_np = logits_np[valid_mask]
+        spread_values = payload["spread_proxy"][valid_mask]
+        volatility_values = payload["vol_true"][valid_mask]
+        activity_values = payload["activity_proxy"][valid_mask]
+
+        def _edges(values: np.ndarray) -> list[float]:
+            q1, q2 = np.quantile(values, [0.33, 0.66])
+            return [-np.inf, float(q1), float(q2), np.inf]
+
+        def _bucket_rows(values: np.ndarray, edges: list[float], metric_name: str):
+            rows = []
+            for idx, bucket_name in enumerate(("low", "mid", "high")):
+                lo = edges[idx]
+                hi = edges[idx + 1]
+                mask = (values >= lo) & (values < hi)
+                samples = int(np.sum(mask))
+                if samples == 0:
+                    rows.append(
+                        {
+                            "bucket": bucket_name,
+                            "samples": 0,
+                            "coverage_directional": 0.0,
+                            "mcc_primary": 0.0,
+                            "net_edge_total": 0.0,
+                        }
+                    )
+                    continue
+                bucket_true = y_true[mask]
+                bucket_pred = y_pred[mask]
+                bucket_f_ret = f_ret[mask]
+                bucket_imb = imbalance[mask]
+                bucket_logits = logits_np[mask]
+                direction = compute_directional_metrics(
+                    bucket_true,
+                    bucket_pred,
+                    bucket_logits,
+                    bucket_f_ret,
+                    bucket_imb,
+                    directional_base=self.hparams.get("metric_directional_base", "predicted"),
+                    fee_bps=self.hparams.get("report_fee_bps", 0.0),
+                    slippage_bps=self.hparams.get("report_slippage_bps", 0.0),
+                    half_spread_bps=self.hparams.get("report_half_spread_bps", 0.0),
+                    probs=probs[mask] if probs is not None else None,
+                )
+                bucket_mcc = float(safe_matthews_corrcoef(bucket_true, bucket_pred))
+                rows.append(
+                    {
+                        "bucket": bucket_name,
+                        "samples": samples,
+                        "coverage_directional": float(direction.get("coverage_directional", 0.0)),
+                        "mcc_primary": bucket_mcc,
+                        "net_edge_total": float(direction.get("net_edge_total", 0.0)),
+                    }
+                )
+            print(f"Market bucket report [{metric_name}]: {rows}")
+            return rows
+
+        return {
+            "spread": _bucket_rows(spread_values, _edges(spread_values), "spread"),
+            "volatility": _bucket_rows(volatility_values, _edges(volatility_values), "volatility"),
+            "activity": _bucket_rows(activity_values, _edges(activity_values), "activity"),
+        }
 
     def _finalize_validation_metrics(self, payload, *, y_pred, probs=None, use_torch_metrics=True):
         class_weights = self.criterion.weight.cpu().numpy() if hasattr(self.criterion, 'weight') and self.criterion.weight is not None else None
@@ -1086,6 +1183,7 @@ class LiTModule(pl.LightningModule):
             "trade": trade,
             "class_metrics": class_metrics,
             "regime_metrics": {},
+            "market_regime_buckets": self._build_market_regime_bucket_report(payload, y_pred, probs=probs),
         }
 
     def _log_final_validation_metrics(self, finalized):
@@ -1118,6 +1216,7 @@ class LiTModule(pl.LightningModule):
             "trade": finalized["trade"],
             "class_metrics": finalized["class_metrics"],
             "regime_metrics": finalized["regime_metrics"],
+            "market_regime_buckets": finalized.get("market_regime_buckets", {}),
             "argmax_metrics": finalized.get("argmax_metrics", {}),
             "decision_rule_metrics": finalized.get("decision_rule_metrics", {}),
         }

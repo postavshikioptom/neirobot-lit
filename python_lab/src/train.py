@@ -2,9 +2,11 @@
 train.py - Thin entrypoint for LiT model training.
 Refactoring was done during task 322.
 """
+import json
 from pathlib import Path
 
 import numpy as np
+import polars as plr
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
@@ -279,6 +281,113 @@ def _append_train_log(paths, csv_path: Path, json_path: Path, baselines_path: Pa
         train_logs_path.write_text(existing.rstrip() + "\n" + entry, encoding="utf-8")
 
 
+def _extract_trainer_metric(trainer, metric_name: str) -> float:
+    value = trainer.callback_metrics.get(metric_name)
+    if value is None:
+        return 0.0
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
+def _run_walk_forward(args, paths, winsor_limits, horizons, num_horizons, horizon_weights):
+    feature_df = load_feature_frame(args, paths, use_event_rows=False)
+    timestamps = feature_df["timestamp_ms"].to_numpy()
+    if len(timestamps) == 0:
+        raise ValueError("Walk-forward requires non-empty feature dataframe.")
+
+    day_ms = 24 * 60 * 60 * 1000
+    train_ms = int(args.training_window_days * day_ms)
+    holdout_ms = int(args.holdout_days * day_ms)
+    window_span_ms = train_ms + 2 * holdout_ms
+    step_ms = holdout_ms
+
+    start_ts = int(timestamps.min())
+    end_ts = int(timestamps.max()) + 1
+    window_end_ts = start_ts + window_span_ms
+
+    window_results = []
+    window_idx = 0
+    while window_end_ts <= end_ts:
+        window_start_ts = window_end_ts - window_span_ms
+        window_df = feature_df.filter(
+            (plr.col("timestamp_ms") >= window_start_ts) & (plr.col("timestamp_ms") < window_end_ts)
+        )
+        if window_df.height < max(args.seq_len * 5, 500):
+            window_end_ts += step_ms
+            continue
+
+        window_idx += 1
+        print(f"\n[WALK_FORWARD] Window {window_idx}: start={window_start_ts}, end={window_end_ts}, rows={window_df.height}")
+        window_args = clone_args_with_overrides(args, split_strategy="purged_holdout")
+        prepared = prepare_training_data(
+            window_args,
+            paths,
+            winsor_limits,
+            horizons,
+            num_horizons,
+            horizon_weights,
+            feature_df=window_df,
+        )
+        run_tag = f"{args.symbol}_wf_{window_idx:02d}"
+        checkpoint_dir = paths.base_path / "artifacts" / run_tag / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        tb_dir = str(paths.base_path / "runs" / run_tag)
+        trainer, _, _, _ = _fit_model(
+            window_args,
+            prepared,
+            winsor_limits,
+            symbol_tag=run_tag,
+            checkpoint_dir=checkpoint_dir,
+            tb_dir=tb_dir,
+            max_epochs=args.epochs,
+            limit_train_batches=args.limit_train_batches,
+            limit_val_batches=args.limit_val_batches,
+            patience=15,
+            save_top_k=1,
+        )
+
+        split_artifacts = prepared.split_artifacts
+        val_mcc = _extract_trainer_metric(trainer, "val_mcc_primary")
+        coverage = _extract_trainer_metric(trainer, "coverage_directional")
+        net_edge = _extract_trainer_metric(trainer, "net_edge_total")
+
+        result = {
+            "window": window_idx,
+            "train_range": split_artifacts.get("train_range", {}),
+            "val_range": split_artifacts.get("val_range", {}),
+            "test_range": split_artifacts.get("test_range", {}),
+            "effective_purge_events": int(split_artifacts.get("effective_purge_events", 0)),
+            "mcc_primary": float(val_mcc),
+            "coverage_directional": float(coverage),
+            "net_edge_total": float(net_edge),
+        }
+        window_results.append(result)
+        print(
+            f"[WALK_FORWARD] Window {window_idx} metrics: "
+            f"mcc_primary={val_mcc:.4f}, coverage_directional={coverage:.4f}, net_edge_total={net_edge:.6f}, "
+            f"effective_purge_events={result['effective_purge_events']}"
+        )
+        window_end_ts += step_ms
+
+    if not window_results:
+        raise ValueError("Walk-forward produced no valid windows. Check holdout_days/training_window_days and data span.")
+
+    out_path = paths.base_path / "bots" / args.symbol / "models" / "walk_forward_results.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "split_strategy": "walk_forward",
+        "training_window_days": int(args.training_window_days),
+        "holdout_days": int(args.holdout_days),
+        "windows": window_results,
+        "mean_mcc_primary": float(np.mean([w["mcc_primary"] for w in window_results])),
+        "mean_coverage_directional": float(np.mean([w["coverage_directional"] for w in window_results])),
+        "mean_net_edge_total": float(np.mean([w["net_edge_total"] for w in window_results])),
+    }
+    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"[WALK_FORWARD] Results saved to {out_path}")
+
+
 def _run_sweep_mode(args, paths, winsor_limits):
     horizons, thresholds = resolve_sweep_grid(args)
     feature_df = load_feature_frame(args, paths, use_event_rows=False)
@@ -391,6 +500,10 @@ def train():
 
     if is_sweep_mode(args):
         _run_sweep_mode(args, paths, winsor_limits)
+        return
+
+    if args.split_strategy == "walk_forward":
+        _run_walk_forward(args, paths, winsor_limits, horizons, num_horizons, horizon_weights)
         return
 
     prepared = prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, horizon_weights)

@@ -6,13 +6,21 @@ import json
 import torch
 import numpy as np
 from torch.utils.data import DataLoader, Subset
-from sklearn.metrics import matthews_corrcoef
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from .train_module import LiTModule, TrainSubset
 from .train_runtime import build_dataloader_kwargs, resolve_trainer_precision
+from .utils import safe_matthews_corrcoef
+
+
+def _as_float_metric(value, default=0.0) -> float:
+    if value is None:
+        return float(default)
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().item())
+    return float(value)
 
 
 def run_cross_validation(args, paths, prepared, winsor_limits):
@@ -62,6 +70,8 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
     cv_labels = full_dataset.labels[:cv_size]
 
     fold_mccs = []
+    fold_coverages = []
+    fold_net_edges = []
     fold_results = []
 
     print(f"\nCV Configuration:")
@@ -186,63 +196,66 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
 
         best_fold_model_path = fold_checkpoint_callback.best_model_path
         if best_fold_model_path:
-            print(f"\nEvaluating fold {fold_idx + 1}...")
-            best_fold_model = LiTModule.load_from_checkpoint(best_fold_model_path)
-            best_fold_model.eval()
-            best_fold_model.freeze()
-
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            best_fold_model.to(device)
-
-            fold_y_true, fold_y_pred = [], []
-            with torch.no_grad():
-                for batch in fold_val_loader:
-                    x, y, ts, mid, label, extra_data = batch
-                    regime_id = extra_data["regime_id"]
-                    x = x.to(device)
-                    r_id = regime_id.to(device) if regime_id is not None else None
-                    logits, _ = best_fold_model(x, regime_id=r_id)
-                    preds = torch.argmax(logits, dim=1)
-                    fold_y_true.extend(y.cpu().numpy())
-                    fold_y_pred.extend(preds.cpu().numpy())
-
-            fold_mcc = matthews_corrcoef(fold_y_true, fold_y_pred)
+            fold_mcc = _as_float_metric(fold_trainer.callback_metrics.get("val_mcc_primary"), default=0.0)
+            fold_coverage = _as_float_metric(fold_trainer.callback_metrics.get("coverage_directional"), default=0.0)
+            fold_net_edge = _as_float_metric(fold_trainer.callback_metrics.get("net_edge_total"), default=0.0)
             fold_mccs.append(fold_mcc)
+            fold_coverages.append(fold_coverage)
+            fold_net_edges.append(fold_net_edge)
             fold_results.append({
                 'fold': fold_idx + 1,
-                'mcc': fold_mcc,
+                'val_mcc_primary': fold_mcc,
+                'coverage_directional': fold_coverage,
+                'net_edge_total': fold_net_edge,
                 'train_size': len(train_idx),
                 'val_size': len(val_idx),
                 'best_model_path': best_fold_model_path,
             })
-            print(f"\nFold {fold_idx + 1} Results: MCC={fold_mcc:.4f}")
+            print(
+                f"\nFold {fold_idx + 1} Results: "
+                f"val_mcc_primary={fold_mcc:.4f}, "
+                f"coverage_directional={fold_coverage:.4f}, "
+                f"net_edge_total={fold_net_edge:.6f}"
+            )
 
     # Агрегируем результаты
     print(f"\n{'='*70}")
     print("CROSS-VALIDATION RESULTS")
     print(f"{'='*70}")
 
-    mean_mcc = np.mean(fold_mccs)
-    std_mcc = np.std(fold_mccs)
+    mean_mcc = float(np.mean(fold_mccs))
+    std_mcc = float(np.std(fold_mccs))
+    mean_coverage = float(np.mean(fold_coverages)) if fold_coverages else 0.0
+    mean_net_edge = float(np.mean(fold_net_edges)) if fold_net_edges else 0.0
 
     for result in fold_results:
-        print(f"  Fold {result['fold']}: {result['mcc']:.4f}")
+        print(
+            f"  Fold {result['fold']}: "
+            f"mcc={result['val_mcc_primary']:.4f}, "
+            f"coverage={result['coverage_directional']:.4f}, "
+            f"net_edge={result['net_edge_total']:.6f}"
+        )
 
     print(f"\nAggregated: Mean MCC={mean_mcc:.4f} ± {std_mcc:.4f}, "
           f"Min={np.min(fold_mccs):.4f}, Max={np.max(fold_mccs):.4f}")
+    print(f"Aggregated coverage_directional={mean_coverage:.4f}, net_edge_total={mean_net_edge:.6f}")
 
     cv_results = {
         'n_splits': args.n_splits,
         'purge_buffer_events': args.purge_buffer_events,
         'embargo_buffer_events': args.embargo_buffer_events,
-        'mean_mcc': float(mean_mcc),
-        'std_mcc': float(std_mcc),
+        'mean_mcc': mean_mcc,
+        'std_mcc': std_mcc,
+        'mean_coverage_directional': mean_coverage,
+        'mean_net_edge_total': mean_net_edge,
         'min_mcc': float(np.min(fold_mccs)),
         'max_mcc': float(np.max(fold_mccs)),
         'folds': [
             {
                 'fold': r['fold'],
-                'mcc': float(r['mcc']),
+                'val_mcc_primary': float(r['val_mcc_primary']),
+                'coverage_directional': float(r['coverage_directional']),
+                'net_edge_total': float(r['net_edge_total']),
                 'train_size': int(r['train_size']),
                 'val_size': int(r['val_size']),
             }
@@ -282,7 +295,7 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
             y_true.extend(y.cpu().numpy())
             y_pred.extend(preds.cpu().numpy())
 
-    holdout_mcc = matthews_corrcoef(y_true, y_pred)
+    holdout_mcc = safe_matthews_corrcoef(y_true, y_pred)
     mcc_diff = abs(mean_mcc - holdout_mcc)
     mcc_diff_pct = (mcc_diff / mean_mcc) * 100 if mean_mcc != 0 else 0
 

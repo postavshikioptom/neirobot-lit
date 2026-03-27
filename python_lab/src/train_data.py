@@ -100,6 +100,7 @@ class PreparedTrainingData:
     time_weighting_params: dict = field(default_factory=dict)
     label_columns: list[str] = field(default_factory=list)
     class_weight_metadata: dict = field(default_factory=dict)
+    split_artifacts: dict = field(default_factory=dict)
 
 
 def _parse_past_returns_lags(raw: str) -> list:
@@ -809,6 +810,166 @@ def split_dataset_chronologically(full_dataset):
     return train_ds, val_ds, test_ds, train_indices, val_indices, test_indices
 
 
+def _resolve_max_horizon(horizons) -> int:
+    if isinstance(horizons, (list, tuple)):
+        return max(int(h) for h in horizons) if horizons else 1
+    return int(horizons)
+
+
+def _resolve_max_lag(args) -> int:
+    lags = _parse_past_returns_lags(getattr(args, "past_returns_lags", "10,50,100"))
+    return max(lags) if lags else 0
+
+
+def _safe_median_step_ms(timestamps: np.ndarray) -> float:
+    if timestamps.size < 2:
+        return 0.0
+    deltas = np.diff(timestamps)
+    if deltas.size == 0:
+        return 0.0
+    return float(np.median(deltas))
+
+
+def _indices_range(indices: list[int], timestamps: np.ndarray) -> dict:
+    if not indices:
+        return {"start_idx": None, "end_idx": None, "start_ts": None, "end_ts": None}
+    return {
+        "start_idx": int(indices[0]),
+        "end_idx": int(indices[-1]),
+        "start_ts": int(timestamps[indices[0]]),
+        "end_ts": int(timestamps[indices[-1]]),
+    }
+
+
+def _build_split_artifacts(
+    strategy: str,
+    timestamps: np.ndarray,
+    train_indices: list[int],
+    val_indices: list[int],
+    test_indices: list[int],
+    effective_purge_events: int,
+    embargo_events: int,
+) -> dict:
+    return {
+        "strategy": strategy,
+        "effective_purge_events": int(effective_purge_events),
+        "embargo_events": int(embargo_events),
+        "train_indices_count": int(len(train_indices)),
+        "val_indices_count": int(len(val_indices)),
+        "test_indices_count": int(len(test_indices)),
+        "train_range": _indices_range(train_indices, timestamps),
+        "val_range": _indices_range(val_indices, timestamps),
+        "test_range": _indices_range(test_indices, timestamps),
+    }
+
+
+def split_dataset_purged_holdout(full_dataset, args, horizons):
+    timestamps = np.asarray(full_dataset.get_timestamps(), dtype=np.int64)
+    total_len = len(full_dataset)
+    if timestamps.size != total_len:
+        raise ValueError(
+            f"Timestamps length mismatch: timestamps={timestamps.size}, dataset={total_len}"
+        )
+    if total_len < 10:
+        raise ValueError("Dataset is too small for purged holdout split.")
+
+    day_ms = 24 * 60 * 60 * 1000
+    holdout_ms = int(getattr(args, "holdout_days", 1) * day_ms)
+    last_ts = int(timestamps[-1])
+    test_start_ts = last_ts - holdout_ms + 1
+    val_start_ts = test_start_ts - holdout_ms
+
+    val_mask = (timestamps >= val_start_ts) & (timestamps < test_start_ts)
+    test_mask = timestamps >= test_start_ts
+    train_mask = timestamps < val_start_ts
+
+    base_train_indices = np.where(train_mask)[0]
+    val_indices = np.where(val_mask)[0].tolist()
+    test_indices = np.where(test_mask)[0].tolist()
+
+    if len(val_indices) == 0 or len(test_indices) == 0 or len(base_train_indices) == 0:
+        raise ValueError(
+            "Purged holdout split produced empty train/val/test. "
+            "Increase dataset or reduce holdout_days."
+        )
+
+    max_horizon = _resolve_max_horizon(horizons)
+    max_lag = _resolve_max_lag(args)
+    effective_purge_events = max(
+        int(getattr(args, "seq_len", 1)),
+        int(max_horizon),
+        int(max_lag),
+        int(getattr(args, "purge_buffer_events", 0)),
+    )
+
+    median_step_ms = _safe_median_step_ms(timestamps)
+    embargo_seconds = int(getattr(args, "embargo_seconds", 0))
+    embargo_events_from_seconds = int(np.ceil((embargo_seconds * 1000.0) / median_step_ms)) if median_step_ms > 0 else 0
+    embargo_events = max(int(getattr(args, "embargo_buffer_events", 0)), embargo_events_from_seconds)
+
+    blocked = np.zeros(total_len, dtype=bool)
+    boundary_specs = [
+        (val_indices[0], val_indices[-1]),
+        (test_indices[0], test_indices[-1]),
+    ]
+    for start_idx, end_idx in boundary_specs:
+        left = max(0, start_idx - effective_purge_events)
+        right = min(total_len, end_idx + 1 + embargo_events)
+        blocked[left:right] = True
+
+        if embargo_seconds > 0:
+            start_ts = int(timestamps[start_idx])
+            end_ts = int(timestamps[end_idx])
+            blocked |= (timestamps >= (start_ts - embargo_seconds * 1000)) & (timestamps <= (end_ts + embargo_seconds * 1000))
+
+    train_indices = [int(i) for i in base_train_indices if not blocked[int(i)]]
+    if len(train_indices) == 0:
+        raise ValueError(
+            "Purged holdout removed all train samples. "
+            "Reduce purge/embargo or holdout_days."
+        )
+
+    print(
+        "Purged holdout split: "
+        f"train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}, "
+        f"effective_purge_events={effective_purge_events}, embargo_events={embargo_events}"
+    )
+
+    train_ds = TrainSubset(full_dataset, train_indices)
+    val_ds = Subset(full_dataset, val_indices)
+    test_ds = Subset(full_dataset, test_indices)
+    artifacts = _build_split_artifacts(
+        strategy="purged_holdout",
+        timestamps=timestamps,
+        train_indices=train_indices,
+        val_indices=val_indices,
+        test_indices=test_indices,
+        effective_purge_events=effective_purge_events,
+        embargo_events=embargo_events,
+    )
+    return train_ds, val_ds, test_ds, train_indices, val_indices, test_indices, artifacts
+
+
+def split_dataset_by_strategy(full_dataset, args, horizons):
+    strategy = getattr(args, "split_strategy", "chronological")
+    if strategy == "chronological":
+        train_ds, val_ds, test_ds, train_indices, val_indices, test_indices = split_dataset_chronologically(full_dataset)
+        timestamps = np.asarray(full_dataset.get_timestamps(), dtype=np.int64)
+        artifacts = _build_split_artifacts(
+            strategy="chronological",
+            timestamps=timestamps,
+            train_indices=train_indices,
+            val_indices=val_indices,
+            test_indices=test_indices,
+            effective_purge_events=0,
+            embargo_events=0,
+        )
+        return train_ds, val_ds, test_ds, train_indices, val_indices, test_indices, artifacts
+    if strategy == "purged_holdout":
+        return split_dataset_purged_holdout(full_dataset, args, horizons)
+    raise ValueError(f"Unsupported split strategy in prepare_training_data: {strategy}")
+
+
 def _fit_normalizer_on_train(full_dataset, train_ds, normalizer, args, winsor_limits):
     """Обучает нормализатор только на train-части (channel-space)."""
     print("\nFitting normalizer on original training set (channels-based)...")
@@ -1157,15 +1318,19 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
     if np.isnan(full_dataset.x_raw).any():
         raise ValueError("КРИТИЧНО: Входящие features содержат NaN строки для запуска обучения!")
 
-    # 8. Хронологическое разделение 70/15/15
-    train_ds, val_ds, test_ds, train_indices, val_indices, test_indices = \
-        split_dataset_chronologically(full_dataset)
+    # 8. Разделение датасета согласно стратегии
+    train_ds, val_ds, test_ds, train_indices, val_indices, test_indices, split_artifacts = \
+        split_dataset_by_strategy(full_dataset, args, horizons)
 
     total_len = len(full_dataset)
-    print(f"\nChronological split verification:")
+    print(f"\nSplit verification ({split_artifacts['strategy']}):")
     print(f"  Train: indices {train_indices[0]}-{train_indices[-1]} ({len(train_ds)} samples, {len(train_ds)/total_len*100:.1f}%)")
     print(f"  Val:   indices {val_indices[0]}-{val_indices[-1]} ({len(val_ds)} samples, {len(val_ds)/total_len*100:.1f}%)")
     print(f"  Test:  indices {test_indices[0]}-{test_indices[-1]} ({len(test_ds)} samples, {len(test_ds)/total_len*100:.1f}%)")
+    print(
+        f"  effective_purge_events={split_artifacts['effective_purge_events']}, "
+        f"embargo_events={split_artifacts['embargo_events']}"
+    )
 
     # 9. Fit нормализатора только на train-части
     _fit_normalizer_on_train(
@@ -1175,7 +1340,7 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
     # 10. NaN диагностика после нормализации
     _run_normalized_nan_checks(train_ds, full_dataset)
 
-    print(f"Dataset split (Chronological): Train={len(train_ds)}, Val={len(val_ds)}, Test={len(test_ds)}")
+    print(f"Dataset split ({split_artifacts['strategy']}): Train={len(train_ds)}, Val={len(val_ds)}, Test={len(test_ds)}")
     if args.use_symmetric_flip or args.volume_jitter_range > 0:
         print(f"Augmentation enabled for training: flip={args.use_symmetric_flip}, jitter={args.volume_jitter_range}, prob={args.augment_prob}")
 
@@ -1216,4 +1381,5 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
         time_weighting_params=time_weighting_params,
         label_columns=label_columns,
         class_weight_metadata=class_weight_metadata,
+        split_artifacts=split_artifacts,
     )
