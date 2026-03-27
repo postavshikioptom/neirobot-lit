@@ -20,6 +20,7 @@ from .lit_model import LiTModel
 from .utils import (
     compute_classification_metrics,
     compute_directional_metrics,
+    safe_matthews_corrcoef,
     FocalLoss,
     CalibrationMetrics,
     plot_reliability_diagram,
@@ -490,6 +491,31 @@ class LiTModule(pl.LightningModule):
                 print(f"  Horizon {h}: MCC={mcc_h:.4f}, F1={f1_h:.4f}, Samples={samples_h}")
             avg_mcc = np.mean([metrics.get(f"mcc_h{h}", 0.0) for h in range(self.num_horizons)])
             self.log("val_mcc_primary", avg_mcc, logger=True, prog_bar=True, add_dataloader_idx=False)
+            finalized = {
+                "epoch": int(self.current_epoch),
+                "metric_contract": self.hparams.get("metric_contract", "standard"),
+                "metric_log_prefix": self.hparams.get("metric_log_prefix", "val"),
+                "metric_directional_base": self.hparams.get("metric_directional_base", "predicted"),
+                "quality": {
+                    "val_loss": float(validation_payload["loss_cls"]),
+                    "val_loss_cls": float(validation_payload["loss_cls"]),
+                    "val_mse_vol": float(validation_payload["loss_vol"]),
+                    "val_mae_vol": float(validation_payload["mae_vol"]),
+                    "val_vol_mse": float(np.mean((validation_payload["vol_true"] - validation_payload["vol_pred"])**2)),
+                    "val_vol_mae": float(np.mean(np.abs(validation_payload["vol_true"] - validation_payload["vol_pred"]))),
+                    "val_mcc_primary": float(avg_mcc),
+                    "val_mcc_np": float(avg_mcc),
+                },
+                "calibration": {},
+                "coverage": {},
+                "trade": {},
+                "class_metrics": {},
+                "regime_metrics": {},
+            }
+            for h in range(self.num_horizons):
+                finalized["quality"][f"mcc_h{h}"] = float(metrics.get(f"mcc_h{h}", 0.0))
+                finalized["quality"][f"f1_h{h}"] = float(metrics.get(f"f1_h{h}", 0.0))
+                finalized["quality"][f"samples_h{h}"] = int(metrics.get(f"samples_h{h}", 0))
         else:
             finalized = self._finalize_validation_metrics(validation_payload)
             y_true_tensor = torch.from_numpy(y_true).long()
@@ -614,8 +640,6 @@ class LiTModule(pl.LightningModule):
         return payload
 
     def _finalize_validation_metrics(self, payload):
-        from sklearn.metrics import matthews_corrcoef
-
         class_weights = self.criterion.weight.cpu().numpy() if hasattr(self.criterion, 'weight') and self.criterion.weight is not None else None
         quality_metrics = compute_classification_metrics(payload["y_true"], payload["y_pred"], class_weights=class_weights)
         direction_metrics = compute_directional_metrics(
@@ -624,6 +648,7 @@ class LiTModule(pl.LightningModule):
             payload["logits"].numpy(),
             payload["f_ret"],
             payload["imbalance"],
+            directional_base=self.hparams.get("metric_directional_base", "predicted"),
             fee_bps=self.hparams.get("report_fee_bps", 0.0),
             slippage_bps=self.hparams.get("report_slippage_bps", 0.0),
             half_spread_bps=self.hparams.get("report_half_spread_bps", 0.0),
@@ -633,11 +658,7 @@ class LiTModule(pl.LightningModule):
         val_mcc_torch = float(self.mcc(payload["logits"], y_true_tensor).detach().cpu())
         val_f1_torch = float(self.f1_macro(payload["logits"], y_true_tensor).detach().cpu())
         ece, mce, bin_data = self.calibration_metrics.calculate(payload["logits"], y_true_tensor)
-        directional_mask = payload["y_pred"] != 0
-        if np.any(directional_mask):
-            val_direction_mcc = float(matthews_corrcoef(payload["y_true"][directional_mask], payload["y_pred"][directional_mask]))
-        else:
-            val_direction_mcc = 0.0
+        val_direction_mcc = float(direction_metrics.get("direction_mcc", 0.0))
 
         quality = {
             "val_loss": float(payload["loss_cls"]),
@@ -848,4 +869,5 @@ class LiTModule(pl.LightningModule):
                 print(f"  Max Ratio (All): {clip_stats['max_ratio']:.4f}")
                 print(f"  Max Ratio (Attention): {clip_stats['max_ratio_attention']:.4f}")
                 print(f"  Global Grad Norm: {grad_stats['global_grad_norm']:.4f}")
+
 
