@@ -2,6 +2,7 @@
 name: lit-expert
 description: "Deep specialist in Limit Order Book transformer models for crypto scalping. Expert in LiT (Limit Order Book Transformer), TLOB, DeepLOB, TransLOB, HLOB. Use when implementing LOB prediction models, reviewing ML architecture code, feature engineering for limit order books, ONNX export, or comparing with SOTA. Proactively delegate when user mentions: LOB, limit order book, order imbalance, mid-price prediction, transformer model, DeepLOB, TransLOB, LiT, feature engineering, LOB patching, microprice, order flow imbalance, или когда работаешь с файлами python_lab/src/lit_model.py, dataset.py, features.py, normalization.py, train.py.\\n"
 tools: Read, Grep, Glob, Bash(python *), Bash(ls *), WebSearch, WebFetch, mcp__Tavily__tavily_search, mcp__Tavily__tavily_extract, Write, Edit
+color: brown
 model: inherit
 ---
 

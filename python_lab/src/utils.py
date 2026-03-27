@@ -318,6 +318,7 @@ def compute_directional_metrics(
     fee_bps=0.0,
     slippage_bps=0.0,
     half_spread_bps=0.0,
+    probs=None,
 ):
     """
     Возвращает directional/trade diagnostics с корректной семантикой short-edge и учётом costs.
@@ -335,7 +336,10 @@ def compute_directional_metrics(
     cm = confusion_matrix(labels, preds, labels=[0, 1, 2])
     report = classification_report(labels, preds, output_dict=True, zero_division=0)
 
-    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
+    if probs is None:
+        probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
+    else:
+        probs = np.asarray(probs, dtype=np.float64)
     correct_mask = labels == preds
     wrong_mask = labels != preds
     directional_mask = preds != 0
@@ -506,6 +510,99 @@ def calculate_ece(probs, labels, bins=15):
             ece += torch.abs(accuracy_in_bin - avg_confidence_in_bin) * prop_in_bin
     
     return ece.item()
+
+
+def apply_temperature_scaling(logits, temperature):
+    """Apply temperature scaling to logits."""
+    if isinstance(temperature, torch.Tensor):
+        temp = temperature.detach().float()
+    else:
+        temp = torch.tensor(float(temperature))
+    temp = torch.clamp(temp, min=1e-6)
+    return logits / temp
+
+
+def fit_temperature_scaler(logits_val, y_val, max_iter=50, lr=0.01, init_temperature=1.0):
+    """
+    Fit a single temperature parameter on validation logits by minimizing NLL.
+    Returns a float temperature value.
+    """
+    device = logits_val.device if isinstance(logits_val, torch.Tensor) else torch.device("cpu")
+    logits = logits_val if isinstance(logits_val, torch.Tensor) else torch.tensor(logits_val, dtype=torch.float32, device=device)
+    labels = y_val if isinstance(y_val, torch.Tensor) else torch.tensor(y_val, dtype=torch.long, device=device)
+
+    temperature = torch.nn.Parameter(torch.ones(1, device=device) * float(init_temperature))
+    nll_criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.LBFGS([temperature], lr=lr, max_iter=max_iter)
+
+    def _closure():
+        optimizer.zero_grad()
+        loss = nll_criterion(apply_temperature_scaling(logits, temperature), labels)
+        loss.backward()
+        return loss
+
+    optimizer.step(_closure)
+    temp_value = float(torch.clamp(temperature.detach(), min=1e-6).cpu().item())
+    return temp_value
+
+
+def apply_decision_rule(
+    probs,
+    rule,
+    *,
+    decision_confidence=0.5,
+    decision_hold_threshold=0.6,
+    flat_prob_threshold=0.34,
+    up_prob_threshold=0.34,
+    down_prob_threshold=0.34,
+    margin_threshold=0.0,
+):
+    """
+    Apply decision rule over calibrated probabilities.
+    Returns numpy array of class predictions (0=Flat, 1=Up, 2=Down).
+    """
+    probs = np.asarray(probs, dtype=np.float64)
+    if probs.ndim != 2 or probs.shape[1] != 3:
+        raise ValueError(f"Expected probs shape (N,3), got {probs.shape}")
+
+    if rule == "argmax":
+        return np.argmax(probs, axis=1)
+
+    sorted_idx = np.argsort(-probs, axis=1)
+    top1_idx = sorted_idx[:, 0]
+    top2_idx = sorted_idx[:, 1]
+    top1_prob = probs[np.arange(probs.shape[0]), top1_idx]
+    top2_prob = probs[np.arange(probs.shape[0]), top2_idx]
+    margin = top1_prob - top2_prob
+
+    if rule == "confidence_gap":
+        accept = (top1_prob >= decision_confidence) & (margin >= margin_threshold)
+        pred = np.where(accept, top1_idx, 0)
+        return pred
+
+    if rule == "class_specific_thresholds":
+        eligible = np.zeros_like(probs, dtype=bool)
+        eligible[:, 0] = probs[:, 0] >= flat_prob_threshold
+        eligible[:, 1] = probs[:, 1] >= up_prob_threshold
+        eligible[:, 2] = probs[:, 2] >= down_prob_threshold
+        masked = np.where(eligible, probs, -np.inf)
+        pred = np.argmax(masked, axis=1)
+        pred[np.all(~eligible, axis=1)] = 0
+        return pred
+
+    if rule == "flat_bias":
+        pred = top1_idx.copy()
+        reject = top1_prob < decision_confidence
+        pred[reject] = 0
+        directional = pred != 0
+        hold_fail = directional & (top1_prob < decision_hold_threshold)
+        pred[hold_fail] = 0
+        if margin_threshold > 0.0:
+            gap_fail = (margin < margin_threshold)
+            pred[gap_fail] = 0
+        return pred
+
+    raise ValueError(f"Unknown decision rule: {rule}")
 
 
 def plot_reliability_diagram(bin_data, ece, mce, save_path):

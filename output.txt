@@ -1,31 +1,35 @@
-ПОСЛЕ ЗАДАЧИ 324.8
+ПОСЛЕ ЗАДАЧИ 324
+
+
 [Labeler] Labels distribution:
   [ИНФО] Используется СТАТИЧЕСКИЙ Threshold: 0.000500 (0.05%)
   Horizons: [100], Threshold: 0.0005
   single: {'label': [0, 1, 2], 'count': [247615, 60952, 62312]} | Masked: 0
-Initializing normalizer...
-Creating dataset in 'memory' mode (raw features)...
-[LOBDataset] Computing features from RAW data...
-[DEBUG] update_id_raw: shape=(370879,), dtype=int64
-[DEBUG] ofi raw (per-tick, non-cumulative): min=-2994303.000000, max=622184.625000, mean=14.205466
-[DEBUG] delta_imb (event-consistent): min=-0.825542, max=0.700583, mean=-0.000001
-[DEBUG] delta_spread (event-consistent): min=-0.003369, max=0.003244, mean=0.000000
-[DEBUG] past_ret raw (lag=10): min=-0.009178, max=0.007146
-[DEBUG] vib raw: min=-0.641032, max=0.802446
-[LOBDataset] First sample diagnostics skipped (normalizer not yet fitted)
-[LOBDataset] Loaded 370680 samples. Data mode: memory
-[LOBDataset] Label distribution:
-  Class 0: 247615 samples (66.8%)
-  Class 1: 60952 samples (16.4%)
-  Class 2: 62312 samples (16.8%)
-
-Chronological split verification:
-  Train: indices 0-259474 (259475 samples, 70.0%)
-  Val:   indices 259475-315076 (55602 samples, 15.0%)
-  Test:  indices 315077-370679 (55603 samples, 15.0%)
+....
 
 Fitting normalizer on original training set (channels-based)...
 Static features dimension check: 400 features (8 static channels × 50 levels, dynamic channels fitted separately)
+
+======================================================================
+PRE-FIT DYNAMIC CHANNEL DIAGNOSTICS
+======================================================================
+
+  [ofi]
+    raw:  p01=-48978.558594, p50=0.000000, p99=49337.238281
+    sym:  p01=-10.799158, p50=0.000000, p99=10.806455
+    будущий iqr: raw_iqr=0.000000, alt_iqr=6.665684 → iqr=6.665684
+
+  [delta_imb]
+    raw:  p01=-0.076910, p50=0.000000, p99=0.076793
+    sym:  p01=-0.074096, p50=0.000000, p99=0.073987
+    будущий iqr: raw_iqr=0.004506, alt_iqr=0.022807 → iqr=0.004506
+
+  [delta_spread]
+    raw:  p01=-0.000128, p50=0.000000, p99=0.000129
+    sym:  p01=-0.000128, p50=0.000000, p99=0.000129
+    будущий iqr: raw_iqr=0.000000, alt_iqr=0.000000 → iqr=0.001000
+======================================================================
+
 [Normalizer] Normalization params saved to /kaggle/bots/FARTCOINUSDT/models/norm_params.json (Type: robust)
 ✓ Normalizer fitted on 259475 samples
 
@@ -34,47 +38,339 @@ DYNAMIC CHANNEL TRAIN DIAGNOSTICS (после fit normalizer)
 ======================================================================
 
   [ofi]
-    fit params: median=0.000000, iqr=0.000000
-    min=-14912223.0000, max=13340994.0000, mean=-366522.0625, std=4134324.2500
-    p01=-10799159.0000, p50=0.0000, p99=10806455.0000, range(p99-p01)=21605614.0000
-    saturation: below=16.99%, above=9.72%, total=26.71%
+    fit params: median=0.000000, iqr=6.665684
+    preclip: low=-10.799158096313477, high=10.8064546585083
+    min=-1.6201, max=1.6212, mean=-0.0549, std=0.6155
+    p01=-1.6201, p50=0.0000, p99=1.6212, range(p99-p01)=3.2413
+    saturation: below=0.00%, above=0.00%, total=0.00%
     zero%=73.29%
 
   [delta_imb]
-    fit params: median=0.000000, iqr=0.004506
-    min=-133.5335, max=117.8023, mean=0.0003, std=4.8532
-    p01=-16.4390, p50=0.0000, p99=16.4149, range(p99-p01)=32.8539
-    saturation: below=6.75%, above=6.80%, total=13.56%
+    fit params: median=0.000000, iqr=0.022807
+    preclip: low=-0.07409574836492538, high=0.07398687303066254
+    min=-3.2487, max=3.2439, mean=0.0005, std=0.7639
+    p01=-3.2487, p50=0.0000, p99=3.2436, range(p99-p01)=6.4923
+    saturation: below=0.00%, above=0.00%, total=0.00%
     zero%=14.66%
 
   [delta_spread]
-    fit params: median=0.000000, iqr=0.000000
-    min=-3363.6392, max=3238.6213, mean=-0.0006, std=39.4375
-    p01=-128.1506, p50=0.0000, p99=128.5257, range(p99-p01)=256.6763
-    saturation: below=6.99%, above=6.70%, total=13.68%
+    fit params: median=0.000000, iqr=0.001000
+    preclip: low=-0.00012815059744752944, high=0.00012852565851062536
+    min=-0.1280, max=0.1284, mean=-0.0001, std=0.0295
+    p01=-0.1280, p50=0.0000, p99=0.1284, range(p99-p01)=0.2564
+    saturation: below=0.00%, above=0.00%, total=0.00%
     zero%=79.67%
 ======================================================================
 
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/kaggle/working/src/train.py", line 216, in <module>
-    train()
-  File "/kaggle/working/src/train.py", line 60, in train
-    prepared = prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, horizon_weights)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/kaggle/working/src/train_data.py", line 381, in prepare_training_data
-    _fit_normalizer_on_train(
-  File "/kaggle/working/src/train_data.py", line 134, in _fit_normalizer_on_train
-    _check_dynamic_scale_guard(diag_metrics, allow_bad_scale=allow_bad)
-  File "/kaggle/working/src/train_data.py", line 222, in _check_dynamic_scale_guard
-    raise RuntimeError(msg)
-RuntimeError: 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-DYNAMIC SCALE GUARD: Обнаружены проблемы с нормализацией dynamic-каналов!
-Обучение остановлено. Исправьте pipeline или используйте --allow-bad-dynamic-scale.
 
-Нарушения:
-  [ofi] saturation=26.71% > 10.0% — слишком много значений за пределами clamp
-  [delta_imb] saturation=13.56% > 10.0% — слишком много значений за пределами clamp
-  [delta_spread] saturation=13.68% > 10.0% — слишком много значений за пределами clamp
+Проверка данных на NaN после нормализации (sampling)...
+
+[CLIP DIAG] Sample idx=100 saturation report:
+  Channel 0 (MicropriceDev): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+    post: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+    post: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+    post: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI): limit=4.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-1.3288, max=1.6212, mean=-0.1312, std=0.5278
+    post: min=-1.3288, max=1.6212, mean=-0.1312, std=0.5278
+  Channel 4 (VIB): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+    post: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+    post: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+    post: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+    post: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+    post: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb): limit=4.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-3.2487, max=3.2439, mean=0.0193, std=0.6685
+    post: min=-3.2487, max=3.2439, mean=0.0193, std=0.6685
+  Channel 10 (DeltaSpread): limit=4.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+    post: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1312, std=0.5278
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0193, std=0.6685
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+....
+
+[CLIP DIAG] Sample idx=110 saturation report:
+  Channel 0 (MicropriceDev): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4134, max=0.3673, mean=0.0490, std=0.2491
+    post: min=-0.4134, max=0.3673, mean=0.0490, std=0.2491
+  Channel 1 (Vol): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-2.3208, max=2.3194, mean=0.3140, std=0.7036
+    post: min=-2.3208, max=2.3194, mean=0.3140, std=0.7036
+  Channel 2 (Imb): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-1.6142, max=3.8219, mean=0.0560, std=0.5687
+    post: min=-1.6142, max=3.8219, mean=0.0560, std=0.5687
+  Channel 3 (OFI): limit=4.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-1.3288, max=1.6212, mean=-0.1310, std=0.4831
+    post: min=-1.3288, max=1.6212, mean=-0.1310, std=0.4831
+  Channel 4 (VIB): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.3540, max=0.8900, mean=0.2828, std=0.3302
+    post: min=-0.3540, max=0.8900, mean=0.2828, std=0.3302
+  Channel 5 (Ret_10): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.7849, max=1.0469, mean=0.1885, std=0.3970
+    post: min=-0.7849, max=1.0469, mean=0.1885, std=0.3970
+  Channel 6 (Ret_50): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.0000, max=1.2702, mean=0.4684, std=0.4035
+    post: min=0.0000, max=1.2702, mean=0.4684, std=0.4035
+  Channel 7 (Ret_100): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.4097, max=0.8708, mean=0.5871, std=0.3474
+    post: min=-0.4097, max=0.8708, mean=0.5871, std=0.3474
+  Channel 8 (Spread): limit=5.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=0.9494, max=2.5154, mean=1.2361, std=0.3904
+    post: min=0.9494, max=2.5154, mean=1.2361, std=0.3904
+  Channel 9 (DeltaImb): limit=4.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-3.2487, max=3.2439, mean=0.0246, std=0.6652
+    post: min=-3.2487, max=3.2439, mean=0.0246, std=0.6652
+  Channel 10 (DeltaSpread): limit=4.0, %below=0.00, %above=0.00, %total=0.00
+    pre: min=-0.0669, max=0.0669, mean=-0.0000, std=0.0211
+    post: min=-0.0669, max=0.0669, mean=-0.0000, std=0.0211
+✓ Проверка завершена: NaN не обнаружены в 100 проверенных примерах
+......
+
+[TRAIN] Epoch 1 started
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1312, std=0.5278
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0193, std=0.6685
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0340, std=0.2500
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1223, std=0.5224
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1570, std=0.3530
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5271, std=0.4223
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2838, std=0.4150
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0279, std=0.6662
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[VAL] Epoch 1 validation started
+[VAL] first validation batch received
+[VAL] batch 100
+[VAL] batch 200
+[VAL] batch 300
+[VAL] batch 400
+[VAL] batch 500
+[VAL] batch 600
+[VAL] batch 700
+[VAL] batch 800
+
+[VAL] Entering on_validation_epoch_end, samples collected: 869
+[VAL] Validation loop took 1m 6s, proceeding with epoch_end processing
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 16.27           | 50.45           | 33.28          
+Hit Rate (Точность)            | 0.7909          | 0.0900          | 0.1202         
+Процент пропущенных сигналов (%) | -               | 15.45           | 15.36          
+Ложные входы (%)               | -               | 51.10           | 32.38          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000025       | 0.000008       
+Directional Accuracy (DA) без Flat | 0.1020          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.5190 | Уверенности при ложном: 0.5830 | Разница уверенности: -0.0640
+Корреляция с LOB Imbalance     | 0.0872          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 1 (6m 47s) Validation: MCC=-0.0077, Macro-F1=0.2000, ECE=0.3554, MCE=0.9336
+  Vol-MSE=11.436017, Vol-MAE=2.916367
+
+Metrics by Market Regime:
+  Regime 0: MCC=-0.0077, F1=0.2000, Samples=55602
+
+[VAL] on_validation_epoch_end completed in 0m 0s
+
+.....
+[TRAIN] Epoch 5 started
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1312, std=0.5278
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0193, std=0.6685
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0340, std=0.2500
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1223, std=0.5224
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1570, std=0.3530
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5271, std=0.4223
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2838, std=0.4150
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0279, std=0.6662
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[VAL] Epoch 5 validation started
+[VAL] first validation batch received
+[VAL] batch 100
+[VAL] batch 200
+[VAL] batch 300
+[VAL] batch 400
+[VAL] batch 500
+[VAL] batch 600
+[VAL] batch 700
+[VAL] batch 800
+
+[VAL] Entering on_validation_epoch_end, samples collected: 869
+[VAL] Validation loop took 1m 7s, proceeding with epoch_end processing
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 41.56           | 32.55           | 25.89          
+Hit Rate (Точность)            | 0.7895          | 0.0985          | 0.1252         
+Процент пропущенных сигналов (%) | -               | 41.65           | 37.86          
+Ложные входы (%)               | -               | 32.31           | 25.57          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000023       | -0.000020      
+Directional Accuracy (DA) без Flat | 0.1103          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.6284 | Уверенности при ложном: 0.6592 | Разница уверенности: -0.0308
+Корреляция с LOB Imbalance     | 0.0576          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 5 (6m 52s) Validation: MCC=0.0099, Macro-F1=0.2903, ECE=0.2589, MCE=0.9478
+  Vol-MSE=2.893324, Vol-MAE=1.232978
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0099, F1=0.2903, Samples=55602
+
+[VAL] on_validation_epoch_end completed in 0m 0s
+
+.....
+[TRAIN] Epoch 10 started
+
+[ДИАГНОСТИКА 316] Сэмпл idx=100:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0287, std=0.2532
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3170, std=0.6939
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0456, std=0.5653
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1312, std=0.5278
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2431, std=0.3326
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1466, std=0.3418
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5327, std=0.4242
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5133, std=0.4493
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2839, std=0.4149
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0193, std=0.6685
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[ДИАГНОСТИКА 316] Сэмпл idx=101:
+  ПАРАМЕТРЫ НОРМАЛИЗАЦИИ (Level 0):
+    MicropriceDev: mean=0.733402, std=0.365132
+    Vol: mean=7.938661, std=0.990897
+  Channel 0 (MicropriceDev) ПОСЛЕ CLAMP: min=-0.4134, max=0.3673, mean=0.0340, std=0.2500
+  Channel 1 (Vol) ПОСЛЕ CLAMP: min=-2.3208, max=2.3194, mean=0.3163, std=0.6954
+  Channel 2 (Imb) ПОСЛЕ CLAMP: min=-1.6142, max=3.8219, mean=0.0471, std=0.5656
+  Channel 3 (OFI) ПОСЛЕ CLAMP: min=-1.3288, max=1.6212, mean=-0.1223, std=0.5224
+  Channel 4 (VIB) ПОСЛЕ CLAMP: min=-0.3540, max=0.8900, mean=0.2474, std=0.3327
+  Channel 5 (Ret_10) ПОСЛЕ CLAMP: min=-0.7849, max=1.0469, mean=0.1570, std=0.3530
+  Channel 6 (Ret_50) ПОСЛЕ CLAMP: min=0.0000, max=1.2702, mean=0.5271, std=0.4223
+  Channel 7 (Ret_100) ПОСЛЕ CLAMP: min=-0.4097, max=0.8708, mean=0.5215, std=0.4397
+  Channel 8 (Spread) ПОСЛЕ CLAMP: min=0.9494, max=2.5154, mean=1.2838, std=0.4150
+  Channel 9 (DeltaImb) ПОСЛЕ CLAMP: min=-3.2487, max=3.2439, mean=0.0279, std=0.6662
+  Channel 10 (DeltaSpread) ПОСЛЕ CLAMP: min=-0.0669, max=0.1284, mean=-0.0001, std=0.0281
+
+[VAL] Epoch 10 validation started
+[VAL] first validation batch received
+[VAL] batch 100
+[VAL] batch 200
+[VAL] batch 300
+[VAL] batch 400
+[VAL] batch 500
+[VAL] batch 600
+[VAL] batch 700
+[VAL] batch 800
+
+[VAL] Entering on_validation_epoch_end, samples collected: 869
+[VAL] Validation loop took 1m 40s, proceeding with epoch_end processing
+
+=====================================================================================
+                      LOB-SPECIFIC CLASS ANALYTICS (Validation)                      
+=====================================================================================
+Metric                         | Flat (0)        | Up (1)          | Down (2)       
+-------------------------------------------------------------------------------------
+Процент предсказаний (%)       | 61.39           | 18.17           | 20.44          
+Hit Rate (Точность)            | 0.7890          | 0.1113          | 0.1226         
+Процент пропущенных сигналов (%) | -               | 58.60           | 58.69          
+Ложные входы (%)               | -               | 17.62           | 20.21          
+-------------------------------------------------------------------------------------
+Теоретический Edge (Future Ret) | -               | -0.000024       | -0.000010      
+Directional Accuracy (DA) без Flat | 0.1173          (Accuracy where pred != Flat)
+Средняя Уверенность (C/W)      | Уверенность при правильном: 0.7231 | Уверенности при ложном: 0.6895 | Разница уверенности: 0.0337
+Корреляция с LOB Imbalance     | 0.0256          (Corr with Signal -1/0/1)
+=====================================================================================
+
+
+Epoch 10 (10m 50s) Validation: MCC=0.0189, Macro-F1=0.3310, ECE=0.1785, MCE=0.2563
+  Vol-MSE=1.897528, Vol-MAE=0.814964
+
+Metrics by Market Regime:
+  Regime 0: MCC=0.0189, F1=0.3310, Samples=55602
+
+[VAL] on_validation_epoch_end completed in 0m 0s

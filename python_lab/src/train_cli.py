@@ -55,12 +55,33 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing for CrossEntropyLoss")
     parser.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
     parser.add_argument("--focal_gamma", type=float, default=3.0, help="Gamma parameter for Focal Loss")
+    parser.add_argument("--use_class_weights", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable/disable class weights in classification loss")
+    parser.add_argument("--multi_task", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable/disable multi-task loss (classification + volatility)")
+    parser.add_argument("--cls_loss_weight", type=float, default=1.0, help="Weight for classification loss")
+    parser.add_argument("--vol_loss_weight", type=float, default=1.0, help="Weight for volatility loss (ignored if --no-multi_task)")
     parser.add_argument("--metric_contract", type=str, default="standard", choices=["standard", "hft", "strict"],
                         help="Validation metric contract preset stored in checkpoint hparams")
     parser.add_argument("--metric_log_prefix", type=str, default="val",
                         help="Prefix metadata for validation metric contract reproduction")
     parser.add_argument("--metric_directional_base", type=str, default="predicted", choices=["predicted", "truth", "union"],
                         help="Directional-base metadata stored with validation contract")
+    parser.add_argument("--decision_rule", type=str, default="argmax",
+                        choices=["argmax", "confidence_gap", "class_specific_thresholds", "flat_bias"],
+                        help="Decision rule applied over calibrated probabilities")
+    parser.add_argument("--decision_confidence", type=float, default=0.5,
+                        help="Minimum max-probability to accept directional trade")
+    parser.add_argument("--decision_hold_threshold", type=float, default=0.6,
+                        help="Directional prob threshold for flat_bias rule")
+    parser.add_argument("--flat_prob_threshold", type=float, default=0.34,
+                        help="Flat class probability threshold for class_specific_thresholds")
+    parser.add_argument("--up_prob_threshold", type=float, default=0.34,
+                        help="Up class probability threshold for class_specific_thresholds")
+    parser.add_argument("--down_prob_threshold", type=float, default=0.34,
+                        help="Down class probability threshold for class_specific_thresholds")
+    parser.add_argument("--margin_threshold", type=float, default=0.0,
+                        help="Minimum top1-top2 probability gap for confidence_gap/flat_bias rules")
     parser.add_argument("--report_fee_bps", type=float, default=0.0,
                         help="Fee in bps used for cost-aware validation edge reporting")
     parser.add_argument("--report_slippage_bps", type=float, default=0.0,
@@ -208,6 +229,21 @@ def parse_train_args(argv=None):
             "--label_mode execution_mid_return несовместим с --dynamic_threshold. "
             "Legacy dynamic threshold разрешён только для legacy/debug режима."
         )
+    if args.cls_loss_weight < 0.0:
+        raise ValueError("--cls_loss_weight must be >= 0.0")
+    if args.vol_loss_weight < 0.0:
+        raise ValueError("--vol_loss_weight must be >= 0.0")
+
+    def _validate_prob(name: str, value: float):
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"--{name} must be in [0.0, 1.0], got {value}")
+
+    _validate_prob("decision_confidence", args.decision_confidence)
+    _validate_prob("decision_hold_threshold", args.decision_hold_threshold)
+    _validate_prob("flat_prob_threshold", args.flat_prob_threshold)
+    _validate_prob("up_prob_threshold", args.up_prob_threshold)
+    _validate_prob("down_prob_threshold", args.down_prob_threshold)
+    _validate_prob("margin_threshold", args.margin_threshold)
     return args
 
 

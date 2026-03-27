@@ -14,10 +14,8 @@
 - Final sub-task is always "run training and compare metrics"
 - Plans are written in Russian with English code snippets
 
-## Channel Architecture (current state as of task 318)
-- Dataset produces channels as (seq_len, n_channels, 50) tensors
-- Channel order (13 channels): MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread, CumOFI, ImbAccel
-- `_calculate_6_channels_raw()` is the single source of truth for channel computation
-- Normalization is done per-channel in `normalize_channel()` using normalizer params
-- `in_channels` must match between `LiTConfig` (lit_model.py), hardcoded value (train.py), and actual output from dataset
-- Task 319 plans to reduce to 11 channels (remove CumOFI, ImbAccel) and rework LOBPatching
+## Current Training State
+- Active Python training pipeline is `python_lab/src/`, not `python_ab/`
+- Current dataset channel layout is 11 channels: MicropriceDev, Vol, Imb, OFI, VIB, Ret_10, Ret_50, Ret_100, Spread, DeltaImb, DeltaSpread
+- Main training path in `train_data.py` still uses chronological `70/15/15` split
+- `PurgedKFold` exists in `utils.py` and is used by `train_cv.py`, but not by the main train split

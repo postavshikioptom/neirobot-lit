@@ -16,3 +16,17 @@
 
 - `dynamic_threshold_reference` не должен подменять static grid и не становится новым default.
 - Если `threshold_to_spread_ratio < 1.0`, строка baseline должна быть помечена как `subspread_target=true`.
+
+## Objective Ablation
+
+Objective ablation сохраняется в `objective_ablation.csv` в корне репозитория.
+
+Ожидаемые колонки:
+
+- `loss_type`
+- `class_weights`
+- `multi_task`
+- `mcc_primary`
+- `coverage_directional`
+- `net_edge_total`
+- `ece`

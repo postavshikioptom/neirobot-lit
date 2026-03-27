@@ -98,7 +98,62 @@ class LiTModule(pl.LightningModule):
     LightningModule для обучения модели LiT.
     Обертка над nn.Module, добавляющая логику обучения, валидации и оптимизации.
     """
-    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, use_gradient_checkpointing=False, metric_contract="standard", metric_log_prefix="val", metric_directional_base="predicted", report_fee_bps=0.0, report_slippage_bps=0.0, report_half_spread_bps=0.0, **model_params):
+    def __init__(
+        self,
+        seq_len=100,
+        lr=1e-4,
+        class_weights=None,
+        label_smoothing=0.0,
+        loss_type="ce",
+        focal_gamma=2.0,
+        activation='gelu_exact',
+        use_time_weighting=False,
+        teacher_model=None,
+        alpha=0.9,
+        temperature=3.0,
+        use_regime_weighting=False,
+        regime_weights=None,
+        num_horizons=1,
+        horizon_weights=None,
+        use_horizon_embedding=False,
+        use_curvature_reg=False,
+        curvature_lambda=1e-4,
+        input_noise_std=0.005,
+        scaler_type="robust",
+        winsor_limits=None,
+        past_returns_lags=None,
+        scheduler=None,
+        div_factor=None,
+        final_div_factor=None,
+        pct_start=None,
+        plateau_factor=None,
+        plateau_patience=None,
+        step_size=None,
+        gamma=None,
+        weight_decay=None,
+        clip_mode=None,
+        clip_val=None,
+        tb_hist_freq=None,
+        tb_embedding_samples=None,
+        use_gradient_checkpointing=False,
+        metric_contract="standard",
+        metric_log_prefix="val",
+        metric_directional_base="predicted",
+        decision_rule="argmax",
+        decision_confidence=0.5,
+        decision_hold_threshold=0.6,
+        flat_prob_threshold=0.34,
+        up_prob_threshold=0.34,
+        down_prob_threshold=0.34,
+        margin_threshold=0.0,
+        cls_loss_weight=1.0,
+        vol_loss_weight=1.0,
+        multi_task=True,
+        report_fee_bps=0.0,
+        report_slippage_bps=0.0,
+        report_half_spread_bps=0.0,
+        **model_params
+    ):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
         class_weight_metadata = model_params.pop("class_weight_metadata", {})
@@ -121,13 +176,25 @@ class LiTModule(pl.LightningModule):
                     "Class weight time_mode does not match model time_mode: "
                     f"{class_weight_metadata.get('time_mode')} vs {time_mode}"
                 )
-        self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, use_gradient_checkpointing=use_gradient_checkpointing, **model_params)
+        model_multi_task = model_params.pop("multi_task", multi_task)
+        self.model = LiTModel(
+            seq_len=seq_len,
+            activation=activation,
+            num_horizons=num_horizons,
+            use_horizon_embedding=use_horizon_embedding,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            multi_task=model_multi_task,
+            **model_params
+        )
         self.use_time_weighting = use_time_weighting
         self.use_regime_weighting = use_regime_weighting
         self.teacher_model = teacher_model
         self.is_distillation = teacher_model is not None
         self.num_horizons = num_horizons
         self.is_multi_horizon = (num_horizons > 1)
+        self.enable_multi_task = bool(multi_task)
+        self.cls_loss_weight = float(cls_loss_weight)
+        self.vol_loss_weight = float(vol_loss_weight)
         self.label_mode = label_mode
         self.time_mode = time_mode
 
@@ -397,13 +464,12 @@ class LiTModule(pl.LightningModule):
         else:
             reg_loss = 0.0
 
-        # 3. Комбинированный Multi-Task Loss (Задача 304/319)
-        self.log_var_cls.data = torch.clamp(self.log_var_cls.data, -5.0, 5.0)
-        self.log_var_vol.data = torch.clamp(self.log_var_vol.data, -5.0, 5.0)
-        precision_cls = torch.exp(-self.log_var_cls)
-        precision_vol = torch.exp(-self.log_var_vol)
-        loss = precision_cls * loss_cls + 0.5 * self.log_var_cls + \
-               precision_vol * loss_vol + 0.5 * self.log_var_vol + reg_loss
+        # 3. Комбинированный Multi-Task Loss с явными весами
+        cls_weight = float(self.hparams.get("cls_loss_weight", self.cls_loss_weight))
+        vol_weight = float(self.hparams.get("vol_loss_weight", self.vol_loss_weight))
+        if not self.hparams.get("multi_task", self.enable_multi_task):
+            vol_weight = 0.0
+        loss = cls_weight * loss_cls + vol_weight * loss_vol + reg_loss
 
         if not torch.isfinite(loss):
             print(f"[WARN] Non-finite loss at step {self.global_step}: {loss.item()}. Zeroing grads and skipping.")
@@ -413,8 +479,8 @@ class LiTModule(pl.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("train_loss_cls", loss_cls, on_step=False, on_epoch=True)
         self.log("train_loss_vol", loss_vol, on_step=False, on_epoch=True)
-        self.log("weight_cls", precision_cls, on_step=False, on_epoch=True)
-        self.log("weight_vol", precision_vol, on_step=False, on_epoch=True)
+        self.log("weight_cls", cls_weight, on_step=False, on_epoch=True)
+        self.log("weight_vol", vol_weight, on_step=False, on_epoch=True)
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log("lr", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
         current_momentum = self.optimizers().param_groups[0].get('momentum', 0.0)
@@ -441,6 +507,7 @@ class LiTModule(pl.LightningModule):
         vol_target = extra_data["vol"]
         regime_id = extra_data["regime_id"]
         f_ret = extra_data["f_ret"]
+        weights = extra_data["weight"]
 
         logits, vol_pred = self(x, regime_id=regime_id)
         vol_pred = vol_pred.squeeze(-1)
@@ -448,7 +515,18 @@ class LiTModule(pl.LightningModule):
         if self.is_multi_horizon:
             loss_cls = self.criterion(logits, y, sample_weights=None)
         else:
-            loss_cls = nn.functional.cross_entropy(logits, y)
+            if self.is_distillation:
+                loss_cls = nn.functional.cross_entropy(logits, y)
+            else:
+                loss_cls_raw = self.criterion(logits, y)
+                if self.use_time_weighting or self.use_regime_weighting:
+                    combined_weights = weights
+                    if self.use_regime_weighting and self.regime_weights is not None and regime_id is not None:
+                        regime_w = self.regime_weights[regime_id].to(weights.device)
+                        combined_weights = combined_weights * regime_w
+                    loss_cls = (loss_cls_raw * combined_weights).mean()
+                else:
+                    loss_cls = loss_cls_raw
 
         loss_vol = nn.functional.mse_loss(vol_pred, vol_target)
         mae_vol = nn.functional.l1_loss(vol_pred, vol_target)
@@ -467,7 +545,11 @@ class LiTModule(pl.LightningModule):
             mae_vol=mae_vol,
         )
 
-        return loss_cls + loss_vol
+        cls_weight = float(self.hparams.get("cls_loss_weight", self.cls_loss_weight))
+        vol_weight = float(self.hparams.get("vol_loss_weight", self.vol_loss_weight))
+        if not self.hparams.get("multi_task", self.enable_multi_task):
+            vol_weight = 0.0
+        return cls_weight * loss_cls + vol_weight * loss_vol
 
     def on_validation_epoch_end(self):
         import time as _time
@@ -541,7 +623,6 @@ class LiTModule(pl.LightningModule):
                 finalized["quality"][f"f1_h{h}"] = float(metrics.get(f"f1_h{h}", 0.0))
                 finalized["quality"][f"samples_h{h}"] = int(metrics.get(f"samples_h{h}", 0))
         else:
-            finalized = self._finalize_validation_metrics(validation_payload)
             y_true_tensor = torch.from_numpy(y_true).long()
             if not torch.isfinite(logits).all():
                 print("\n" + "!" * 80)
@@ -549,25 +630,108 @@ class LiTModule(pl.LightningModule):
                 print("   This indicates extreme numerical instability (exploding gradients).")
                 print("   Metrics and visualizations for this epoch will be unreliable.")
                 print("!" * 80 + "\n")
-            ece = finalized["calibration"]["val_ece"]
-            mce = finalized["calibration"]["val_mce"]
-            bin_data = finalized["calibration"]["bin_data"]
+            raw_probs = torch.softmax(logits, dim=1).cpu().numpy()
+            argmax_pred = np.argmax(raw_probs, axis=1)
+            argmax_metrics = self._finalize_validation_metrics(
+                validation_payload,
+                y_pred=argmax_pred,
+                probs=raw_probs,
+                use_torch_metrics=True,
+            )
+
+            from .utils import apply_decision_rule, apply_temperature_scaling, fit_temperature_scaler
+
+            temperature_value = fit_temperature_scaler(logits, y_true_tensor)
+            scaled_logits = apply_temperature_scaling(logits, temperature_value)
+            scaled_probs = torch.softmax(scaled_logits, dim=1).cpu().numpy()
+
+            ece_before, mce_before, bin_data_before = self.calibration_metrics.calculate(logits, y_true_tensor)
+            ece_after, mce_after, bin_data_after = self.calibration_metrics.calculate(scaled_logits, y_true_tensor)
+
+            decision_rule = self.hparams.get("decision_rule", "argmax")
+            decision_pred = apply_decision_rule(
+                scaled_probs,
+                decision_rule,
+                decision_confidence=float(self.hparams.get("decision_confidence", 0.5)),
+                decision_hold_threshold=float(self.hparams.get("decision_hold_threshold", 0.6)),
+                flat_prob_threshold=float(self.hparams.get("flat_prob_threshold", 0.34)),
+                up_prob_threshold=float(self.hparams.get("up_prob_threshold", 0.34)),
+                down_prob_threshold=float(self.hparams.get("down_prob_threshold", 0.34)),
+                margin_threshold=float(self.hparams.get("margin_threshold", 0.0)),
+            )
+            decision_metrics = self._finalize_validation_metrics(
+                validation_payload,
+                y_pred=decision_pred,
+                probs=scaled_probs,
+                use_torch_metrics=False,
+            )
+
+            primary_metrics = decision_metrics if decision_rule != "argmax" else argmax_metrics
+            y_pred = decision_pred if decision_rule != "argmax" else argmax_pred
+            calibration = {
+                "val_ece": float(ece_after),
+                "val_mce": float(mce_after),
+                "val_ece_before": float(ece_before),
+                "val_mce_before": float(mce_before),
+                "val_ece_after": float(ece_after),
+                "val_mce_after": float(mce_after),
+                "temperature": float(temperature_value),
+                "bin_data": bin_data_after,
+                "bin_data_before": bin_data_before,
+            }
+            finalized = {
+                "epoch": int(self.current_epoch),
+                "metric_contract": self.hparams.get("metric_contract", "standard"),
+                "metric_log_prefix": self.hparams.get("metric_log_prefix", "val"),
+                "metric_directional_base": self.hparams.get("metric_directional_base", "predicted"),
+                "decision_rule": decision_rule,
+                "decision_rule_config": {
+                    "decision_confidence": float(self.hparams.get("decision_confidence", 0.5)),
+                    "decision_hold_threshold": float(self.hparams.get("decision_hold_threshold", 0.6)),
+                    "flat_prob_threshold": float(self.hparams.get("flat_prob_threshold", 0.34)),
+                    "up_prob_threshold": float(self.hparams.get("up_prob_threshold", 0.34)),
+                    "down_prob_threshold": float(self.hparams.get("down_prob_threshold", 0.34)),
+                    "margin_threshold": float(self.hparams.get("margin_threshold", 0.0)),
+                },
+                "quality": primary_metrics["quality"],
+                "calibration": calibration,
+                "coverage": primary_metrics["coverage"],
+                "trade": primary_metrics["trade"],
+                "class_metrics": primary_metrics["class_metrics"],
+                "regime_metrics": {},
+                "argmax_metrics": argmax_metrics,
+                "decision_rule_metrics": decision_metrics,
+            }
+
+            symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
+            base_path = Path(__file__).parent.parent.parent
+            calibration_dir = base_path / "artifacts" / symbol / "calibration"
+            calibration_dir.mkdir(parents=True, exist_ok=True)
+            scaler_path = calibration_dir / "temperature_scaler.json"
+            scaler_payload = {
+                "temperature": float(temperature_value),
+                "ece_before": float(ece_before),
+                "mce_before": float(mce_before),
+                "ece_after": float(ece_after),
+                "mce_after": float(mce_after),
+                "epoch": int(self.current_epoch),
+            }
+            scaler_path.write_text(json.dumps(scaler_payload, indent=2), encoding="utf-8")
+
             self._log_final_validation_metrics(finalized)
             epoch_time = _time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
             epoch_time_str = f"{int(epoch_time // 60)}m {int(epoch_time % 60)}s"
             print(f"\nEpoch {self.current_epoch} ({epoch_time_str}) Validation: MCC={finalized['quality']['val_mcc_primary']:.4f}, "
-                  f"Macro-F1={finalized['quality']['val_f1_macro_np']:.4f}, ECE={ece:.4f}, MCE={mce:.4f}")
+                  f"Macro-F1={finalized['quality']['val_f1_macro_np']:.4f}, ECE={ece_after:.4f}, MCE={mce_after:.4f}")
 
             self._log_extended_analytics(finalized["trade"])
 
             if (self.hparams.get('enable_epoch_end_plots', False) and not skip_heavy_artifacts
                     and self.current_epoch % 20 == 0):
-                symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
-                base_path = Path(__file__).parent.parent.parent
                 reports_dir = base_path / "reports" / symbol
                 reports_dir.mkdir(parents=True, exist_ok=True)
                 save_path = reports_dir / f"reliability_diagram_epoch_{self.current_epoch}.png"
-                plot_reliability_diagram(bin_data, ece, mce, str(save_path))
+                plot_reliability_diagram(bin_data_after, ece_after, mce_after, str(save_path))
 
             if self.logger and hasattr(self.logger, 'experiment'):
                 writer = self.logger.experiment
@@ -576,8 +740,7 @@ class LiTModule(pl.LightningModule):
                     from .utils import plot_confusion_matrix_tensorboard, plot_pr_curves_tensorboard
                     class_names = ["Flat", "Up", "Down"]
                     plot_confusion_matrix_tensorboard(y_true, y_pred, class_names, writer, self.current_epoch)
-                    y_pred_probs = torch.softmax(logits, dim=1).numpy()
-                    plot_pr_curves_tensorboard(y_true, y_pred_probs, class_names, writer, self.current_epoch)
+                    plot_pr_curves_tensorboard(y_true, scaled_probs, class_names, writer, self.current_epoch)
 
         # 4. Метрики по режимам (только single horizon)
         if validation_payload["regime_ids"] is not None and not self.is_multi_horizon:
@@ -663,12 +826,12 @@ class LiTModule(pl.LightningModule):
         payload["regime_ids"] = np.concatenate(regime_values) if regime_values else None
         return payload
 
-    def _finalize_validation_metrics(self, payload):
+    def _finalize_validation_metrics(self, payload, *, y_pred, probs=None, use_torch_metrics=True):
         class_weights = self.criterion.weight.cpu().numpy() if hasattr(self.criterion, 'weight') and self.criterion.weight is not None else None
-        quality_metrics = compute_classification_metrics(payload["y_true"], payload["y_pred"], class_weights=class_weights)
+        quality_metrics = compute_classification_metrics(payload["y_true"], y_pred, class_weights=class_weights)
         direction_metrics = compute_directional_metrics(
             payload["y_true"],
-            payload["y_pred"],
+            y_pred,
             payload["logits"].numpy(),
             payload["f_ret"],
             payload["imbalance"],
@@ -676,12 +839,16 @@ class LiTModule(pl.LightningModule):
             fee_bps=self.hparams.get("report_fee_bps", 0.0),
             slippage_bps=self.hparams.get("report_slippage_bps", 0.0),
             half_spread_bps=self.hparams.get("report_half_spread_bps", 0.0),
+            probs=probs,
         )
 
         y_true_tensor = torch.from_numpy(payload["y_true"]).long()
-        val_mcc_torch = float(self.mcc(payload["logits"], y_true_tensor).detach().cpu())
-        val_f1_torch = float(self.f1_macro(payload["logits"], y_true_tensor).detach().cpu())
-        ece, mce, bin_data = self.calibration_metrics.calculate(payload["logits"], y_true_tensor)
+        if use_torch_metrics:
+            val_mcc_torch = float(self.mcc(payload["logits"], y_true_tensor).detach().cpu())
+            val_f1_torch = float(self.f1_macro(payload["logits"], y_true_tensor).detach().cpu())
+        else:
+            val_mcc_torch = float(quality_metrics["mcc"])
+            val_f1_torch = float(quality_metrics["f1_macro"])
         val_direction_mcc = float(direction_metrics.get("direction_mcc", 0.0))
 
         quality = {
@@ -714,11 +881,6 @@ class LiTModule(pl.LightningModule):
             "false_down": float(direction_metrics["false_down"]),
             "missed_up": float(direction_metrics["missed_up"]),
             "missed_down": float(direction_metrics["missed_down"]),
-        }
-        calibration = {
-            "val_ece": float(ece),
-            "val_mce": float(mce),
-            "bin_data": bin_data,
         }
         coverage = {
             "coverage_directional": float(direction_metrics["coverage_directional"]),
@@ -766,7 +928,6 @@ class LiTModule(pl.LightningModule):
             "metric_log_prefix": self.hparams.get("metric_log_prefix", "val"),
             "metric_directional_base": self.hparams.get("metric_directional_base", "predicted"),
             "quality": quality,
-            "calibration": calibration,
             "coverage": coverage,
             "trade": trade,
             "class_metrics": class_metrics,
@@ -777,8 +938,9 @@ class LiTModule(pl.LightningModule):
         for name, value in finalized["quality"].items():
             self.log(name, float(value), logger=True, prog_bar=(name == "val_mcc_primary"), add_dataloader_idx=False)
         for name, value in finalized["calibration"].items():
-            if name != "bin_data":
-                self.log(name, float(value), logger=True, add_dataloader_idx=False)
+            if "bin_data" in name:
+                continue
+            self.log(name, float(value), logger=True, add_dataloader_idx=False)
         for section in ("coverage", "trade", "class_metrics"):
             for name, value in finalized[section].items():
                 self.log(name, float(value), logger=True, add_dataloader_idx=False)
@@ -794,12 +956,16 @@ class LiTModule(pl.LightningModule):
             "metric_contract": finalized["metric_contract"],
             "metric_log_prefix": finalized["metric_log_prefix"],
             "metric_directional_base": finalized["metric_directional_base"],
+            "decision_rule": finalized.get("decision_rule"),
+            "decision_rule_config": finalized.get("decision_rule_config", {}),
             "quality": finalized["quality"],
-            "calibration": {k: v for k, v in finalized["calibration"].items() if k != "bin_data"},
+            "calibration": {k: v for k, v in finalized["calibration"].items() if "bin_data" not in k},
             "coverage": finalized["coverage"],
             "trade": finalized["trade"],
             "class_metrics": finalized["class_metrics"],
             "regime_metrics": finalized["regime_metrics"],
+            "argmax_metrics": finalized.get("argmax_metrics", {}),
+            "decision_rule_metrics": finalized.get("decision_rule_metrics", {}),
         }
         report_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
 

@@ -118,7 +118,9 @@ def _build_trainer(args, callbacks, logger, *, max_epochs: int, limit_train_batc
 
 
 def _prepare_model_for_fit(args, prepared, winsor_limits):
-    model_class_weights = None if args.use_time_weighting else prepared.class_weights
+    model_class_weights = None
+    if args.use_class_weights and not args.use_time_weighting:
+        model_class_weights = prepared.class_weights
     if prepared.class_weight_metadata.get("label_mode") != args.label_mode:
         raise ValueError(
             "Class weight label_mode mismatch: "
@@ -217,6 +219,50 @@ def _extract_mini_train_metrics(trainer) -> dict:
         "mini_train_coverage_directional": _metric("coverage_directional"),
         "mini_train_net_edge_total": _metric("net_edge_total"),
     }
+
+
+def _extract_objective_ablation_metrics(trainer) -> dict:
+    def _metric(name: str) -> float | None:
+        value = trainer.callback_metrics.get(name)
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return float(value.detach().cpu().item())
+        return float(value)
+
+    ece_value = _metric("val_ece_after")
+    if ece_value is None:
+        ece_value = _metric("val_ece")
+
+    return {
+        "mcc_primary": _metric("val_mcc_primary"),
+        "coverage_directional": _metric("coverage_directional"),
+        "net_edge_total": _metric("net_edge_total"),
+        "ece": ece_value,
+    }
+
+
+def _append_objective_ablation_row(base_path: Path, args, metrics: dict):
+    csv_path = base_path / "objective_ablation.csv"
+    header = "loss_type,class_weights,multi_task,mcc_primary,coverage_directional,net_edge_total,ece"
+
+    class_weights_flag = "on" if args.use_class_weights else "off"
+    row = [
+        args.loss_type,
+        class_weights_flag,
+        str(bool(args.multi_task)),
+        "" if metrics.get("mcc_primary") is None else f"{metrics['mcc_primary']:.6f}",
+        "" if metrics.get("coverage_directional") is None else f"{metrics['coverage_directional']:.6f}",
+        "" if metrics.get("net_edge_total") is None else f"{metrics['net_edge_total']:.6f}",
+        "" if metrics.get("ece") is None else f"{metrics['ece']:.6f}",
+    ]
+    line = ",".join(row)
+
+    if not csv_path.exists():
+        csv_path.write_text(header + "\n" + line + "\n", encoding="utf-8")
+    else:
+        with csv_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 def _append_train_log(paths, csv_path: Path, json_path: Path, baselines_path: Path, topk: int):
@@ -371,6 +417,8 @@ def train():
         patience=15,
         save_top_k=3,
     )
+    ablation_metrics = _extract_objective_ablation_metrics(trainer)
+    _append_objective_ablation_row(paths.base_path, args, ablation_metrics)
 
     run_mc_dropout_uncertainty(
         model,

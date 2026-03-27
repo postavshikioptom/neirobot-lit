@@ -48,7 +48,12 @@
       "Bash(sed -n '985,1018p' train.py)",
       "Bash(ls -la python_lab/src/*.py)",
       "Bash(wc:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "mcp__Tavily__tavily_crawl",
+      "Bash(grep -E \"\\\\.py$|\\\\.rs$\")",
+      "Bash(sed 's/|.*//')",
+      "Bash(grep:*)",
+      "Bash(git show:*)"
     ]
   },
   "enabledMcpjsonServers": [
