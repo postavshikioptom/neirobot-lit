@@ -90,13 +90,13 @@ def train():
     checkpoint_dir = paths.checkpoint_dir
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename="lit-{epoch:02d}-{val_mcc:.4f}",
+        filename="lit-{epoch:02d}-{val_mcc_primary:.4f}",
         save_top_k=3,
-        monitor="val_mcc",
+        monitor="val_mcc_primary",
         mode="max",
     )
     callbacks = [
-        EarlyStopping(monitor="val_mcc", patience=15, mode="max"),
+        EarlyStopping(monitor="val_mcc_primary", patience=15, mode="max"),
         checkpoint_callback,
         LearningRateMonitor(logging_interval="epoch"),
     ]
@@ -175,8 +175,8 @@ def train():
     trainer.fit(model, prepared.train_loader, prepared.val_loader)
 
     # Логируем итоговые метрики
-    best_val_mcc = checkpoint_callback.best_model_score.item() if checkpoint_callback.best_model_score else 0.0
-    log_hparams(logger.experiment, hparams_dict, {'hparam/best_val_mcc': best_val_mcc})
+    best_val_mcc_primary = checkpoint_callback.best_model_score.item() if checkpoint_callback.best_model_score else 0.0
+    log_hparams(logger.experiment, hparams_dict, {'hparam/best_val_mcc_primary': best_val_mcc_primary})
 
     # 13. MC Dropout
     run_mc_dropout_uncertainty(

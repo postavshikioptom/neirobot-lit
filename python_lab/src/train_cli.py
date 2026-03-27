@@ -22,6 +22,18 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing for CrossEntropyLoss")
     parser.add_argument("--loss_type", type=str, default="focal", choices=["ce", "focal"], help="Loss function type")
     parser.add_argument("--focal_gamma", type=float, default=3.0, help="Gamma parameter for Focal Loss")
+    parser.add_argument("--metric_contract", type=str, default="standard", choices=["standard", "hft", "strict"],
+                        help="Validation metric contract preset stored in checkpoint hparams")
+    parser.add_argument("--metric_log_prefix", type=str, default="val",
+                        help="Prefix metadata for validation metric contract reproduction")
+    parser.add_argument("--metric_directional_base", type=str, default="predicted",
+                        help="Directional-base metadata stored with validation contract")
+    parser.add_argument("--report_fee_bps", type=float, default=0.0,
+                        help="Fee in bps used for cost-aware validation edge reporting")
+    parser.add_argument("--report_slippage_bps", type=float, default=0.0,
+                        help="Slippage in bps used for cost-aware validation edge reporting")
+    parser.add_argument("--report_half_spread_bps", type=float, default=0.0,
+                        help="Half-spread in bps used for cost-aware validation edge reporting")
     parser.add_argument("--past_returns_lags", type=str, default="10,50,100", help="Comma-separated list of lags for past returns")
     parser.add_argument("--activation", type=str, default="gelu_exact", choices=["relu", "gelu_exact", "gelu_tanh", "silu"], help="Activation function type")
 

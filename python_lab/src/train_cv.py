@@ -133,6 +133,12 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
             input_noise_std=args.input_noise_std,
             scaler_type=args.scaler_type,
             winsor_limits=list(winsor_limits) if winsor_limits else None,
+            metric_contract=args.metric_contract,
+            metric_log_prefix=args.metric_log_prefix,
+            metric_directional_base=args.metric_directional_base,
+            report_fee_bps=args.report_fee_bps,
+            report_slippage_bps=args.report_slippage_bps,
+            report_half_spread_bps=args.report_half_spread_bps,
         )
 
         fold_checkpoint_dir = checkpoint_dir / f"fold_{fold_idx + 1}"
@@ -140,14 +146,14 @@ def run_cross_validation(args, paths, prepared, winsor_limits):
 
         fold_checkpoint_callback = ModelCheckpoint(
             dirpath=fold_checkpoint_dir,
-            filename="lit-{epoch:02d}-{val_mcc:.4f}",
+            filename="lit-{epoch:02d}-{val_mcc_primary:.4f}",
             save_top_k=1,
-            monitor="val_mcc",
+            monitor="val_mcc_primary",
             mode="max",
         )
 
         fold_callbacks = [
-            EarlyStopping(monitor="val_mcc", patience=15, mode="max"),
+            EarlyStopping(monitor="val_mcc_primary", patience=15, mode="max"),
             fold_checkpoint_callback,
             LearningRateMonitor(logging_interval="epoch"),
         ]

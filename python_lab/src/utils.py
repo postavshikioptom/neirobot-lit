@@ -12,7 +12,8 @@ from sklearn.metrics import (
     balanced_accuracy_score,
     f1_score,
     classification_report,
-    ConfusionMatrixDisplay
+    ConfusionMatrixDisplay,
+    confusion_matrix,
 )
 
 def save_confusion_matrices(y_true, y_pred, class_names, output_dir):
@@ -218,8 +219,19 @@ def compute_metrics(y_true, y_pred, class_weights=None):
         
         # Возвращаем дефолтные значения, чтобы код не падал ниже
         return {
-            "mcc": 0.0, "balanced_acc": 0.0,
-            "f1_flat": 0.0, "f1_up": 0.0, "f1_down": 0.0, "f1_macro": 0.0
+            "mcc": 0.0,
+            "balanced_acc": 0.0,
+            "f1_flat": 0.0,
+            "f1_up": 0.0,
+            "f1_down": 0.0,
+            "f1_macro": 0.0,
+            "precision_flat": 0.0,
+            "precision_up": 0.0,
+            "precision_down": 0.0,
+            "recall_flat": 0.0,
+            "recall_up": 0.0,
+            "recall_down": 0.0,
+            "accuracy": 0.0,
         }
 
     # 1. Основные агрегированные метрики
@@ -243,7 +255,14 @@ def compute_metrics(y_true, y_pred, class_weights=None):
         "f1_flat": float(f1_flat),
         "f1_up": float(f1_up),
         "f1_down": float(f1_down),
-        "f1_macro": float(f1_macro)
+        "f1_macro": float(f1_macro),
+        "precision_flat": float(report.get('0', {}).get('precision', 0.0)),
+        "precision_up": float(report.get('1', {}).get('precision', 0.0)),
+        "precision_down": float(report.get('2', {}).get('precision', 0.0)),
+        "recall_flat": float(report.get('0', {}).get('recall', 0.0)),
+        "recall_up": float(report.get('1', {}).get('recall', 0.0)),
+        "recall_down": float(report.get('2', {}).get('recall', 0.0)),
+        "accuracy": float(report.get('accuracy', 0.0)),
     }
 
     if class_weights is not None:
@@ -252,6 +271,123 @@ def compute_metrics(y_true, y_pred, class_weights=None):
         metrics["weight_down"] = float(class_weights[2])
 
     return metrics
+
+
+def compute_classification_metrics(y_true, y_pred, class_weights=None):
+    """
+    Возвращает расширенный набор quality/classification metrics для ternary-classification.
+    """
+    base_metrics = compute_metrics(y_true, y_pred, class_weights=class_weights)
+    report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+
+    metrics = dict(base_metrics)
+    for class_id, class_name in enumerate(("flat", "up", "down")):
+        class_report = report.get(str(class_id), {})
+        metrics[f"precision_{class_name}"] = float(class_report.get("precision", 0.0))
+        metrics[f"recall_{class_name}"] = float(class_report.get("recall", 0.0))
+        metrics[f"support_{class_name}"] = float(class_report.get("support", 0.0))
+
+    metrics["accuracy"] = float(report.get("accuracy", 0.0))
+    metrics["macro_precision"] = float(report.get("macro avg", {}).get("precision", 0.0))
+    metrics["macro_recall"] = float(report.get("macro avg", {}).get("recall", 0.0))
+    metrics["weighted_precision"] = float(report.get("weighted avg", {}).get("precision", 0.0))
+    metrics["weighted_recall"] = float(report.get("weighted avg", {}).get("recall", 0.0))
+    return metrics
+
+
+def compute_directional_metrics(
+    y_true,
+    y_pred,
+    logits,
+    f_ret,
+    imbalance,
+    fee_bps=0.0,
+    slippage_bps=0.0,
+    half_spread_bps=0.0,
+):
+    """
+    Возвращает directional/trade diagnostics с корректной семантикой short-edge и учётом costs.
+    """
+    total = len(y_pred)
+    if total == 0:
+        return {}
+
+    preds = np.asarray(y_pred)
+    labels = np.asarray(y_true)
+    future_returns = np.asarray(f_ret, dtype=np.float64)
+    imbalance = np.asarray(imbalance, dtype=np.float64)
+    logits = np.asarray(logits, dtype=np.float64)
+
+    cm = confusion_matrix(labels, preds, labels=[0, 1, 2])
+    report = classification_report(labels, preds, output_dict=True, zero_division=0)
+
+    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
+    correct_mask = labels == preds
+    wrong_mask = labels != preds
+    directional_mask = preds != 0
+    long_mask = preds == 1
+    short_mask = preds == 2
+
+    gross_edge_long = float(np.mean(future_returns[long_mask])) if np.any(long_mask) else 0.0
+    gross_edge_short = float(np.mean(-future_returns[short_mask])) if np.any(short_mask) else 0.0
+    directional_edges = []
+    if np.any(long_mask):
+        directional_edges.append(future_returns[long_mask])
+    if np.any(short_mask):
+        directional_edges.append(-future_returns[short_mask])
+    gross_edge_total = float(np.mean(np.concatenate(directional_edges))) if directional_edges else 0.0
+
+    roundtrip_cost = float((2 * half_spread_bps + 2 * fee_bps + slippage_bps) / 10000.0)
+    net_edge_long = gross_edge_long - roundtrip_cost if np.any(long_mask) else 0.0
+    net_edge_short = gross_edge_short - roundtrip_cost if np.any(short_mask) else 0.0
+    net_edge_total = gross_edge_total - roundtrip_cost if np.any(directional_mask) else 0.0
+
+    signal_numeric = np.zeros_like(preds, dtype=np.float64)
+    signal_numeric[long_mask] = 1.0
+    signal_numeric[short_mask] = -1.0
+    if np.std(signal_numeric) > 0 and np.std(imbalance) > 0:
+        imb_corr = float(np.corrcoef(signal_numeric, imbalance)[0, 1])
+    else:
+        imb_corr = 0.0
+
+    return {
+        "dist_flat": float(np.mean(preds == 0) * 100.0),
+        "dist_up": float(np.mean(long_mask) * 100.0),
+        "dist_down": float(np.mean(short_mask) * 100.0),
+        "precision_flat": float(report.get("0", {}).get("precision", 0.0)),
+        "precision_up": float(report.get("1", {}).get("precision", 0.0)),
+        "precision_down": float(report.get("2", {}).get("precision", 0.0)),
+        "recall_flat": float(report.get("0", {}).get("recall", 0.0)),
+        "recall_up": float(report.get("1", {}).get("recall", 0.0)),
+        "recall_down": float(report.get("2", {}).get("recall", 0.0)),
+        "missed_up": float(cm[1, 0] / np.sum(cm[1, :]) * 100.0) if np.sum(cm[1, :]) > 0 else 0.0,
+        "missed_down": float(cm[2, 0] / np.sum(cm[2, :]) * 100.0) if np.sum(cm[2, :]) > 0 else 0.0,
+        "false_up": float(cm[0, 1] / np.sum(cm[0, :]) * 100.0) if np.sum(cm[0, :]) > 0 else 0.0,
+        "false_down": float(cm[0, 2] / np.sum(cm[0, :]) * 100.0) if np.sum(cm[0, :]) > 0 else 0.0,
+        "coverage_directional": float(np.mean(directional_mask)),
+        "coverage_long": float(np.mean(long_mask)),
+        "coverage_short": float(np.mean(short_mask)),
+        "trade_count_total": int(np.sum(directional_mask)),
+        "trade_count_long": int(np.sum(long_mask)),
+        "trade_count_short": int(np.sum(short_mask)),
+        "gross_edge_long": gross_edge_long,
+        "gross_edge_short": gross_edge_short,
+        "gross_edge_total": gross_edge_total,
+        "net_edge_long": net_edge_long,
+        "net_edge_short": net_edge_short,
+        "net_edge_total": net_edge_total,
+        "roundtrip_cost": roundtrip_cost,
+        "edge_up": gross_edge_long,
+        "edge_down_signed": gross_edge_short,
+        "da_without_flat": float(np.mean(labels[directional_mask] == preds[directional_mask])) if np.any(directional_mask) else 0.0,
+        "conf_correct": float(np.mean(np.max(probs[correct_mask], axis=1))) if np.any(correct_mask) else 0.0,
+        "conf_wrong": float(np.mean(np.max(probs[wrong_mask], axis=1))) if np.any(wrong_mask) else 0.0,
+        "conf_gap": float(
+            (np.mean(np.max(probs[correct_mask], axis=1)) if np.any(correct_mask) else 0.0)
+            - (np.mean(np.max(probs[wrong_mask], axis=1)) if np.any(wrong_mask) else 0.0)
+        ),
+        "imb_corr": imb_corr,
+    }
 
 
 class CalibrationMetrics:
@@ -1572,7 +1708,7 @@ def setup_custom_scalars_layout(writer):
     
     Группирует метрики по категориям:
     - Losses: train_loss, val_loss_cls, val_loss_vol
-    - Performance: val_mcc, val_precision_*, val_recall_*
+    - Performance: val_mcc_primary, precision_*, recall_*
     - Learning: lr, weight_cls, weight_vol
     - Calibration: val_ece, val_mce
     
@@ -1582,12 +1718,12 @@ def setup_custom_scalars_layout(writer):
     layout = {
         'Losses': {
             'train_val_loss': ['Multiline', ['train_loss', 'val_loss_cls']],
-            'volatility_loss': ['Multiline', ['train_loss_vol', 'val_mse_vol', 'val_mae_vol']],
+            'volatility_loss': ['Multiline', ['train_loss_vol', 'val_vol_mse', 'val_vol_mae']],
         },
         'Performance': {
-            'main_metrics': ['Multiline', ['val_mcc', 'val_f1_macro', 'val_balanced_acc']],
-            'precision': ['Multiline', ['val_prec_flat', 'val_prec_up', 'val_prec_down']],
-            'recall': ['Multiline', ['val_rec_flat', 'val_rec_up', 'val_rec_down']],
+            'main_metrics': ['Multiline', ['val_mcc_primary', 'val_f1_macro_np', 'val_balanced_acc', 'val_direction_mcc', 'val_da_without_flat']],
+            'precision': ['Multiline', ['precision_flat', 'precision_up', 'precision_down']],
+            'recall': ['Multiline', ['recall_flat', 'recall_up', 'recall_down']],
         },
         'Learning': {
             'learning_rate': ['Multiline', ['lr']],
@@ -1595,6 +1731,10 @@ def setup_custom_scalars_layout(writer):
         },
         'Calibration': {
             'calibration_errors': ['Multiline', ['val_ece', 'val_mce']],
+        },
+        'Trade': {
+            'coverage': ['Multiline', ['coverage_directional', 'coverage_long', 'coverage_short']],
+            'edge': ['Multiline', ['gross_edge_total', 'net_edge_total']],
         }
     }
     

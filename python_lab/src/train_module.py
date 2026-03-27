@@ -1,7 +1,8 @@
 """
-train_module.py — Training core: TrainSubset, ProfilerCallback, compute_hft_metrics, LiTModule.
+train_module.py — Training core: TrainSubset, ProfilerCallback, LiTModule.
 Вынесено из train.py в рамках задачи 322.1.
 """
+import json
 import os
 import time
 import torch
@@ -11,17 +12,14 @@ import numpy as np
 from pathlib import Path
 from torch.profiler import profile, ProfilerActivity, schedule
 from torchmetrics.classification import (
-    MulticlassAccuracy,
     MulticlassF1Score,
     MulticlassMatthewsCorrCoef,
-    MulticlassPrecision,
-    MulticlassRecall,
-    MulticlassConfusionMatrix,
 )
 
 from .lit_model import LiTModel
 from .utils import (
-    compute_metrics,
+    compute_classification_metrics,
+    compute_directional_metrics,
     FocalLoss,
     CalibrationMetrics,
     plot_reliability_diagram,
@@ -94,84 +92,12 @@ class ProfilerCallback(pl.Callback):
                 print(f"\n[PROFILER] Profiling completed. Results saved to {self.profiler_dir}")
 
 
-def compute_hft_metrics(all_preds, all_labels, all_logits, all_f_rets, all_imbalances):
-    """
-    Вычисляет расширенные HFT-метрики для анализа качества сигналов (Задача 313.4/5).
-    """
-    import numpy as np
-    from sklearn.metrics import confusion_matrix
-
-    total = len(all_preds)
-    if total == 0:
-        return {}
-
-    # 1. Распределение предсказаний
-    dist = {
-        "dist_flat": np.sum(all_preds == 0) / total * 100,
-        "dist_up": np.sum(all_preds == 1) / total * 100,
-        "dist_down": np.sum(all_preds == 2) / total * 100
-    }
-
-    # 2. Точность по классам
-    cm = confusion_matrix(all_labels, all_preds, labels=[0, 1, 2])
-    hit_rates = {
-        "hit_rate_flat": cm[0, 0] / np.sum(cm[:, 0]) if np.sum(cm[:, 0]) > 0 else 0,
-        "hit_rate_up": cm[1, 1] / np.sum(cm[:, 1]) if np.sum(cm[:, 1]) > 0 else 0,
-        "hit_rate_down": cm[2, 2] / np.sum(cm[:, 2]) if np.sum(cm[:, 2]) > 0 else 0
-    }
-
-    # 3. Детали матрицы ошибок
-    error_details = {
-        "missed_up": cm[1, 0] / np.sum(cm[1, :]) * 100 if np.sum(cm[1, :]) > 0 else 0,
-        "missed_down": cm[2, 0] / np.sum(cm[2, :]) * 100 if np.sum(cm[2, :]) > 0 else 0,
-        "false_up": cm[0, 1] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0,
-        "false_down": cm[0, 2] / np.sum(cm[0, :]) * 100 if np.sum(cm[0, :]) > 0 else 0
-    }
-
-    # 4. Theoretical Edge
-    edge_up = np.mean(all_f_rets[all_preds == 1]) if np.sum(all_preds == 1) > 0 else 0
-    edge_down = np.mean(all_f_rets[all_preds == 2]) if np.sum(all_preds == 2) > 0 else 0
-
-    # 5. Анализ уверенности (Signal Confidence)
-    from torch.nn.functional import softmax
-    import torch
-    probs = softmax(torch.from_numpy(all_logits), dim=1).numpy()
-    correct_mask = (all_labels == all_preds)
-    wrong_mask = (all_labels != all_preds)
-
-    conf_correct = np.mean(np.max(probs[correct_mask], axis=1)) if np.sum(correct_mask) > 0 else 0
-    conf_wrong = np.mean(np.max(probs[wrong_mask], axis=1)) if np.sum(wrong_mask) > 0 else 0
-
-    # 6. Directional Accuracy (DA)
-    dir_mask = (all_preds != 0)
-    da = np.mean(all_labels[dir_mask] == all_preds[dir_mask]) if np.sum(dir_mask) > 0 else 0
-
-    # 7. Imbalance Alignment
-    sig_num = np.zeros_like(all_preds)
-    sig_num[all_preds == 1] = 1
-    sig_num[all_preds == 2] = -1
-
-    if np.std(sig_num) > 0 and np.std(all_imbalances) > 0:
-        imb_corr = np.corrcoef(sig_num, all_imbalances)[0, 1]
-    else:
-        imb_corr = 0.0
-
-    return {
-        **dist, **hit_rates, **error_details,
-        "edge_up": edge_up, "edge_down": edge_down,
-        "conf_correct": conf_correct, "conf_wrong": conf_wrong,
-        "conf_gap": conf_correct - conf_wrong,
-        "da": da, "imb_corr": imb_corr
-    }
-
-
-
 class LiTModule(pl.LightningModule):
     """
     LightningModule для обучения модели LiT.
     Обертка над nn.Module, добавляющая логику обучения, валидации и оптимизации.
     """
-    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, use_gradient_checkpointing=False, **model_params):
+    def __init__(self, seq_len=100, lr=1e-4, class_weights=None, label_smoothing=0.0, loss_type="ce", focal_gamma=2.0, activation='gelu_exact', use_time_weighting=False, teacher_model=None, alpha=0.9, temperature=3.0, use_regime_weighting=False, regime_weights=None, num_horizons=1, horizon_weights=None, use_horizon_embedding=False, use_curvature_reg=False, curvature_lambda=1e-4, input_noise_std=0.005, scaler_type="robust", winsor_limits=None, past_returns_lags=None, scheduler=None, div_factor=None, final_div_factor=None, pct_start=None, plateau_factor=None, plateau_patience=None, step_size=None, gamma=None, weight_decay=None, clip_mode=None, clip_val=None, tb_hist_freq=None, tb_embedding_samples=None, use_gradient_checkpointing=False, metric_contract="standard", metric_log_prefix="val", metric_directional_base="predicted", report_fee_bps=0.0, report_slippage_bps=0.0, report_half_spread_bps=0.0, **model_params):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "teacher_model", "regime_weights", "horizon_weights"])
         self.model = LiTModel(seq_len=seq_len, activation=activation, num_horizons=num_horizons, use_horizon_embedding=use_horizon_embedding, use_gradient_checkpointing=use_gradient_checkpointing, **model_params)
@@ -245,22 +171,11 @@ class LiTModule(pl.LightningModule):
         self.log_var_vol = nn.Parameter(torch.zeros(1))
 
         # Метрики для мониторинга (3 класса: 0=Flat, 1=Up, 2=Down)
-        self.acc = MulticlassAccuracy(num_classes=3)
         self.mcc = MulticlassMatthewsCorrCoef(num_classes=3)
         self.f1_macro = MulticlassF1Score(num_classes=3, average="macro")
-        self.precision_per_class = MulticlassPrecision(num_classes=3, average=None)
-        self.recall_per_class = MulticlassRecall(num_classes=3, average=None)
-        self.conf_matrix = MulticlassConfusionMatrix(num_classes=3)
 
         # Списки для накопления результатов валидации
-        self.val_y_true = []
-        self.val_y_pred = []
-        self.val_logits = []
-        self.val_vol_true = []
-        self.val_vol_pred = []
-        self.val_f_ret = []
-        self.val_imbalance = []
-        self.val_regime_ids = []
+        self._validation_accumulator = []
 
         self.calibration_metrics = CalibrationMetrics(n_bins=15)
 
@@ -485,6 +400,7 @@ class LiTModule(pl.LightningModule):
         self.validation_start_time = time.time()
         is_sanity = bool(getattr(self.trainer, 'sanity_checking', False))
         phase = 'SANITY' if is_sanity else 'VAL'
+        self._reset_validation_state()
         print(f"\n[{phase}] Epoch {self.current_epoch} validation started")
 
     def validation_step(self, batch, batch_idx):
@@ -512,32 +428,19 @@ class LiTModule(pl.LightningModule):
         loss_vol = nn.functional.mse_loss(vol_pred, vol_target)
         mae_vol = nn.functional.l1_loss(vol_pred, vol_target)
 
-        if self.is_multi_horizon:
-            preds = torch.argmax(logits, dim=2)
-        else:
-            preds = torch.argmax(logits, dim=1)
-
-        self.val_y_true.append(y.detach().cpu().numpy())
-        self.val_y_pred.append(preds.detach().cpu().numpy())
-        self.val_logits.append(logits.detach().cpu())
-        self.val_vol_true.append(vol_target.detach().cpu().numpy())
-        self.val_vol_pred.append(vol_pred.detach().cpu().numpy())
-        self.val_f_ret.append(f_ret.detach().cpu().numpy())
-        current_imbalance = x[:, -1, 2, 0].detach().cpu().numpy()
-        self.val_imbalance.append(current_imbalance)
-        if regime_id is not None:
-            self.val_regime_ids.append(regime_id.detach().cpu().numpy())
-
-        self.log("val_loss", loss_cls, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("val_mse_vol", loss_vol, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("val_mae_vol", mae_vol, on_step=False, on_epoch=True)
-
-        if not self.is_multi_horizon:
-            self.log("val_mcc", self.mcc(logits, y), prog_bar=True, on_step=False, on_epoch=True)
-            self.log("val_f1_macro", self.f1_macro(logits, y), on_step=False, on_epoch=True)
-            self.conf_matrix.update(logits, y)
-            self.precision_per_class.update(logits, y)
-            self.recall_per_class.update(logits, y)
+        current_imbalance = x[:, -1, 2, 0]
+        self._accumulate_validation_outputs(
+            logits=logits,
+            labels=y,
+            f_ret=f_ret,
+            imbalance=current_imbalance,
+            regime_id=regime_id,
+            vol_true=vol_target,
+            vol_pred=vol_pred,
+            loss_cls=loss_cls,
+            loss_vol=loss_vol,
+            mae_vol=mae_vol,
+        )
 
         return loss_cls + loss_vol
 
@@ -545,10 +448,10 @@ class LiTModule(pl.LightningModule):
         import time as _time
         is_sanity = bool(getattr(self.trainer, 'sanity_checking', False))
         phase = 'SANITY' if is_sanity else 'VAL'
-        print(f"\n[{phase}] Entering on_validation_epoch_end, samples collected: {len(self.val_y_true)}")
+        print(f"\n[{phase}] Entering on_validation_epoch_end, samples collected: {len(self._validation_accumulator)}")
         epoch_end_start_time = _time.time()
 
-        if not self.val_y_true:
+        if not self._validation_accumulator:
             print(f"[{phase}] No validation outputs collected; skipping epoch_end")
             return
 
@@ -560,18 +463,21 @@ class LiTModule(pl.LightningModule):
         skip_epoch0_artifacts = self.hparams.get('skip_epoch0_artifacts', True) and self.current_epoch == 0
         skip_heavy_artifacts = is_sanity or skip_epoch0_artifacts
 
-        y_true = np.concatenate(self.val_y_true)
-        y_pred = np.concatenate(self.val_y_pred)
-        logits = torch.cat(self.val_logits, dim=0)
-
-        if not self.is_multi_horizon:
-            f_ret = np.concatenate(self.val_f_ret)
-            imbalance = np.concatenate(self.val_imbalance)
-            self._log_extended_analytics(y_true, y_pred, logits, f_ret, imbalance)
+        validation_payload = self._gather_validation_payload()
+        y_true = validation_payload["y_true"]
+        logits = validation_payload["logits"]
+        y_pred = validation_payload["y_pred"]
+        finalized = None
 
         if self.is_multi_horizon:
             from .utils import compute_multi_horizon_metrics
             metrics = compute_multi_horizon_metrics(y_true, y_pred, self.num_horizons)
+            self.log("val_loss", float(validation_payload["loss_cls"]), logger=True, add_dataloader_idx=False)
+            self.log("val_loss_cls", float(validation_payload["loss_cls"]), logger=True, add_dataloader_idx=False)
+            self.log("val_mse_vol", float(validation_payload["loss_vol"]), logger=True, add_dataloader_idx=False)
+            self.log("val_mae_vol", float(validation_payload["mae_vol"]), logger=True, add_dataloader_idx=False)
+            self.log("val_vol_mse", float(np.mean((validation_payload["vol_true"] - validation_payload["vol_pred"])**2)), logger=True, add_dataloader_idx=False)
+            self.log("val_vol_mae", float(np.mean(np.abs(validation_payload["vol_true"] - validation_payload["vol_pred"]))), logger=True, add_dataloader_idx=False)
             for name, value in metrics.items():
                 self.log(f"val_{name}", value, logger=True)
             epoch_time = _time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
@@ -583,10 +489,9 @@ class LiTModule(pl.LightningModule):
                 samples_h = metrics.get(f"samples_h{h}", 0)
                 print(f"  Horizon {h}: MCC={mcc_h:.4f}, F1={f1_h:.4f}, Samples={samples_h}")
             avg_mcc = np.mean([metrics.get(f"mcc_h{h}", 0.0) for h in range(self.num_horizons)])
-            self.log("val_mcc", avg_mcc, logger=True, prog_bar=True)
+            self.log("val_mcc_primary", avg_mcc, logger=True, prog_bar=True, add_dataloader_idx=False)
         else:
-            class_weights = self.criterion.weight.cpu().numpy() if hasattr(self.criterion, 'weight') and self.criterion.weight is not None else None
-            metrics = compute_metrics(y_true, y_pred, class_weights=class_weights)
+            finalized = self._finalize_validation_metrics(validation_payload)
             y_true_tensor = torch.from_numpy(y_true).long()
             if not torch.isfinite(logits).all():
                 print("\n" + "!" * 80)
@@ -594,15 +499,16 @@ class LiTModule(pl.LightningModule):
                 print("   This indicates extreme numerical instability (exploding gradients).")
                 print("   Metrics and visualizations for this epoch will be unreliable.")
                 print("!" * 80 + "\n")
-            ece, mce, bin_data = self.calibration_metrics.calculate(logits, y_true_tensor)
-            for name, value in metrics.items():
-                self.log(f"val_{name}", value, logger=True)
-            self.log("val_ece", ece, logger=True)
-            self.log("val_mce", mce, logger=True)
+            ece = finalized["calibration"]["val_ece"]
+            mce = finalized["calibration"]["val_mce"]
+            bin_data = finalized["calibration"]["bin_data"]
+            self._log_final_validation_metrics(finalized)
             epoch_time = _time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
             epoch_time_str = f"{int(epoch_time // 60)}m {int(epoch_time % 60)}s"
-            print(f"\nEpoch {self.current_epoch} ({epoch_time_str}) Validation: MCC={metrics['mcc']:.4f}, "
-                  f"Macro-F1={metrics['f1_macro']:.4f}, ECE={ece:.4f}, MCE={mce:.4f}")
+            print(f"\nEpoch {self.current_epoch} ({epoch_time_str}) Validation: MCC={finalized['quality']['val_mcc_primary']:.4f}, "
+                  f"Macro-F1={finalized['quality']['val_f1_macro_np']:.4f}, ECE={ece:.4f}, MCE={mce:.4f}")
+
+            self._log_extended_analytics(finalized["trade"])
 
             if (self.hparams.get('enable_epoch_end_plots', False) and not skip_heavy_artifacts
                     and self.current_epoch % 20 == 0):
@@ -612,15 +518,6 @@ class LiTModule(pl.LightningModule):
                 reports_dir.mkdir(parents=True, exist_ok=True)
                 save_path = reports_dir / f"reliability_diagram_epoch_{self.current_epoch}.png"
                 plot_reliability_diagram(bin_data, ece, mce, str(save_path))
-
-            prec = self.precision_per_class.compute()
-            rec = self.recall_per_class.compute()
-            self.log("val_prec_flat", prec[0])
-            self.log("val_rec_flat", rec[0])
-            self.log("val_prec_up", prec[1])
-            self.log("val_rec_up", rec[1])
-            self.log("val_prec_down", prec[2])
-            self.log("val_rec_down", rec[2])
 
             if self.logger and hasattr(self.logger, 'experiment'):
                 writer = self.logger.experiment
@@ -632,20 +529,12 @@ class LiTModule(pl.LightningModule):
                     y_pred_probs = torch.softmax(logits, dim=1).numpy()
                     plot_pr_curves_tensorboard(y_true, y_pred_probs, class_names, writer, self.current_epoch)
 
-        # 3. Метрики регрессии волатильности
-        y_vol_true = np.concatenate(self.val_vol_true)
-        y_vol_pred = np.concatenate(self.val_vol_pred)
-        vol_mse = np.mean((y_vol_true - y_vol_pred)**2)
-        vol_mae = np.mean(np.abs(y_vol_true - y_vol_pred))
-        self.log("val_vol_mse", vol_mse, logger=True)
-        self.log("val_vol_mae", vol_mae, logger=True)
-        print(f"  Vol-MSE={vol_mse:.6f}, Vol-MAE={vol_mae:.6f}")
-
         # 4. Метрики по режимам (только single horizon)
-        if len(self.val_regime_ids) > 0 and not self.is_multi_horizon:
-            regime_ids = np.concatenate(self.val_regime_ids)
+        if validation_payload["regime_ids"] is not None and not self.is_multi_horizon:
+            regime_ids = validation_payload["regime_ids"]
             unique_regimes = np.unique(regime_ids)
             print("\nMetrics by Market Regime:")
+            regime_report = {}
             for regime in unique_regimes:
                 mask = regime_ids == regime
                 regime_y_true = y_true[mask]
@@ -656,7 +545,13 @@ class LiTModule(pl.LightningModule):
                     regime_f1 = f1_score(regime_y_true, regime_y_pred, average='macro', zero_division=0)
                     self.log(f"val_mcc_regime_{regime}", regime_mcc, logger=True)
                     self.log(f"val_f1_regime_{regime}", regime_f1, logger=True)
+                    regime_report[str(int(regime))] = {
+                        "val_mcc": float(regime_mcc),
+                        "val_f1_macro": float(regime_f1),
+                        "samples": int(len(regime_y_true)),
+                    }
                     print(f"  Regime {regime}: MCC={regime_mcc:.4f}, F1={regime_f1:.4f}, Samples={len(regime_y_true)}")
+            finalized["regime_metrics"] = regime_report
 
         # 5. TensorBoard визуализация
         if self.logger and hasattr(self.logger, 'experiment'):
@@ -674,46 +569,219 @@ class LiTModule(pl.LightningModule):
                     log_embeddings(self.model, val_dataloader, writer, self.current_epoch, max_samples=tb_embedding_samples)
 
         # 7. Сброс накопленных данных и метрик
-        self.val_y_true.clear()
-        self.val_y_pred.clear()
-        self.val_logits.clear()
-        self.val_vol_true.clear()
-        self.val_vol_pred.clear()
-        self.val_f_ret.clear()
-        self.val_imbalance.clear()
-        self.val_regime_ids.clear()
-        self.acc.reset()
+        if not is_sanity and not self.is_multi_horizon:
+            self._save_validation_report(finalized)
+        self._reset_validation_state()
         self.f1_macro.reset()
         self.mcc.reset()
-        self.precision_per_class.reset()
-        self.recall_per_class.reset()
-        self.conf_matrix.reset()
 
         epoch_end_duration = _time.time() - epoch_end_start_time
         epoch_end_str = f"{int(epoch_end_duration // 60)}m {int(epoch_end_duration % 60)}s"
         print(f"\n[{phase}] on_validation_epoch_end completed in {epoch_end_str}")
 
-    def _log_extended_analytics(self, y_true, y_pred, logits, f_ret, imbalance):
-        hft_metrics = compute_hft_metrics(y_pred, y_true, logits.numpy(), f_ret, imbalance)
-        if not hft_metrics:
+    def _accumulate_validation_outputs(self, logits, labels, f_ret, imbalance, regime_id, vol_true, vol_pred, loss_cls, loss_vol, mae_vol):
+        self._validation_accumulator.append(
+            {
+                "logits": logits.detach().cpu(),
+                "labels": labels.detach().cpu(),
+                "f_ret": f_ret.detach().cpu(),
+                "imbalance": imbalance.detach().cpu(),
+                "regime_id": regime_id.detach().cpu() if regime_id is not None else None,
+                "vol_true": vol_true.detach().cpu(),
+                "vol_pred": vol_pred.detach().cpu(),
+                "loss_cls": loss_cls.detach().cpu(),
+                "loss_vol": loss_vol.detach().cpu(),
+                "mae_vol": mae_vol.detach().cpu(),
+            }
+        )
+
+    def _gather_validation_payload(self):
+        payload = {
+            "logits": torch.cat([item["logits"] for item in self._validation_accumulator], dim=0),
+            "y_true": np.concatenate([item["labels"].numpy() for item in self._validation_accumulator]),
+            "f_ret": np.concatenate([item["f_ret"].numpy() for item in self._validation_accumulator]),
+            "imbalance": np.concatenate([item["imbalance"].numpy() for item in self._validation_accumulator]),
+            "vol_true": np.concatenate([item["vol_true"].numpy() for item in self._validation_accumulator]),
+            "vol_pred": np.concatenate([item["vol_pred"].numpy() for item in self._validation_accumulator]),
+            "loss_cls": torch.stack([item["loss_cls"] for item in self._validation_accumulator]).mean().item(),
+            "loss_vol": torch.stack([item["loss_vol"] for item in self._validation_accumulator]).mean().item(),
+            "mae_vol": torch.stack([item["mae_vol"] for item in self._validation_accumulator]).mean().item(),
+        }
+        payload["y_pred"] = torch.argmax(payload["logits"], dim=2 if self.is_multi_horizon else 1).cpu().numpy()
+
+        regime_values = [item["regime_id"].numpy() for item in self._validation_accumulator if item["regime_id"] is not None]
+        payload["regime_ids"] = np.concatenate(regime_values) if regime_values else None
+        return payload
+
+    def _finalize_validation_metrics(self, payload):
+        from sklearn.metrics import matthews_corrcoef
+
+        class_weights = self.criterion.weight.cpu().numpy() if hasattr(self.criterion, 'weight') and self.criterion.weight is not None else None
+        quality_metrics = compute_classification_metrics(payload["y_true"], payload["y_pred"], class_weights=class_weights)
+        direction_metrics = compute_directional_metrics(
+            payload["y_true"],
+            payload["y_pred"],
+            payload["logits"].numpy(),
+            payload["f_ret"],
+            payload["imbalance"],
+            fee_bps=self.hparams.get("report_fee_bps", 0.0),
+            slippage_bps=self.hparams.get("report_slippage_bps", 0.0),
+            half_spread_bps=self.hparams.get("report_half_spread_bps", 0.0),
+        )
+
+        y_true_tensor = torch.from_numpy(payload["y_true"]).long()
+        val_mcc_torch = float(self.mcc(payload["logits"], y_true_tensor).detach().cpu())
+        val_f1_torch = float(self.f1_macro(payload["logits"], y_true_tensor).detach().cpu())
+        ece, mce, bin_data = self.calibration_metrics.calculate(payload["logits"], y_true_tensor)
+        directional_mask = payload["y_pred"] != 0
+        if np.any(directional_mask):
+            val_direction_mcc = float(matthews_corrcoef(payload["y_true"][directional_mask], payload["y_pred"][directional_mask]))
+        else:
+            val_direction_mcc = 0.0
+
+        quality = {
+            "val_loss": float(payload["loss_cls"]),
+            "val_loss_cls": float(payload["loss_cls"]),
+            "val_mse_vol": float(payload["loss_vol"]),
+            "val_mae_vol": float(payload["mae_vol"]),
+            "val_vol_mse": float(np.mean((payload["vol_true"] - payload["vol_pred"])**2)),
+            "val_vol_mae": float(np.mean(np.abs(payload["vol_true"] - payload["vol_pred"]))),
+            "val_mcc_primary": float(quality_metrics["mcc"]),
+            "val_mcc_np": float(quality_metrics["mcc"]),
+            "val_mcc_torch": val_mcc_torch,
+            "val_direction_mcc": val_direction_mcc,
+            "val_f1_macro_np": float(quality_metrics["f1_macro"]),
+            "val_f1_macro_torch": val_f1_torch,
+            "val_balanced_acc": float(quality_metrics["balanced_acc"]),
+            "val_accuracy": float(quality_metrics["accuracy"]),
+        }
+        class_metrics = {
+            "precision_flat": float(quality_metrics["precision_flat"]),
+            "precision_up": float(quality_metrics["precision_up"]),
+            "precision_down": float(quality_metrics["precision_down"]),
+            "recall_flat": float(quality_metrics["recall_flat"]),
+            "recall_up": float(quality_metrics["recall_up"]),
+            "recall_down": float(quality_metrics["recall_down"]),
+            "f1_flat": float(quality_metrics["f1_flat"]),
+            "f1_up": float(quality_metrics["f1_up"]),
+            "f1_down": float(quality_metrics["f1_down"]),
+            "false_up": float(direction_metrics["false_up"]),
+            "false_down": float(direction_metrics["false_down"]),
+            "missed_up": float(direction_metrics["missed_up"]),
+            "missed_down": float(direction_metrics["missed_down"]),
+        }
+        calibration = {
+            "val_ece": float(ece),
+            "val_mce": float(mce),
+            "bin_data": bin_data,
+        }
+        coverage = {
+            "coverage_directional": float(direction_metrics["coverage_directional"]),
+            "coverage_long": float(direction_metrics["coverage_long"]),
+            "coverage_short": float(direction_metrics["coverage_short"]),
+        }
+        trade = {
+            "val_da_without_flat": float(direction_metrics["da_without_flat"]),
+            "gross_edge_long": float(direction_metrics["gross_edge_long"]),
+            "gross_edge_short": float(direction_metrics["gross_edge_short"]),
+            "gross_edge_total": float(direction_metrics["gross_edge_total"]),
+            "net_edge_long": float(direction_metrics["net_edge_long"]),
+            "net_edge_short": float(direction_metrics["net_edge_short"]),
+            "net_edge_total": float(direction_metrics["net_edge_total"]),
+            "trade_count_total": int(direction_metrics["trade_count_total"]),
+            "trade_count_long": int(direction_metrics["trade_count_long"]),
+            "trade_count_short": int(direction_metrics["trade_count_short"]),
+            "edge_down_signed": float(direction_metrics["edge_down_signed"]),
+            "edge_up": float(direction_metrics["edge_up"]),
+            "roundtrip_cost": float(direction_metrics["roundtrip_cost"]),
+            "dist_flat": float(direction_metrics["dist_flat"]),
+            "dist_up": float(direction_metrics["dist_up"]),
+            "dist_down": float(direction_metrics["dist_down"]),
+            "precision_flat": float(direction_metrics["precision_flat"]),
+            "precision_up": float(direction_metrics["precision_up"]),
+            "precision_down": float(direction_metrics["precision_down"]),
+            "recall_flat": float(direction_metrics["recall_flat"]),
+            "recall_up": float(direction_metrics["recall_up"]),
+            "recall_down": float(direction_metrics["recall_down"]),
+            "false_up": float(direction_metrics["false_up"]),
+            "false_down": float(direction_metrics["false_down"]),
+            "missed_up": float(direction_metrics["missed_up"]),
+            "missed_down": float(direction_metrics["missed_down"]),
+            "coverage_directional": float(direction_metrics["coverage_directional"]),
+            "coverage_long": float(direction_metrics["coverage_long"]),
+            "coverage_short": float(direction_metrics["coverage_short"]),
+            "conf_correct": float(direction_metrics["conf_correct"]),
+            "conf_wrong": float(direction_metrics["conf_wrong"]),
+            "conf_gap": float(direction_metrics["conf_gap"]),
+            "imb_corr": float(direction_metrics["imb_corr"]),
+        }
+        return {
+            "epoch": int(self.current_epoch),
+            "metric_contract": self.hparams.get("metric_contract", "standard"),
+            "metric_log_prefix": self.hparams.get("metric_log_prefix", "val"),
+            "metric_directional_base": self.hparams.get("metric_directional_base", "predicted"),
+            "quality": quality,
+            "calibration": calibration,
+            "coverage": coverage,
+            "trade": trade,
+            "class_metrics": class_metrics,
+            "regime_metrics": {},
+        }
+
+    def _log_final_validation_metrics(self, finalized):
+        for name, value in finalized["quality"].items():
+            self.log(name, float(value), logger=True, prog_bar=(name == "val_mcc_primary"), add_dataloader_idx=False)
+        for name, value in finalized["calibration"].items():
+            if name != "bin_data":
+                self.log(name, float(value), logger=True, add_dataloader_idx=False)
+        for section in ("coverage", "trade", "class_metrics"):
+            for name, value in finalized[section].items():
+                self.log(name, float(value), logger=True, add_dataloader_idx=False)
+
+    def _save_validation_report(self, finalized):
+        symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
+        base_path = Path(__file__).parent.parent.parent
+        report_dir = base_path / "artifacts" / symbol / "validation"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"validation_report_epoch_{self.current_epoch}.json"
+        serializable = {
+            "epoch": finalized["epoch"],
+            "metric_contract": finalized["metric_contract"],
+            "metric_log_prefix": finalized["metric_log_prefix"],
+            "metric_directional_base": finalized["metric_directional_base"],
+            "quality": finalized["quality"],
+            "calibration": {k: v for k, v in finalized["calibration"].items() if k != "bin_data"},
+            "coverage": finalized["coverage"],
+            "trade": finalized["trade"],
+            "class_metrics": finalized["class_metrics"],
+            "regime_metrics": finalized["regime_metrics"],
+        }
+        report_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
+
+    def _reset_validation_state(self):
+        self._validation_accumulator.clear()
+
+    def _log_extended_analytics(self, trade_metrics):
+        if not trade_metrics:
             return
         print("\n" + "="*85)
         print(f"{'LOB-SPECIFIC CLASS ANALYTICS (Validation)':^85}")
         print("="*85)
         print(f"{'Metric':<30} | {'Flat (0)':<15} | {'Up (1)':<15} | {'Down (2)':<15}")
         print("-" * 85)
-        print(f"{'Процент предсказаний (%)':<30} | {hft_metrics['dist_flat']:<15.2f} | {hft_metrics['dist_up']:<15.2f} | {hft_metrics['dist_down']:<15.2f}")
-        print(f"{'Hit Rate (Точность)':<30} | {hft_metrics['hit_rate_flat']:<15.4f} | {hft_metrics['hit_rate_up']:<15.4f} | {hft_metrics['hit_rate_down']:<15.4f}")
-        print(f"{'Процент пропущенных сигналов (%)':<30} | {'-':<15} | {hft_metrics['missed_up']:<15.2f} | {hft_metrics['missed_down']:<15.2f}")
-        print(f"{'Ложные входы (%)':<30} | {'-':<15} | {hft_metrics['false_up']:<15.2f} | {hft_metrics['false_down']:<15.2f}")
+        print(f"{'Процент предсказаний (%)':<30} | {trade_metrics['dist_flat']:<15.2f} | {trade_metrics['dist_up']:<15.2f} | {trade_metrics['dist_down']:<15.2f}")
+        print(f"{'Precision':<30} | {trade_metrics.get('precision_flat', 0.0):<15.4f} | {trade_metrics.get('precision_up', 0.0):<15.4f} | {trade_metrics.get('precision_down', 0.0):<15.4f}")
+        print(f"{'Recall':<30} | {trade_metrics.get('recall_flat', 0.0):<15.4f} | {trade_metrics.get('recall_up', 0.0):<15.4f} | {trade_metrics.get('recall_down', 0.0):<15.4f}")
+        print(f"{'Процент пропущенных сигналов (%)':<30} | {'-':<15} | {trade_metrics.get('missed_up', 0.0):<15.2f} | {trade_metrics.get('missed_down', 0.0):<15.2f}")
+        print(f"{'Ложные входы (%)':<30} | {'-':<15} | {trade_metrics.get('false_up', 0.0):<15.2f} | {trade_metrics.get('false_down', 0.0):<15.2f}")
         print("-" * 85)
-        print(f"{'Теоретический Edge (Future Ret)':<30} | {'-':<15} | {hft_metrics['edge_up']:<15.6f} | {hft_metrics['edge_down']:<15.6f}")
-        print(f"{'Directional Accuracy (DA) без Flat':<30} | {hft_metrics['da']:<15.4f} (Accuracy where pred != Flat)")
-        print(f"{'Средняя Уверенность (C/W)':<30} | Уверенность при правильном: {hft_metrics['conf_correct']:.4f} | Уверенности при ложном: {hft_metrics['conf_wrong']:.4f} | Разница уверенности: {hft_metrics['conf_gap']:.4f}")
-        print(f"{'Корреляция с LOB Imbalance':<30} | {hft_metrics['imb_corr']:<15.4f} (Corr with Signal -1/0/1)")
+        print(f"{'Gross Edge (Future Ret)':<30} | {'-':<15} | {trade_metrics['edge_up']:<15.6f} | {trade_metrics['edge_down_signed']:<15.6f}")
+        print(f"{'Net Edge (после costs)':<30} | {'-':<15} | {trade_metrics['net_edge_long']:<15.6f} | {trade_metrics['net_edge_short']:<15.6f}")
+        print(f"{'Coverage directional':<30} | {trade_metrics['coverage_directional']:<15.4f} (share pred != Flat)")
+        print(f"{'Directional Accuracy (DA) без Flat':<30} | {trade_metrics['val_da_without_flat']:<15.4f} (Accuracy where pred != Flat)")
+        print(f"{'Средняя Уверенность (C/W)':<30} | Уверенность при правильном: {trade_metrics['conf_correct']:.4f} | Уверенности при ложном: {trade_metrics['conf_wrong']:.4f} | Разница уверенности: {trade_metrics['conf_gap']:.4f}")
+        print(f"{'Корреляция с LOB Imbalance':<30} | {trade_metrics['imb_corr']:<15.4f} (Corr with Signal -1/0/1)")
         print("="*85 + "\n")
-        for name, val in hft_metrics.items():
-            self.log(f"class_stats/{name}", val, logger=True)
 
     def configure_optimizers(self):
         lr = self.hparams.get("lr", 1e-4)

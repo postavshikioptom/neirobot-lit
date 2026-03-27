@@ -112,6 +112,12 @@ def build_training_module(
             input_noise_std=args.input_noise_std,
             scaler_type=args.scaler_type,
             winsor_limits=list(winsor_limits) if winsor_limits else None,
+            metric_contract=args.metric_contract,
+            metric_log_prefix=args.metric_log_prefix,
+            metric_directional_base=args.metric_directional_base,
+            report_fee_bps=args.report_fee_bps,
+            report_slippage_bps=args.report_slippage_bps,
+            report_half_spread_bps=args.report_half_spread_bps,
         )
 
         student_params = count_parameters(module.model)
@@ -184,6 +190,12 @@ def build_training_module(
             input_noise_std=args.input_noise_std,
             scaler_type=args.scaler_type,
             winsor_limits=list(winsor_limits) if winsor_limits else None,
+            metric_contract=args.metric_contract,
+            metric_log_prefix=args.metric_log_prefix,
+            metric_directional_base=args.metric_directional_base,
+            report_fee_bps=args.report_fee_bps,
+            report_slippage_bps=args.report_slippage_bps,
+            report_half_spread_bps=args.report_half_spread_bps,
         )
 
     return BuiltTrainingModel(
