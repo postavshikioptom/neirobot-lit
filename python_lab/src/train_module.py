@@ -596,12 +596,129 @@ class LiTModule(pl.LightningModule):
                 samples_h = metrics.get(f"samples_h{h}", 0)
                 print(f"  Horizon {h}: MCC={mcc_h:.4f}, F1={f1_h:.4f}, Samples={samples_h}")
             avg_mcc = np.mean([metrics.get(f"mcc_h{h}", 0.0) for h in range(self.num_horizons)])
-            self.log("val_mcc_primary", avg_mcc, logger=True, prog_bar=True, add_dataloader_idx=False)
+
+            from .utils import apply_decision_rule, apply_temperature_scaling, fit_temperature_scaler, compute_directional_metrics
+
+            f_ret = validation_payload["f_ret"]
+            imbalance = validation_payload["imbalance"]
+            decision_rule = self.hparams.get("decision_rule", "argmax")
+
+            argmax_preds = np.zeros_like(y_true)
+            decision_preds = np.zeros_like(y_true)
+            temp_per_h = []
+            ece_before_list = []
+            ece_after_list = []
+            mce_before_list = []
+            mce_after_list = []
+            horizon_trade = []
+
+            for h in range(self.num_horizons):
+                logits_h = logits[:, h, :]
+                y_true_h = y_true[:, h]
+                mask = y_true_h != -100
+                if not np.any(mask):
+                    temp_per_h.append(1.0)
+                    ece_before_list.append(0.0)
+                    ece_after_list.append(0.0)
+                    mce_before_list.append(0.0)
+                    mce_after_list.append(0.0)
+                    horizon_trade.append({"coverage_directional": 0.0, "net_edge_total": 0.0, "samples": 0})
+                    continue
+
+                logits_h_t = logits_h[mask]
+                y_true_h_t = torch.from_numpy(y_true_h[mask]).long()
+                temperature_value = fit_temperature_scaler(logits_h_t, y_true_h_t)
+                scaled_logits_h = apply_temperature_scaling(logits_h_t, temperature_value)
+                scaled_probs_h = torch.softmax(scaled_logits_h, dim=1).cpu().numpy()
+
+                raw_probs_h = torch.softmax(logits_h_t, dim=1).cpu().numpy()
+                argmax_preds[mask, h] = np.argmax(raw_probs_h, axis=1)
+                decision_preds[mask, h] = apply_decision_rule(
+                    scaled_probs_h,
+                    decision_rule,
+                    decision_confidence=float(self.hparams.get("decision_confidence", 0.5)),
+                    decision_hold_threshold=float(self.hparams.get("decision_hold_threshold", 0.6)),
+                    flat_prob_threshold=float(self.hparams.get("flat_prob_threshold", 0.34)),
+                    up_prob_threshold=float(self.hparams.get("up_prob_threshold", 0.34)),
+                    down_prob_threshold=float(self.hparams.get("down_prob_threshold", 0.34)),
+                    margin_threshold=float(self.hparams.get("margin_threshold", 0.0)),
+                )
+
+                ece_before, mce_before, _ = self.calibration_metrics.calculate(logits_h_t, y_true_h_t)
+                ece_after, mce_after, _ = self.calibration_metrics.calculate(scaled_logits_h, y_true_h_t)
+                temp_per_h.append(float(temperature_value))
+                ece_before_list.append(float(ece_before))
+                ece_after_list.append(float(ece_after))
+                mce_before_list.append(float(mce_before))
+                mce_after_list.append(float(mce_after))
+
+                f_ret_h = f_ret[:, h] if f_ret.ndim == 2 else f_ret
+                trade_metrics = compute_directional_metrics(
+                    y_true_h[mask],
+                    decision_preds[mask, h] if decision_rule != "argmax" else argmax_preds[mask, h],
+                    logits_h_t.cpu().numpy(),
+                    f_ret_h[mask],
+                    imbalance[mask],
+                    directional_base=self.hparams.get("metric_directional_base", "predicted"),
+                    fee_bps=self.hparams.get("report_fee_bps", 0.0),
+                    slippage_bps=self.hparams.get("report_slippage_bps", 0.0),
+                    half_spread_bps=self.hparams.get("report_half_spread_bps", 0.0),
+                    probs=scaled_probs_h if decision_rule != "argmax" else raw_probs_h,
+                )
+                horizon_trade.append(
+                    {
+                        "coverage_directional": float(trade_metrics.get("coverage_directional", 0.0)),
+                        "net_edge_total": float(trade_metrics.get("net_edge_total", 0.0)),
+                        "samples": int(np.sum(mask)),
+                    }
+                )
+
+            argmax_metrics = compute_multi_horizon_metrics(y_true, argmax_preds, self.num_horizons)
+            decision_metrics = compute_multi_horizon_metrics(y_true, decision_preds, self.num_horizons)
+            avg_mcc_argmax = np.mean([argmax_metrics.get(f"mcc_h{h}", 0.0) for h in range(self.num_horizons)])
+            avg_mcc_decision = np.mean([decision_metrics.get(f"mcc_h{h}", 0.0) for h in range(self.num_horizons)])
+            primary_avg_mcc = avg_mcc_decision if decision_rule != "argmax" else avg_mcc_argmax
+
+            self.log("val_mcc_primary", primary_avg_mcc, logger=True, prog_bar=True, add_dataloader_idx=False)
+
+            total_samples = sum(item["samples"] for item in horizon_trade)
+            if total_samples > 0:
+                coverage_directional = sum(item["coverage_directional"] * item["samples"] for item in horizon_trade) / total_samples
+                net_edge_total = sum(item["net_edge_total"] * item["samples"] for item in horizon_trade) / total_samples
+            else:
+                coverage_directional = 0.0
+                net_edge_total = 0.0
+
+            ece_before_avg = float(np.mean(ece_before_list)) if ece_before_list else 0.0
+            ece_after_avg = float(np.mean(ece_after_list)) if ece_after_list else 0.0
+            mce_before_avg = float(np.mean(mce_before_list)) if mce_before_list else 0.0
+            mce_after_avg = float(np.mean(mce_after_list)) if mce_after_list else 0.0
+            calibration_improved = float(ece_after_avg <= ece_before_avg)
+            self.log("val_ece_after", ece_after_avg, logger=True, add_dataloader_idx=False)
+            self.log("val_ece_before", ece_before_avg, logger=True, add_dataloader_idx=False)
+            self.log("val_mce_after", mce_after_avg, logger=True, add_dataloader_idx=False)
+            self.log("val_mce_before", mce_before_avg, logger=True, add_dataloader_idx=False)
+            self.log("val_calibration_improved", calibration_improved, logger=True, add_dataloader_idx=False)
+            self.log("coverage_directional", coverage_directional, logger=True, add_dataloader_idx=False)
+            self.log("net_edge_total", net_edge_total, logger=True, add_dataloader_idx=False)
+
+            if ece_after_avg > ece_before_avg:
+                print(f"[WARN] Calibration regressed: ece_after={ece_after_avg:.6f} > ece_before={ece_before_avg:.6f}")
+
             finalized = {
                 "epoch": int(self.current_epoch),
                 "metric_contract": self.hparams.get("metric_contract", "standard"),
                 "metric_log_prefix": self.hparams.get("metric_log_prefix", "val"),
                 "metric_directional_base": self.hparams.get("metric_directional_base", "predicted"),
+                "decision_rule": decision_rule,
+                "decision_rule_config": {
+                    "decision_confidence": float(self.hparams.get("decision_confidence", 0.5)),
+                    "decision_hold_threshold": float(self.hparams.get("decision_hold_threshold", 0.6)),
+                    "flat_prob_threshold": float(self.hparams.get("flat_prob_threshold", 0.34)),
+                    "up_prob_threshold": float(self.hparams.get("up_prob_threshold", 0.34)),
+                    "down_prob_threshold": float(self.hparams.get("down_prob_threshold", 0.34)),
+                    "margin_threshold": float(self.hparams.get("margin_threshold", 0.0)),
+                },
                 "quality": {
                     "val_loss": float(validation_payload["loss_cls"]),
                     "val_loss_cls": float(validation_payload["loss_cls"]),
@@ -609,19 +726,52 @@ class LiTModule(pl.LightningModule):
                     "val_mae_vol": float(validation_payload["mae_vol"]),
                     "val_vol_mse": float(np.mean((validation_payload["vol_true"] - validation_payload["vol_pred"])**2)),
                     "val_vol_mae": float(np.mean(np.abs(validation_payload["vol_true"] - validation_payload["vol_pred"]))),
-                    "val_mcc_primary": float(avg_mcc),
-                    "val_mcc_np": float(avg_mcc),
+                    "val_mcc_primary": float(primary_avg_mcc),
+                    "val_mcc_np": float(primary_avg_mcc),
                 },
-                "calibration": {},
-                "coverage": {},
-                "trade": {},
+                "calibration": {
+                    "val_ece": float(ece_after_avg),
+                    "val_mce": float(mce_after_avg),
+                    "val_ece_before": float(ece_before_avg),
+                    "val_mce_before": float(mce_before_avg),
+                    "val_ece_after": float(ece_after_avg),
+                    "val_mce_after": float(mce_after_avg),
+                    "temperature": temp_per_h,
+                },
+                "coverage": {
+                    "coverage_directional": float(coverage_directional),
+                },
+                "trade": {
+                    "net_edge_total": float(net_edge_total),
+                },
                 "class_metrics": {},
                 "regime_metrics": {},
+                "argmax_metrics": argmax_metrics,
+                "decision_rule_metrics": decision_metrics,
             }
             for h in range(self.num_horizons):
-                finalized["quality"][f"mcc_h{h}"] = float(metrics.get(f"mcc_h{h}", 0.0))
-                finalized["quality"][f"f1_h{h}"] = float(metrics.get(f"f1_h{h}", 0.0))
+                finalized["quality"][f"mcc_h{h}"] = float((decision_metrics if decision_rule != "argmax" else argmax_metrics).get(f"mcc_h{h}", 0.0))
+                finalized["quality"][f"f1_h{h}"] = float((decision_metrics if decision_rule != "argmax" else argmax_metrics).get(f"f1_h{h}", 0.0))
                 finalized["quality"][f"samples_h{h}"] = int(metrics.get(f"samples_h{h}", 0))
+
+            symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
+            base_path = Path(__file__).parent.parent.parent
+            calibration_dir = base_path / "artifacts" / symbol / "calibration"
+            calibration_dir.mkdir(parents=True, exist_ok=True)
+            scaler_path = calibration_dir / "temperature_scaler.json"
+            scaler_payload = {
+                "temperature": temp_per_h,
+                "ece_before": ece_before_list,
+                "mce_before": mce_before_list,
+                "ece_after": ece_after_list,
+                "mce_after": mce_after_list,
+                "ece_before_avg": ece_before_avg,
+                "ece_after_avg": ece_after_avg,
+                "mce_before_avg": mce_before_avg,
+                "mce_after_avg": mce_after_avg,
+                "epoch": int(self.current_epoch),
+            }
+            scaler_path.write_text(json.dumps(scaler_payload, indent=2), encoding="utf-8")
         else:
             y_true_tensor = torch.from_numpy(y_true).long()
             if not torch.isfinite(logits).all():
@@ -679,6 +829,10 @@ class LiTModule(pl.LightningModule):
                 "bin_data": bin_data_after,
                 "bin_data_before": bin_data_before,
             }
+            calibration_improved = float(ece_after <= ece_before)
+            self.log("val_calibration_improved", calibration_improved, logger=True, add_dataloader_idx=False)
+            if ece_after > ece_before:
+                print(f"[WARN] Calibration regressed: ece_after={ece_after:.6f} > ece_before={ece_before:.6f}")
             finalized = {
                 "epoch": int(self.current_epoch),
                 "metric_contract": self.hparams.get("metric_contract", "standard"),
