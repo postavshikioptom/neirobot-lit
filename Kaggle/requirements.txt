@@ -1,0 +1,53 @@
+# Data Engineering (Polars > Pandas)
+polars>=1.38.0
+pandas>=2.2.0
+pyarrow>=16.0.0
+numpy>=2.4.2
+numba>=0.61.0
+
+# Deep Learning & Training
+torch>=2.4.0
+pytorch-lightning>=2.2.0
+tensorboard>=2.16.0
+
+# Optimization & Analysis
+optuna>=3.6.0
+shap>=0.45.0
+scikit-learn>=1.5.0
+scipy>=1.17.0
+imbalanced-learn
+smote-variants
+torchmetrics
+# Hidden Markov Models для определения режимов рынка
+hmmlearn>=0.3.3
+# Задача 239: Конфигурация для ablation studies  
+hydra-core>=1.3.2
+
+# Export & Verification
+onnx>=1.16.0
+onnxruntime>=1.24.1
+onnx-simplifier
+onnxconverter-common>=1.14.0
+# Tensorrt работает только на NVIDIA GPU и даёт заметный прирост скорости
+tensorrt>=10.0.0
+
+# Utils & R&D
+tqdm>=4.66.0
+matplotlib>=3.10.8
+seaborn>=0.13.0
+# Задача 223: Интерактивные тепловые карты глубины стакана
+plotly>=6.2.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+jupyterlab>=4.2.0
+psutil>=6.0.0
+# TOML парсер для Python
+tomli>=2.0.0
+
+# Farm Management & TUI (Задача 229)
+# TUI framework для farm dashboard
+textual>=0.80.0
+# Async HTTP клиент для взаимодействия с ботами
+httpx>=0.27.0
+# CLI framework для farm_ctl команд
+click>=8.1.0

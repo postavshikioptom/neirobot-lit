@@ -1,0 +1,357 @@
+import polars as pl
+import json
+import math
+import numpy as np
+from pathlib import Path
+from typing import Union, Dict, List
+
+def symlog_transform(x):
+    """
+    Symmetric Log Transform: f(x) = sign(x) * log1p(abs(x)).
+    Сжимает динамический диапазон, сохраняя знак и структуру данных.
+    """
+    if isinstance(x, (np.ndarray, float, int)):
+        return np.sign(x) * np.log1p(np.abs(x))
+    else: # assume torch.Tensor
+        import torch
+        return torch.sign(x) * torch.log1p(torch.abs(x))
+
+class Normalizer:
+    """
+    Класс для расчета и применения параметров нормализации Z-score (mean, std).
+    Обеспечивает идентичность предобработки данных в Python (обучение) и Rust (инференс).
+    """
+    def __init__(self, output_path: Union[str, Path] = None, eps: float = 1e-6, scale_multiplier: float = 1.0):
+        """
+        Инициализация нормализатора.
+        :param output_path: Путь для сохранения/загрузки статистик (может быть None)
+        :param eps: Малое число для защиты от деления на ноль в IQR (Задача 310.2.2)
+        :param scale_multiplier: Множитель для расширения диапазона признаков (Задача 310.2.2)
+        """
+        # ИСПРАВЛЕНИЕ: Обработка None для временных расчетов в памяти
+        self.output_path = Path(output_path) if output_path is not None else None
+        self.params: Dict[str, Dict[str, float]] = {}
+        self.scaler_type = "zscore"
+        self.winsor_limits = None
+        # Задача 306.2.3: Сохраняем строгий порядок признаков
+        self.feature_order: List[str] = []
+        self.eps = eps
+        self.scale_multiplier = scale_multiplier
+        # Для динамических каналов (OFI, DeltaImb, DeltaSpread)
+        self.dynamic_params: Dict[str, Dict[str, float]] = {}
+
+    def fit(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], feature_names: List[str] = None, winsor_limits: List[float] = None, dynamic_data: dict = None) -> Dict[str, Dict[str, float]]:
+        """
+        Рассчитывает среднее, стандартное отклонение, медиану, IQR и границы винзоризации.
+        Поддерживает Polars DataFrame/LazyFrame и Numpy arrays.
+        """
+        import numpy as np
+        
+        self.winsor_limits = winsor_limits
+
+        if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
+            if isinstance(data, pl.LazyFrame):
+                data = data.collect()
+            
+            feat_cols = [c for c in data.columns if c.startswith("feat_")]
+            # Сохраняем порядок
+            self.feature_order = feat_cols
+            
+            # Эффективный расчет агрегатов через Polars
+            summary_exprs = [
+                pl.col(c).mean().alias(f"{c}_mean") for c in feat_cols
+            ] + [
+                pl.col(c).std().alias(f"{c}_std") for c in feat_cols
+            ] + [
+                pl.col(c).median().alias(f"{c}_median") for c in feat_cols
+            ] + [
+                pl.col(c).quantile(0.25).alias(f"{c}_q25") for c in feat_cols
+            ] + [
+                pl.col(c).quantile(0.75).alias(f"{c}_q75") for c in feat_cols
+            ]
+
+            if winsor_limits:
+                summary_exprs += [
+                    pl.col(c).quantile(winsor_limits[0]).alias(f"{c}_wlow") for c in feat_cols
+                ] + [
+                    pl.col(c).quantile(winsor_limits[1]).alias(f"{c}_whigh") for c in feat_cols
+                ]
+
+            summary = data.select(summary_exprs)
+            summary_dicts = summary.to_dicts()
+            
+            if not summary_dicts or len(summary_dicts) == 0:
+                print(f"[Normalizer] WARNING: No features matching '^feat_.*$' found in DataFrame. Statistics not updated.")
+                return self
+
+            results = summary_dicts[0] # Теперь здесь не упадет
+
+            for c in feat_cols:
+                q25 = results[f"{c}_q25"]
+                q75 = results[f"{c}_q75"]
+                
+                self.params[c] = {
+                    "mean": float(results[f"{c}_mean"]) if not math.isnan(results[f"{c}_mean"]) else 0.0,
+                    "std": float(results[f"{c}_std"]) if not (math.isnan(results[f"{c}_std"]) or results[f"{c}_std"] == 0) else 1.0,
+                    "median": float(results[f"{c}_median"]) if not math.isnan(results[f"{c}_median"]) else 0.0,
+                    "iqr": float(q75 - q25) if not math.isnan(q75 - q25) else 1.0
+                }
+                
+                if winsor_limits:
+                    self.params[c]["winsor_low"] = float(results[f"{c}_wlow"])
+                    self.params[c]["winsor_high"] = float(results[f"{c}_whigh"])
+        
+        elif isinstance(data, np.ndarray):
+            if feature_names is None:
+                raise ValueError("feature_names must be provided when fitting on a numpy array")
+            
+            if data.shape[1] != len(feature_names):
+                raise ValueError(f"Data shape {data.shape} mismatch with feature_names length {len(feature_names)}")
+            
+            # Сохраняем порядок
+            self.feature_order = feature_names
+            
+            means = np.mean(data, axis=0)
+            stds = np.std(data, axis=0)
+            medians = np.median(data, axis=0)
+            q25s = np.quantile(data, 0.25, axis=0)
+            q75s = np.quantile(data, 0.75, axis=0)
+            
+            wlows = np.quantile(data, winsor_limits[0], axis=0) if winsor_limits else None
+            whighs = np.quantile(data, winsor_limits[1], axis=0) if winsor_limits else None
+            
+            for i, name in enumerate(feature_names):
+                self.params[name] = {
+                    "mean": float(means[i]) if not math.isnan(means[i]) else 0.0,
+                    "std": float(stds[i]) if not (math.isnan(stds[i]) or stds[i] == 0) else 1.0,
+                    "median": float(medians[i]) if not math.isnan(medians[i]) else 0.0,
+                    "iqr": float(q75s[i] - q25s[i]) if not math.isnan(q75s[i] - q25s[i]) else 1.0
+                }
+                
+                if winsor_limits:
+                    self.params[name]["winsor_low"] = float(wlows[i])
+                    self.params[name]["winsor_high"] = float(whighs[i])
+
+        # Обработка динамических каналов (OFI, DeltaImb, DeltaSpread)
+        if dynamic_data is not None:
+            for name, arr in dynamic_data.items():
+                arr = np.asarray(arr)
+                median = float(np.median(arr))
+                # Задача 324.8 + 324.9: защищённый IQR с fallback на Q10-Q90 и проверкой против 0.35*alt_iqr
+                q10 = float(np.quantile(arr, 0.10))
+                q25 = float(np.quantile(arr, 0.25))
+                q75 = float(np.quantile(arr, 0.75))
+                q90 = float(np.quantile(arr, 0.90))
+                raw_iqr = float(q75 - q25)
+                alt_iqr = float(q90 - q10)
+                iqr_floor = 1e-3
+                # Задача 324.9: если raw_iqr слишком узкий (< max(iqr_floor, 0.35*alt_iqr)), используем alt_iqr
+                if not np.isfinite(raw_iqr):
+                    iqr = max(alt_iqr, iqr_floor)
+                elif raw_iqr < max(iqr_floor, 0.35 * alt_iqr):
+                    iqr = max(alt_iqr, iqr_floor)
+                else:
+                    iqr = max(raw_iqr, iqr_floor)
+                entry = {"median": median, "iqr": iqr}
+                # Задача 324.9: preclip границы 0.01/0.99 вместо 0.005/0.995
+                entry["preclip_low"] = float(np.quantile(arr, 0.01))
+                entry["preclip_high"] = float(np.quantile(arr, 0.99))
+                if winsor_limits:
+                    wlow = float(np.quantile(arr, winsor_limits[0]))
+                    whigh = float(np.quantile(arr, winsor_limits[1]))
+                    entry["winsor_low"] = wlow
+                    entry["winsor_high"] = whigh
+                self.dynamic_params[name] = entry
+
+        return self.params
+
+    def save(self, scaler_type: str = "zscore", winsor_limits: List[float] = None):
+        """Сохраняет параметры нормализации в JSON файл для последующего использования в Rust."""
+        if self.output_path is None:
+            return # Ничего не сохраняем, если путь не задан
+            
+        self.scaler_type = scaler_type
+        self.winsor_limits = winsor_limits
+        
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        save_data = {
+            "params": self.params,
+            "scaler_type": self.scaler_type,
+            "winsor_limits": self.winsor_limits,
+            "feature_order": self.feature_order,
+            "dynamic_params": self.dynamic_params
+        }
+        with open(self.output_path, 'w') as f:
+            json.dump(save_data, f, indent=4)
+        print(f"[{self.__class__.__name__}] Normalization params saved to {self.output_path} (Type: {self.scaler_type})")
+
+    def load(self):
+        """Загружает параметры из существующего JSON файла."""
+        if self.output_path is None or not self.output_path.exists():
+            return # Ничего не загружаем
+            
+        with open(self.output_path, 'r') as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "params" in data:
+                self.params = data["params"]
+                self.scaler_type = data.get("scaler_type", "zscore")
+                self.winsor_limits = data.get("winsor_limits")
+                self.feature_order = data.get("feature_order", [])
+                self.dynamic_params = data.get("dynamic_params", {})
+            else:
+                # Compatibility with old format
+                self.params = data
+                self.scaler_type = "zscore"
+                self.winsor_limits = None
+                self.feature_order = list(self.params.keys())
+                self.dynamic_params = {}
+                
+        print(f"[{self.__class__.__name__}] Normalization params loaded from {self.output_path} (Type: {self.scaler_type})")
+
+    def transform(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray]) -> Union[pl.DataFrame, pl.LazyFrame, np.ndarray]:
+        """
+        Применяет нормализацию в соответствии с scaler_type.
+        Приводит результат к Float32 для совместимости с ONNX/Rust.
+        Поддерживает Polars DataFrame/LazyFrame и Numpy arrays (2D и 3D).
+        """
+        if not self.params:
+            raise ValueError("Normalizer not fitted or loaded. Call fit() or load() first.")
+
+        # Задача 306: Отключаем винзоризацию, так как она «ослепляет» модель на мем-коинах
+        # (Удален блок if self.scaler_type == "winsor_robust")
+
+        if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
+            if self.scaler_type in ("robust", "winsor_robust"):
+                # Задача 306.3.4, 310.2.2: Безопасная проверка scale для Polars с добавлением eps
+                # Применяем scale_multiplier для "расширения" диапазона (Price Widening)
+                exprs = [
+                    ((pl.col(c) - self.params[c]["median"]) / 
+                     ((self.params[c]["iqr"] + self.eps) / self.scale_multiplier))
+                    .cast(pl.Float32)
+                    .alias(c)
+                    for c in self.params
+                ]
+            else:  # zscore
+                exprs = [
+                    ((pl.col(c) - self.params[c]["mean"]) / (self.params[c]["std"] + self.eps))
+                    .cast(pl.Float32)
+                    .alias(c)
+                    for c in self.params
+                ]
+            return data.with_columns(exprs)
+
+        elif isinstance(data, np.ndarray):
+            if data.shape[-1] != len(self.params):
+                raise ValueError(f"Data shape {data.shape} mismatch with params length {len(self.params)}")
+            
+            res = data.copy().astype(np.float32)
+            # Задача 306.2.3: Используем сохраненный порядок признаков
+            param_names = self.feature_order if self.feature_order else list(self.params.keys())
+
+            for i, name in enumerate(param_names):
+                p = self.params[name]
+                if self.scaler_type in ("robust", "winsor_robust"):
+                    center = p["median"]
+                    # Задача 306.3.4, 310.2.2: Безопасная проверка scale с eps и multiplier
+                    scale = (p["iqr"] + self.eps) / self.scale_multiplier
+                else:  # zscore
+                    center = p["mean"]
+                    scale = p["std"] + self.eps
+
+                if data.ndim == 2:
+                    res[:, i] = (data[:, i] - center) / scale
+                elif data.ndim == 3:
+                    res[:, :, i] = (data[:, :, i] - center) / scale
+                else:
+                    raise ValueError(f"Unsupported array dimension: {data.ndim}")
+
+            return res
+
+        else:
+            raise TypeError(f"Unsupported data type: {type(data)}")
+
+    def transform_dynamic(self, data, channel_name: str):
+        """
+        Применяет нормализацию к динамическому каналу (OFI, DeltaImb, DeltaSpread).
+        Использует параметры из dynamic_params (median, iqr).
+
+        Задача 324.9: для dynamic-каналов scale_multiplier НЕ применяется (в отличие от static robust).
+        """
+        if channel_name not in self.dynamic_params:
+            raise ValueError(f"Dynamic channel '{channel_name}' not fitted")
+        p = self.dynamic_params[channel_name]
+        median = p["median"]
+        iqr = p["iqr"]
+        if hasattr(data, '__module__') and data.__module__ == 'torch':
+            # torch.Tensor
+            import torch
+            median_t = torch.tensor(median, device=data.device, dtype=data.dtype)
+            iqr_t = torch.tensor(iqr, device=data.device, dtype=data.dtype)
+            # Задача 324.9: dynamic scale = iqr + eps (без scale_multiplier)
+            scale_t = iqr_t + self.eps
+            return (data - median_t) / scale_t
+        else:
+            # Задача 324.9: dynamic scale = iqr + eps (без scale_multiplier)
+            scale = iqr + self.eps
+            return (data - median) / scale
+
+    def winsorize(self, data: Union[pl.DataFrame, pl.LazyFrame, np.ndarray], limits: List[float]) -> Union[pl.DataFrame, pl.LazyFrame, np.ndarray]:
+        """
+        Применяет винзоризацию (клиппинг экстремальных значений).
+        """
+        if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
+            if isinstance(data, pl.LazyFrame):
+                data = data.collect()
+            
+            # Мы используем лимиты, вычисленные при fit, если они есть,
+            # но задача говорит использовать перцентили.
+            # В инференсе (Rust) мы будем использовать фиксированные значения (low/high),
+            # рассчитанные на этапе обучения.
+            
+            for c in self.params:
+                if "winsor_low" in self.params[c] and "winsor_high" in self.params[c]:
+                    data = data.with_columns(pl.col(c).clip(lower_bound=self.params[c]["winsor_low"], upper_bound=self.params[c]["winsor_high"]))
+                else:
+                    # Если параметров нет, вычисляем на лету (только для обучения)
+                    low = data[c].quantile(limits[0])
+                    high = data[c].quantile(limits[1])
+                    data = data.with_columns(pl.col(c).clip(lower_bound=low, upper_bound=high))
+            return data
+        
+        elif isinstance(data, np.ndarray):
+            # Для numpy аналогично
+            res = data.copy()
+            param_names = list(self.params.keys())
+            for i, name in enumerate(param_names):
+                if "winsor_low" in self.params[name] and "winsor_high" in self.params[name]:
+                    low = self.params[name]["winsor_low"]
+                    high = self.params[name]["winsor_high"]
+                else:
+                    low = np.quantile(data[..., i], limits[0])
+                    high = np.quantile(data[..., i], limits[1])
+                
+                res[..., i] = np.clip(data[..., i], low, high)
+            return res
+        
+        return data
+
+if __name__ == "__main__":
+    # Тестовый пример
+    test_df = pl.DataFrame({
+        "feat_price_0": [10.0, 20.0, 30.0],
+        "feat_vol_0": [100.0, 200.0, 300.0],
+        "other_col": [1, 2, 3]
+    })
+    
+    norm = Normalizer("norm_test.json")
+    params = norm.fit(test_df)
+    print("Fitted params:", params)
+    
+    transformed = norm.transform(test_df)
+    if isinstance(transformed, pl.DataFrame):
+        print("\nTransformed data (mean should be ~0, std ~1):")
+        print(transformed.select(["feat_price_0", "feat_vol_0"]))
+    
+    # Clean up test file
+    if Path("norm_test.json").exists():
+        Path("norm_test.json").unlink()

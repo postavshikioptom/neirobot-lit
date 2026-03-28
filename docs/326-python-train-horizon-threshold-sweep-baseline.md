@@ -75,7 +75,7 @@
 
 **Файлы:**
 - `python_lab/src/train_data.py`
-- `docs/baselines.md`
+- `python_lab/src/baselines.md`
 
 **Что добавить:**
 
@@ -85,7 +85,7 @@
 
 **Файлы:**
 - `python_lab/src/train_data.py`
-- `docs/baselines.md`
+- `python_lab/src/baselines.md`
 
 **Что добавить:**
 
@@ -129,7 +129,7 @@ subspread_target
 **Артефакты:**
 - `docs/sweep_baseline.csv`
 - `docs/sweep_baseline.json`
-- `docs/baselines.md` update
+- `python_lab/src/baselines.md` update
 
 ## Верификация
 

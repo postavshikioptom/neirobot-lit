@@ -1,0 +1,117 @@
+# Конфигурация для автоматизированных исследований абляции
+# Задача 239: Automated Ablation Studies
+
+# Группы признаков для тестирования
+feature_groups:
+  # Глубина стакана: первые 10 уровней (ask/bid price/volume)
+  lob_depth_shallow:
+    - feat_ask_p_0
+    - feat_ask_v_0
+    - feat_bid_p_0
+    - feat_bid_v_0
+    - feat_ask_p_1
+    - feat_ask_v_1
+    - feat_bid_p_1
+    - feat_bid_v_1
+    - feat_ask_p_2
+    - feat_ask_v_2
+    - feat_bid_p_2
+    - feat_bid_v_2
+    - feat_ask_p_3
+    - feat_ask_v_3
+    - feat_bid_p_3
+    - feat_bid_v_3
+    - feat_ask_p_4
+    - feat_ask_v_4
+    - feat_bid_p_4
+    - feat_bid_v_4
+    - feat_ask_p_5
+    - feat_ask_v_5
+    - feat_bid_p_5
+    - feat_bid_v_5
+    - feat_ask_p_6
+    - feat_ask_v_6
+    - feat_bid_p_6
+    - feat_bid_v_6
+    - feat_ask_p_7
+    - feat_ask_v_7
+    - feat_bid_p_7
+    - feat_bid_v_7
+    - feat_ask_p_8
+    - feat_ask_v_8
+    - feat_bid_p_8
+    - feat_bid_v_8
+    - feat_ask_p_9
+    - feat_ask_v_9
+    - feat_bid_p_9
+    - feat_bid_v_9
+  
+  # Глубокие уровни стакана: уровни 10-49
+  lob_depth_deep:
+    - feat_ask_p_10
+    - feat_ask_v_10
+    - feat_bid_p_10
+    - feat_bid_v_10
+    # ... (уровни 11-49 будут генерироваться программно)
+  
+  # Trade imbalance признаки (разные временные окна)
+  trade_imb:
+    - feat_imb_vol_1s
+    - feat_imb_vol_5s
+    - feat_imb_vol_15s
+    - feat_imb_vol_60s
+    - feat_imb_count_1s
+    - feat_imb_count_5s
+    - feat_imb_count_15s
+    - feat_imb_count_60s
+  
+  # Past returns (исторические доходности)
+  past_returns:
+    - feat_r_2
+    - feat_r_3
+    - feat_r_5
+    - feat_r_10
+
+# Варианты архитектуры для тестирования
+arch_variants:
+  # Количество голов внимания в Multi-Head Attention
+  heads: [2, 4, 8, 16]
+  
+  # Количество слоев Transformer
+  layers: [1, 2, 3, 4]
+  
+  # Размерность модели
+  d_model: [64, 128, 256]
+
+# Параметры обучения для экспериментов абляции
+training:
+  # Сокращенное количество эпох для быстрой оценки
+  epochs: 10
+  
+  # Batch size
+  batch_size: 256
+  
+  # Learning rate
+  lr: 1e-4
+  
+  # Early stopping patience
+  early_stopping_patience: 3
+  
+  # Использовать Optuna Pruning для ранней остановки
+  use_pruning: true
+
+# Параметры для SHAP анализа
+shap:
+  # Количество сэмплов для SHAP
+  n_samples: 1000
+  
+  # Использовать GradientExplainer
+  use_gradient: true
+
+# Параметры отчета
+report:
+  # Путь для сохранения отчета
+  output_path: "python_lab/reports/ablation_report.md"
+  
+  # Порог для определения "мертвого веса" (ΔMCC ≈ 0)
+  dead_weight_threshold: 0.01

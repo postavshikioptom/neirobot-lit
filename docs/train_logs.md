@@ -245,7 +245,7 @@ N/A
 ## Задача 326 | Baseline sweep
 
 - Артефакты baseline sweep теперь генерируются отдельным sweep-режимом в `python_lab/src/train.py`.
-- Ожидаемые выходы: `docs/sweep_baseline.csv`, `docs/sweep_baseline.json`, `docs/baselines.md`.
+- Ожидаемые выходы: `docs/sweep_baseline.csv`, `docs/sweep_baseline.json`, `python_lab/src/baselines.md`.
 - Sweep сохраняет relation threshold-to-spread и отдельный `dynamic_threshold_reference`.
 - Для shortlist top-k кандидатов sweep-режим пишет `mini_train_mcc`, `mini_train_coverage_directional`, `mini_train_net_edge_total`.
 
@@ -330,3 +330,22 @@ N/A
 - metrics contract: `metric_contract` + `metrics_contract_version`
 - label contract: `label_mode` + `label_contract_version`
 - split strategy: `split_strategy`
+
+## Задача 331 | Дата: 2026-03-28 | Эпох: 0 (ошибка на этапе labels)
+
+### Изменения (из docs/000-tasks_list.md):
+В train_cli.py добавить baseline profile lit_scalping_baseline и флаг freeze_experimental_features, который отключает multi-horizon, distillation и прочие legacy-ветки без удаления кода. В train.py и train_module.py ввести startup invariant checks для label contract, metrics contract, split_strategy, decision_rule и совместимости stable profile. Зафиксировать единое дерево артефактов и состояние pipeline в docs/train_logs.md и python_lab/src/baselines.md.
+
+### Использованные каналы (11):
+0: MicropriceDev, 1: Vol, 2: Imb, 3: OFI, 4: VIB, 5: Ret_10, 6: Ret_50, 7: Ret_100, 8: Spread, 9: DeltaImb, 10: DeltaSpread
+
+### Лучшие метрики:
+- MCC: N/A (epoch N/A)
+- Macro-F1: N/A (epoch N/A)
+- DA: N/A
+- Hit Rate Up: N/A
+
+### Критическая ошибка (labels/Polars):
+- Падение в labels.py при add_labels(): polars.exceptions.ColumnNotFoundError: "_keep_mask" not found
+- Место: labels.py -> add_labels() -> .drop("_keep_mask", "_row_idx")
+- Обучение не стартовало (остановка до Epoch 0).

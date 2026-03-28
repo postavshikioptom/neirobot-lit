@@ -91,7 +91,7 @@
 
 **Файлы:**
 - `python_lab/src/train.py`
-- `docs/baselines.md`
+- `python_lab/src/baselines.md`
 
 **Структура:**
 - `artifacts/<symbol>/labels`
@@ -104,7 +104,7 @@
 
 **Файлы:**
 - `docs/train_logs.md`
-- `docs/baselines.md`
+- `python_lab/src/baselines.md`
 
 **Что фиксировать:**
 - какой profile активен

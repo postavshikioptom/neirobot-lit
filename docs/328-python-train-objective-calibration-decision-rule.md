@@ -122,7 +122,7 @@ fit_temperature_scaler(logits_val, y_val)
 
 **Файлы:**
 - `python_lab/src/train.py`
-- `docs/baselines.md`
+- `python_lab/src/baselines.md`
 
 **Артефакт:**
 
