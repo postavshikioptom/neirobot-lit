@@ -524,12 +524,14 @@ def calculate_ece(probs, labels, bins=15):
     return ece.item()
 
 
-def apply_temperature_scaling(logits, temperature):
+def apply_temperature_scaling(logits, temperature, *, detach_temp: bool = True):
     """Apply temperature scaling to logits."""
     if isinstance(temperature, torch.Tensor):
-        temp = temperature.detach().float()
+        temp = temperature.float()
+        if detach_temp:
+            temp = temp.detach()
     else:
-        temp = torch.tensor(float(temperature))
+        temp = torch.tensor(float(temperature), device=logits.device)
     temp = torch.clamp(temp, min=1e-6)
     return logits / temp
 
@@ -547,13 +549,20 @@ def fit_temperature_scaler(logits_val, y_val, max_iter=50, lr=0.01, init_tempera
     nll_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.LBFGS([temperature], lr=lr, max_iter=max_iter)
 
+    with torch.enable_grad():
+        probe_loss = nll_criterion(apply_temperature_scaling(logits, temperature, detach_temp=False), labels)
+    if not probe_loss.requires_grad:
+        print("[WARN] Temperature scaling skipped: loss.requires_grad=False (no_grad context or detached temp).")
+        return float(init_temperature)
+
     def _closure():
         optimizer.zero_grad()
-        loss = nll_criterion(apply_temperature_scaling(logits, temperature), labels)
+        loss = nll_criterion(apply_temperature_scaling(logits, temperature, detach_temp=False), labels)
         loss.backward()
         return loss
 
-    optimizer.step(_closure)
+    with torch.enable_grad():
+        optimizer.step(_closure)
     temp_value = float(torch.clamp(temperature.detach(), min=1e-6).cpu().item())
     return temp_value
 

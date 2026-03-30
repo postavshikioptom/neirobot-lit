@@ -16,6 +16,7 @@ from .train_cli import (
     APPROVED_LABEL_CONTRACT_VERSION,
     APPROVED_METRICS_CONTRACT_VERSION,
     BASELINE_PROFILE,
+    TASK332_PROFILE,
     parse_train_args,
     parse_winsor_limits,
     resolve_horizon_config,
@@ -98,6 +99,10 @@ def _validate_startup_invariants(args, *, num_horizons: int):
         raise ValueError(
             "Stable baseline profile forbids multi-horizon configuration."
         )
+    if args.profile == TASK332_PROFILE and args.decision_rule == "argmax":
+        raise ValueError(
+            "task332_execution_recalibration requires non-argmax decision_rule for ablation contract."
+        )
     _validate_decision_rule_calibration_compatibility(args)
 
 
@@ -118,6 +123,7 @@ def _build_pipeline_state(args, *, num_horizons: int) -> dict:
         "split_strategy": args.split_strategy,
         "decision_rule": args.decision_rule,
         "num_horizons": int(num_horizons),
+        "quality_gate_enabled": bool(getattr(args, "quality_gate_enabled", False)),
     }
 
 
@@ -166,6 +172,83 @@ def _append_pipeline_state_docs(base_path: Path, state: dict):
         baselines_path.write_text(updated, encoding="utf-8")
     else:
         baselines_path.write_text(existing.rstrip() + "\n" + block, encoding="utf-8")
+
+
+def _append_task332_baseline_control_point(base_path: Path):
+    header = "## Задача 332 | Baseline контрольная точка (из 331)"
+    block = "\n".join(
+        [
+            "",
+            header,
+            "",
+            "- baseline_source: `docs/train_logs.md` entry `Задача 331 | Дата: 2026-03-30 | Эпох: 10`",
+            "- val_mcc_primary: `0.0110` (best epoch 1)",
+            "- macro_f1: `0.3239` (epoch 10)",
+            "- coverage_directional: `0.5029` (epoch 10)",
+            "- da_without_flat: `0.1720`",
+            "- net_edge_total: `~0`",
+        ]
+    ) + "\n"
+
+    for target in (base_path / "docs" / "train_logs.md", Path(__file__).parent / "baselines.md"):
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        if header not in existing:
+            target.write_text(existing.rstrip() + "\n" + block, encoding="utf-8")
+
+
+def _extract_callback_metric(trainer, name: str) -> float | None:
+    value = trainer.callback_metrics.get(name)
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
+def _build_quality_gate_status(trainer, args) -> dict:
+    mcc = _extract_callback_metric(trainer, "val_mcc_primary")
+    coverage = _extract_callback_metric(trainer, "coverage_directional")
+    net_edge = _extract_callback_metric(trainer, "net_edge_total")
+    f1_macro = _extract_callback_metric(trainer, "val_f1_macro_np")
+    da_without_flat = _extract_callback_metric(trainer, "val_da_without_flat")
+    passed_metric = _extract_callback_metric(trainer, "quality_gate_passed")
+    passed = bool(passed_metric >= 0.5) if passed_metric is not None else True
+    status = {
+        "enabled": bool(getattr(args, "quality_gate_enabled", False)),
+        "passed": passed,
+        "val_mcc_primary": mcc,
+        "val_f1_macro_np": f1_macro,
+        "coverage_directional": coverage,
+        "val_da_without_flat": da_without_flat,
+        "net_edge_total": net_edge,
+        "decision_rule": args.decision_rule,
+        "effective_threshold": getattr(args, "threshold", 0.0005),
+    }
+    return status
+
+
+def _append_task332_run_report(base_path: Path, args, prepared, quality_gate_status: dict):
+    if args.profile != TASK332_PROFILE:
+        return
+    effective_summary = prepared.effective_threshold_summary or {}
+    gate_state = "pass" if quality_gate_status.get("passed", True) else "fail"
+    report_lines = [
+        "",
+        f"## Задача 332 | Run report | profile={args.profile}",
+        "",
+        f"- decision_rule: `{args.decision_rule}`",
+        f"- effective_threshold: `{effective_summary if effective_summary else {'static_threshold': float(args.threshold)}}`",
+        f"- val_mcc_primary: `{quality_gate_status.get('val_mcc_primary')}`",
+        f"- macro_f1: `{quality_gate_status.get('val_f1_macro_np')}`",
+        f"- coverage_directional: `{quality_gate_status.get('coverage_directional')}`",
+        f"- da_without_flat: `{quality_gate_status.get('val_da_without_flat')}`",
+        f"- net_edge_total: `{quality_gate_status.get('net_edge_total')}`",
+        f"- quality_gate: `{gate_state}`",
+    ]
+    block = "\n".join(report_lines) + "\n"
+    for target in (base_path / "docs" / "train_logs.md", Path(__file__).parent / "baselines.md"):
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(block)
 
 
 def _save_labels_artifacts(prepared, args, base_path: Path):
@@ -301,8 +384,19 @@ def _sanity_check_prepared(prepared, args):
     try:
         batch = next(iter(prepared.train_loader))
         x_check = batch[0]
+        y_check = batch[1]
         if not torch.isfinite(x_check).all():
             raise ValueError("NaN or Inf detected in input features before training!")
+        label_cols = list(getattr(prepared, "label_columns", []) or [])
+        print(
+            f"[SANITY] y shape={tuple(y_check.shape)}, dtype={y_check.dtype}, "
+            f"label_cols={label_cols}, num_horizons={prepared.num_horizons}"
+        )
+        if prepared.num_horizons == 1 and y_check.ndim > 1:
+            raise ValueError(
+                f"Single-horizon expects y shape [B], got {tuple(y_check.shape)}. "
+                "Check --horizon/--horizons and label column generation."
+            )
         print(f"Sanity check passed. Input shape: {x_check.shape}, range: [{x_check.min():.4f}, {x_check.max():.4f}]")
     except Exception as exc:
         print(f"Sanity check failed: {exc}")
@@ -348,6 +442,7 @@ def _fit_model(
     model.hparams.enable_channel_attribution = args.enable_channel_attribution
     model.hparams.channel_attribution_samples = args.channel_attribution_samples
     model.hparams.channel_attribution_method = args.channel_attribution_method
+    model.hparams.effective_threshold_summary = dict(getattr(prepared, "effective_threshold_summary", {}) or {})
 
     _sanity_check_prepared(prepared, args)
     print("Starting training...")
@@ -553,6 +648,7 @@ def _run_sweep_mode(args, paths, winsor_limits):
         horizons=horizons,
         thresholds=thresholds,
         use_event_rows=args.sweep_use_event_rows,
+        args=args,
     )
     artifacts.symbol = args.symbol
     artifacts.horizons = list(horizons)
@@ -656,6 +752,8 @@ def train():
     _ensure_artifact_tree(paths.base_path, args.symbol)
     pipeline_state = _build_pipeline_state(args, num_horizons=num_horizons)
     _append_pipeline_state_docs(paths.base_path, pipeline_state)
+    if args.profile == TASK332_PROFILE:
+        _append_task332_baseline_control_point(paths.base_path)
     warn_if_dataset_may_exceed_ram(paths, args.symbol, args.seq_len)
 
     if is_sweep_mode(args):
@@ -692,6 +790,16 @@ def train():
         patience=15,
         save_top_k=3,
     )
+    quality_gate_status = _build_quality_gate_status(trainer, args)
+    _append_task332_run_report(paths.base_path, args, prepared, quality_gate_status)
+    if bool(getattr(args, "quality_gate_fail_run", False)) and bool(getattr(args, "quality_gate_enabled", False)):
+        if not quality_gate_status.get("passed", True):
+            raise RuntimeError(
+                "Quality-gate failed for this run: "
+                f"mcc={quality_gate_status.get('val_mcc_primary')}, "
+                f"coverage={quality_gate_status.get('coverage_directional')}, "
+                f"net_edge={quality_gate_status.get('net_edge_total')}"
+            )
     ablation_metrics = _extract_objective_ablation_metrics(trainer)
     _append_objective_ablation_row(paths.base_path, args, ablation_metrics)
 
@@ -740,4 +848,3 @@ def train():
 
 if __name__ == "__main__":
     train()
-

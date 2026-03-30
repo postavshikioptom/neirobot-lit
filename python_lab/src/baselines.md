@@ -50,3 +50,25 @@ Objective ablation сохраняется в `objective_ablation.csv` в кор�
 - `metrics_contract` и `metrics_contract_version`
 - `label_contract_mode` и `label_contract_version`
 - `split_strategy`
+
+## Task 332 Execution Recalibration
+
+- Baseline control point (from task 331): `val_mcc_primary=0.0110`, `macro_f1=0.3239`, `coverage_directional=0.5029`, `da_without_flat=0.1720`, `net_edge_total~0`.
+- Label contract: `label_mode=execution_mid_return`, `use_spread_floor=true`, non-zero `cost_floor_bps/fee_bps/slippage_bps`.
+- Decision-rule ablation (same model, no architecture change): `argmax`, `confidence_gap`, `class_specific_thresholds`, `flat_bias`.
+- Narrow threshold sweep: local band around current `--threshold` (no broad research grid).
+- Quality-gate (run acceptable only if all true): MCC growth, non-zero/min coverage, non-negative net edge.
+- Report fields per run: `val_mcc_primary`, `val_f1_macro_np`, `coverage_directional`, `val_da_without_flat`, `net_edge_total`, `decision_rule`, `effective_threshold`, `quality_gate.passed`.
+
+### Production-safe flags (332)
+
+```bash
+python -m python_lab.src.train \
+  --profile task332_execution_recalibration \
+  --decision_rule flat_bias \
+  --decision_rule_ablation \
+  --quality_gate_enabled \
+  --quality_gate_min_coverage_directional 0.18 \
+  --quality_gate_require_non_negative_net_edge \
+  --quality_gate_require_mcc_growth
+```

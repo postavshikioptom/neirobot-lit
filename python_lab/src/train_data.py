@@ -101,6 +101,7 @@ class PreparedTrainingData:
     label_columns: list[str] = field(default_factory=list)
     class_weight_metadata: dict = field(default_factory=dict)
     split_artifacts: dict = field(default_factory=dict)
+    effective_threshold_summary: dict = field(default_factory=dict)
 
 
 def _parse_past_returns_lags(raw: str) -> list:
@@ -123,10 +124,27 @@ def parse_float_sweep(raw_value: str | None, default_values: list[float]) -> lis
 
 
 def resolve_sweep_grid(args) -> tuple[list[int], list[float]]:
-    return (
-        parse_int_sweep(getattr(args, "horizon_sweep", None), DEFAULT_SWEEP_HORIZONS),
-        parse_float_sweep(getattr(args, "threshold_sweep", None), DEFAULT_SWEEP_THRESHOLDS),
-    )
+    horizons = parse_int_sweep(getattr(args, "horizon_sweep", None), DEFAULT_SWEEP_HORIZONS)
+    thresholds = parse_float_sweep(getattr(args, "threshold_sweep", None), DEFAULT_SWEEP_THRESHOLDS)
+    if bool(getattr(args, "narrow_threshold_sweep", False)):
+        thresholds = build_narrow_threshold_candidates(
+            center=float(getattr(args, "threshold", 0.0005)),
+            span=float(getattr(args, "threshold_sweep_span", 0.0002)),
+            step=float(getattr(args, "threshold_sweep_step", 0.0001)),
+        )
+    return horizons, thresholds
+
+
+def build_narrow_threshold_candidates(*, center: float, span: float, step: float) -> list[float]:
+    """Build local threshold candidates around center to avoid broad search."""
+    if span <= 0.0:
+        return [float(center)]
+    half_span = span / 2.0
+    left = max(0.0, center - half_span)
+    right = max(left, center + half_span)
+    values = np.arange(left, right + (0.5 * step), step, dtype=np.float64)
+    candidates = sorted({float(np.round(item, 8)) for item in values if item >= 0.0})
+    return candidates or [float(center)]
 
 
 def is_sweep_mode(args) -> bool:
@@ -200,6 +218,22 @@ def _label_contract_from_args(args) -> dict:
         "fee_bps": float(getattr(args, "fee_bps", 0.0)),
         "slippage_bps": float(getattr(args, "slippage_bps", 0.0)),
         "use_spread_floor": bool(getattr(args, "use_spread_floor", False)),
+        "effective_threshold_summary": _effective_threshold_summary_from_args(args),
+    }
+
+
+def _effective_threshold_summary_from_args(args) -> dict:
+    static_threshold = float(getattr(args, "threshold", 0.0005))
+    cost_floor_effective = (
+        float(getattr(args, "cost_floor_bps", 0.0))
+        + 2.0 * float(getattr(args, "fee_bps", 0.0))
+        + float(getattr(args, "slippage_bps", 0.0))
+    ) / 10000.0
+    return {
+        "static_threshold": static_threshold,
+        "cost_floor_effective": cost_floor_effective,
+        "effective_floor_without_spread": max(static_threshold, cost_floor_effective),
+        "use_spread_floor": bool(getattr(args, "use_spread_floor", False)),
     }
 
 
@@ -253,7 +287,7 @@ def _median_spread_bps(df: pl.DataFrame) -> float:
 
 
 def collect_sweep_baseline(feature_df: pl.DataFrame, *, horizons: list[int], thresholds: list[float],
-                           use_event_rows: bool = False) -> SweepBaselineArtifacts:
+                           use_event_rows: bool = False, args=None) -> SweepBaselineArtifacts:
     """Collect reproducible baseline grid for horizon x threshold."""
     working_df = select_event_rows(feature_df) if use_event_rows else feature_df
     event_df = select_event_rows(feature_df)
@@ -264,7 +298,7 @@ def collect_sweep_baseline(feature_df: pl.DataFrame, *, horizons: list[int], thr
     grid: list[SweepBaselineRow] = []
     for horizon in horizons:
         for threshold in thresholds:
-            labeled_df = build_labeled_frame(working_df, horizon=horizon, threshold=threshold)
+            labeled_df = build_labeled_frame(working_df, horizon=horizon, threshold=threshold, args=args)
             share_flat, share_up, share_down, sample_count = _extract_label_shares(labeled_df)
             threshold_bps = float(threshold * 10000.0)
             ratio = float(threshold_bps / median_spread_bps) if median_spread_bps > 0 else 0.0
@@ -1432,6 +1466,42 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
         dynamic_threshold=args.dynamic_threshold,
         args=args,
     )
+    effective_threshold_summary = {}
+    if "effective_threshold" in df.columns and df.height > 0:
+        stats_row = df.select(
+            [
+                pl.col("effective_threshold").mean().alias("mean"),
+                pl.col("effective_threshold").median().alias("p50"),
+                pl.col("effective_threshold").quantile(0.95).alias("p95"),
+                pl.col("effective_threshold").min().alias("min"),
+                pl.col("effective_threshold").max().alias("max"),
+            ]
+        ).row(0)
+        effective_threshold_summary = {
+            "mean": float(stats_row[0]),
+            "p50": float(stats_row[1]),
+            "p95": float(stats_row[2]),
+            "min": float(stats_row[3]),
+            "max": float(stats_row[4]),
+        }
+        print(
+            "[LABEL] effective_threshold summary: "
+            f"p50={effective_threshold_summary['p50']:.6f}, "
+            f"p95={effective_threshold_summary['p95']:.6f}, "
+            f"min={effective_threshold_summary['min']:.6f}, "
+            f"max={effective_threshold_summary['max']:.6f}"
+        )
+    if num_horizons == 1:
+        label_h_cols = [c for c in df.columns if c.startswith("label_h")]
+        if "label" not in df.columns and label_h_cols:
+            if len(label_h_cols) == 1:
+                print("[WARN] Single-horizon run produced label_h* column; renaming to label.")
+                df = df.with_columns(pl.col(label_h_cols[0]).alias("label")).drop(label_h_cols[0])
+            else:
+                raise ValueError(
+                    "Single-horizon run got multiple label_h* columns. "
+                    "Expected exactly one label or label_h* column."
+                )
     label_cols = [c for c in df.columns if c == "label" or c.startswith("label_h")]
     y_len = df.height if label_cols else None
     timestamps_len = df.height if "timestamp_ms" in df.columns else None
@@ -1574,4 +1644,5 @@ def prepare_training_data(args, paths, winsor_limits, horizons, num_horizons, ho
         label_columns=label_columns,
         class_weight_metadata=class_weight_metadata,
         split_artifacts=split_artifacts,
+        effective_threshold_summary=effective_threshold_summary,
     )

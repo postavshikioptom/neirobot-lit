@@ -5,6 +5,7 @@ Extracted from train.py during task 322.2.
 import argparse
 
 BASELINE_PROFILE = "lit_scalping_baseline"
+TASK332_PROFILE = "task332_execution_recalibration"
 PROFILE_NONE = "none"
 APPROVED_LABEL_CONTRACT_VERSION = "label_contract_v2"
 APPROVED_METRICS_CONTRACT_VERSION = "metrics_contract_v2"
@@ -18,6 +19,33 @@ PROFILE_OVERRIDES = {
         "split_strategy": "purged_holdout",
         "loss_type": "focal",
         "decision_rule": "argmax",
+        "enable_channel_attribution": False,
+    },
+    TASK332_PROFILE: {
+        "horizons": "100",
+        "freeze_experimental_features": True,
+        "use_horizon_embedding": False,
+        "label_mode": "execution_mid_return",
+        "split_strategy": "purged_holdout",
+        "loss_type": "focal",
+        "decision_rule": "flat_bias",
+        "decision_hold_threshold": 0.62,
+        "margin_threshold": 0.02,
+        "cost_floor_bps": 1.0,
+        "fee_bps": 0.5,
+        "slippage_bps": 0.5,
+        "use_spread_floor": True,
+        "report_fee_bps": 0.5,
+        "report_slippage_bps": 0.5,
+        "report_half_spread_bps": 0.5,
+        "narrow_threshold_sweep": True,
+        "threshold_sweep_span": 0.0002,
+        "threshold_sweep_step": 0.0001,
+        "sweep_train_topk": 2,
+        "decision_rule_ablation": True,
+        "quality_gate_enabled": True,
+        "quality_gate_min_coverage_directional": 0.18,
+        "quality_gate_fail_run": False,
         "enable_channel_attribution": False,
     }
 }
@@ -64,8 +92,8 @@ def build_train_parser() -> argparse.ArgumentParser:
     experimental_group = parser.add_argument_group("experimental")
     deprecated_group = parser.add_argument_group("deprecated")
 
-    stable_group.add_argument("--profile", type=str, default=PROFILE_NONE, choices=[PROFILE_NONE, BASELINE_PROFILE],
-                              help="Training profile. lit_scalping_baseline forces stable production contract.")
+    stable_group.add_argument("--profile", type=str, default=PROFILE_NONE, choices=[PROFILE_NONE, BASELINE_PROFILE, TASK332_PROFILE],
+                              help="Training profile. lit_scalping_baseline and task332_execution_recalibration force stable contract presets.")
     stable_group.add_argument("--freeze_experimental_features", action=argparse.BooleanOptionalAction, default=True,
                               help="Freeze multi-horizon/distillation/legacy branches.")
 
@@ -113,6 +141,12 @@ def build_train_parser() -> argparse.ArgumentParser:
                                     help="Comma-separated sweep horizons (e.g. '10,20,50,100')")
     experimental_group.add_argument("--threshold_sweep", type=str, default=None,
                                     help="Comma-separated sweep thresholds (e.g. '0.0001,0.0005,0.0015')")
+    experimental_group.add_argument("--narrow_threshold_sweep", action=argparse.BooleanOptionalAction, default=False,
+                                    help="Restrict threshold sweep to a narrow local band around --threshold")
+    experimental_group.add_argument("--threshold_sweep_span", type=float, default=0.0002,
+                                    help="Total span for narrow threshold sweep around --threshold")
+    experimental_group.add_argument("--threshold_sweep_step", type=float, default=0.0001,
+                                    help="Step for narrow threshold sweep candidates")
     experimental_group.add_argument("--sweep_baseline_path", type=str, default=None,
                                     help="Base path for sweep artifacts without extension")
     experimental_group.add_argument("--sweep_use_event_rows", action=argparse.BooleanOptionalAction, default=False,
@@ -147,6 +181,11 @@ def build_train_parser() -> argparse.ArgumentParser:
     stable_group.add_argument("--decision_rule", type=str, default="argmax",
                               choices=["argmax", "confidence_gap", "class_specific_thresholds", "flat_bias"],
                               help="Decision rule applied over calibrated probabilities")
+    stable_group.add_argument("--decision_rule_ablation", action=argparse.BooleanOptionalAction, default=False,
+                              help="Evaluate all decision rules on validation without changing model architecture")
+    stable_group.add_argument("--decision_rule_ablation_rules", type=str,
+                              default="argmax,confidence_gap,class_specific_thresholds,flat_bias",
+                              help="Comma-separated rules for decision-rule ablation")
     stable_group.add_argument("--decision_confidence", type=float, default=0.5,
                               help="Minimum max-probability to accept directional trade")
     stable_group.add_argument("--decision_hold_threshold", type=float, default=0.6,
@@ -165,6 +204,16 @@ def build_train_parser() -> argparse.ArgumentParser:
                               help="Slippage in bps used for cost-aware validation edge reporting")
     stable_group.add_argument("--report_half_spread_bps", type=float, default=0.0,
                               help="Half-spread in bps used for cost-aware validation edge reporting")
+    stable_group.add_argument("--quality_gate_enabled", action=argparse.BooleanOptionalAction, default=False,
+                              help="Enable run/epoch quality-gate checks for directional metrics")
+    stable_group.add_argument("--quality_gate_min_coverage_directional", type=float, default=0.0,
+                              help="Minimum acceptable coverage_directional for quality-gate")
+    stable_group.add_argument("--quality_gate_require_non_negative_net_edge", action=argparse.BooleanOptionalAction, default=True,
+                              help="Require net_edge_total >= 0 for quality-gate")
+    stable_group.add_argument("--quality_gate_require_mcc_growth", action=argparse.BooleanOptionalAction, default=True,
+                              help="Require val_mcc_primary growth versus previous epoch for quality-gate")
+    stable_group.add_argument("--quality_gate_fail_run", action=argparse.BooleanOptionalAction, default=False,
+                              help="Raise RuntimeError when run-level quality-gate fails")
 
     stable_group.add_argument("--past_returns_lags", type=str, default="10,50,100", help="Comma-separated list of lags for past returns")
     stable_group.add_argument("--activation", type=str, default="gelu_exact", choices=["relu", "gelu_exact", "gelu_tanh", "silu"], help="Activation function type")
@@ -320,6 +369,21 @@ def parse_train_args(argv=None):
     _validate_prob("up_prob_threshold", args.up_prob_threshold)
     _validate_prob("down_prob_threshold", args.down_prob_threshold)
     _validate_prob("margin_threshold", args.margin_threshold)
+    if args.quality_gate_min_coverage_directional < 0.0 or args.quality_gate_min_coverage_directional > 1.0:
+        raise ValueError(
+            "--quality_gate_min_coverage_directional must be in [0.0, 1.0], "
+            f"got {args.quality_gate_min_coverage_directional}"
+        )
+    if args.threshold_sweep_span < 0.0:
+        raise ValueError("--threshold_sweep_span must be >= 0.0")
+    if args.threshold_sweep_step <= 0.0:
+        raise ValueError("--threshold_sweep_step must be > 0.0")
+    ablation_rules = [item.strip() for item in args.decision_rule_ablation_rules.split(",") if item.strip()]
+    allowed_rules = {"argmax", "confidence_gap", "class_specific_thresholds", "flat_bias"}
+    invalid_rules = sorted(set(ablation_rules) - allowed_rules)
+    if invalid_rules:
+        raise ValueError(f"--decision_rule_ablation_rules contains unsupported rules: {invalid_rules}")
+    args.decision_rule_ablation_rules = ",".join(ablation_rules)
     if args.embargo_seconds < 0:
         raise ValueError("--embargo_seconds must be >= 0")
     if args.purge_buffer_events < 0:
@@ -354,14 +418,24 @@ def resolve_horizon_config(args):
     Return (horizons_obj, num_horizons, horizon_weights_list_or_None).
     """
     if args.horizons is not None:
-        horizons = [int(x.strip()) for x in args.horizons.split(",")]
-        num_horizons = len(horizons)
-        if args.horizon_weights is not None:
-            horizon_weights = [float(x.strip()) for x in args.horizon_weights.split(",")]
-            if len(horizon_weights) != num_horizons:
-                raise ValueError(f"horizon_weights length ({len(horizon_weights)}) must match horizons length ({num_horizons})")
-        else:
+        horizons_list = [int(x.strip()) for x in args.horizons.split(",") if x.strip()]
+        if not horizons_list:
+            raise ValueError("--horizons provided but no valid horizon values parsed.")
+        if len(horizons_list) == 1:
+            horizons = horizons_list[0]
+            num_horizons = 1
+            if args.horizon_weights is not None:
+                print("[WARN] --horizon_weights ignored for single-horizon run.")
             horizon_weights = None
+        else:
+            horizons = horizons_list
+            num_horizons = len(horizons)
+            if args.horizon_weights is not None:
+                horizon_weights = [float(x.strip()) for x in args.horizon_weights.split(",")]
+                if len(horizon_weights) != num_horizons:
+                    raise ValueError(f"horizon_weights length ({len(horizon_weights)}) must match horizons length ({num_horizons})")
+            else:
+                horizon_weights = None
     else:
         horizons = args.horizon
         num_horizons = 1

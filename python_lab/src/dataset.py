@@ -1892,6 +1892,14 @@ class LOBDataset(Dataset):
         }
         
         target = torch.tensor(y).long()
+        if not self.is_multi_horizon:
+            if target.numel() == 1:
+                target = target.view(())
+            else:
+                raise ValueError(
+                    f"Single-horizon target must be scalar, got shape {tuple(target.shape)} at idx={idx}."
+                )
+
 
         # ЗАЩИТА: Валидация target (должен быть в [0, 2])
         if (target < 0).any() or (target > 2).any():

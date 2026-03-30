@@ -284,6 +284,7 @@ class LiTModule(pl.LightningModule):
         self.calibration_metrics = CalibrationMetrics(n_bins=15)
         self.class_weight_metadata = class_weight_metadata
         self.model_label_columns = model_label_columns
+        self._prev_val_mcc_primary: float | None = None
 
     def forward(self, x, regime_id=None):
         return self.model(x, regime_id=regime_id)
@@ -308,6 +309,98 @@ class LiTModule(pl.LightningModule):
             delattr(self, 'activation_hooks')
         epoch_time = time.time() - self.epoch_start_time if hasattr(self, 'epoch_start_time') else 0
         epoch_time_str = f"{int(epoch_time // 60)}m {int(epoch_time % 60)}s"  # noqa: F841
+
+    def _parse_decision_rule_ablation_rules(self) -> list[str]:
+        raw_rules = str(self.hparams.get("decision_rule_ablation_rules", "argmax,confidence_gap,class_specific_thresholds,flat_bias"))
+        allowed = ["argmax", "confidence_gap", "class_specific_thresholds", "flat_bias"]
+        parsed = [item.strip() for item in raw_rules.split(",") if item.strip()]
+        filtered = [item for item in parsed if item in allowed]
+        if "argmax" not in filtered:
+            filtered.insert(0, "argmax")
+        # preserve order + uniqueness
+        ordered = []
+        seen = set()
+        for item in filtered:
+            if item not in seen:
+                ordered.append(item)
+                seen.add(item)
+        return ordered
+
+    def _compact_rule_metrics(self, metrics_payload: dict[str, Any]) -> dict[str, float]:
+        quality = metrics_payload.get("quality", {})
+        coverage = metrics_payload.get("coverage", {})
+        trade = metrics_payload.get("trade", {})
+        return {
+            "val_mcc_primary": float(quality.get("val_mcc_primary", 0.0)),
+            "val_f1_macro_np": float(quality.get("val_f1_macro_np", 0.0)),
+            "coverage_directional": float(coverage.get("coverage_directional", 0.0)),
+            "val_da_without_flat": float(trade.get("val_da_without_flat", 0.0)),
+            "net_edge_total": float(trade.get("net_edge_total", 0.0)),
+        }
+
+    def _resolve_effective_threshold_summary(self) -> dict[str, Any]:
+        summary = dict(self.hparams.get("effective_threshold_summary", {}) or {})
+        if summary:
+            return summary
+        static_threshold = float(self.hparams.get("threshold", 0.0005))
+        cost_floor_effective = (
+            float(self.hparams.get("cost_floor_bps", 0.0))
+            + 2.0 * float(self.hparams.get("fee_bps", 0.0))
+            + float(self.hparams.get("slippage_bps", 0.0))
+        ) / 10000.0
+        return {
+            "static_threshold": static_threshold,
+            "cost_floor_effective": cost_floor_effective,
+            "effective_floor_without_spread": max(static_threshold, cost_floor_effective),
+            "use_spread_floor": bool(self.hparams.get("use_spread_floor", False)),
+        }
+
+    def _apply_quality_gate(self, finalized: dict[str, Any]) -> dict[str, Any]:
+        enabled = bool(self.hparams.get("quality_gate_enabled", False))
+        current_mcc = float(finalized.get("quality", {}).get("val_mcc_primary", 0.0))
+        coverage_directional = float(finalized.get("coverage", {}).get("coverage_directional", 0.0))
+        net_edge_total = float(finalized.get("trade", {}).get("net_edge_total", 0.0))
+
+        require_mcc_growth = bool(self.hparams.get("quality_gate_require_mcc_growth", True))
+        require_non_negative_net_edge = bool(self.hparams.get("quality_gate_require_non_negative_net_edge", True))
+        min_coverage = float(self.hparams.get("quality_gate_min_coverage_directional", 0.0))
+
+        previous_mcc = self._prev_val_mcc_primary
+        mcc_growth_ok = True
+        if require_mcc_growth and previous_mcc is not None:
+            mcc_growth_ok = current_mcc > previous_mcc
+        coverage_ok = coverage_directional >= min_coverage
+        net_edge_ok = (net_edge_total >= 0.0) if require_non_negative_net_edge else True
+        passed = bool(mcc_growth_ok and coverage_ok and net_edge_ok) if enabled else True
+
+        finalized["quality_gate"] = {
+            "enabled": enabled,
+            "passed": passed,
+            "require_mcc_growth": require_mcc_growth,
+            "require_non_negative_net_edge": require_non_negative_net_edge,
+            "min_coverage_directional": min_coverage,
+            "previous_mcc_primary": None if previous_mcc is None else float(previous_mcc),
+            "current_mcc_primary": current_mcc,
+            "coverage_directional": coverage_directional,
+            "net_edge_total": net_edge_total,
+            "mcc_growth_ok": bool(mcc_growth_ok),
+            "coverage_ok": bool(coverage_ok),
+            "net_edge_ok": bool(net_edge_ok),
+        }
+
+        finalized.setdefault("quality", {})
+        finalized["quality"]["quality_gate_passed"] = float(1.0 if passed else 0.0)
+        finalized["quality"]["quality_gate_mcc_growth_ok"] = float(1.0 if mcc_growth_ok else 0.0)
+        finalized["quality"]["quality_gate_coverage_ok"] = float(1.0 if coverage_ok else 0.0)
+        finalized["quality"]["quality_gate_net_edge_ok"] = float(1.0 if net_edge_ok else 0.0)
+
+        self.log("quality_gate_passed", float(1.0 if passed else 0.0), logger=True, add_dataloader_idx=False)
+        self.log("quality_gate_mcc_growth_ok", float(1.0 if mcc_growth_ok else 0.0), logger=True, add_dataloader_idx=False)
+        self.log("quality_gate_coverage_ok", float(1.0 if coverage_ok else 0.0), logger=True, add_dataloader_idx=False)
+        self.log("quality_gate_net_edge_ok", float(1.0 if net_edge_ok else 0.0), logger=True, add_dataloader_idx=False)
+
+        self._prev_val_mcc_primary = current_mcc
+        return finalized
 
     def on_before_optimizer_step(self, optimizer):
         if hasattr(self, 'log_var_cls'):
@@ -362,6 +455,11 @@ class LiTModule(pl.LightningModule):
             invalid_min, invalid_max = y.min().item(), y.max().item()
             print(f"[ERROR] Labels out of range [0,2]: min={invalid_min}, max={invalid_max}. Clamping.")
             y = torch.clamp(y, 0, 2)
+        if not self.is_multi_horizon and y.ndim > 1:
+            if y.shape[-1] == 1:
+                y = y.squeeze(-1)
+            else:
+                raise ValueError(f"Single-horizon expects y shape [B], got {tuple(y.shape)}.")
 
         vol_target = extra_data["vol"]
         weights = extra_data["weight"]
@@ -521,6 +619,14 @@ class LiTModule(pl.LightningModule):
         regime_id = extra_data["regime_id"]
         f_ret = extra_data["f_ret"]
         weights = extra_data["weight"]
+        if y.dtype not in [torch.long, torch.int64]:
+            print(f"[WARN] Val labels dtype is {y.dtype}, converting to long")
+            y = y.long()
+        if not self.is_multi_horizon and y.ndim > 1:
+            if y.shape[-1] == 1:
+                y = y.squeeze(-1)
+            else:
+                raise ValueError(f"Single-horizon expects y shape [B], got {tuple(y.shape)}.")
 
         logits, vol_pred = self(x, regime_id=regime_id)
         vol_pred = vol_pred.squeeze(-1)
@@ -770,6 +876,19 @@ class LiTModule(pl.LightningModule):
                 ),
                 "argmax_metrics": argmax_metrics,
                 "decision_rule_metrics": decision_metrics,
+                "decision_rule_ablation": {
+                    "argmax": {
+                        "val_mcc_primary": float(avg_mcc_argmax),
+                        "coverage_directional": float(coverage_directional),
+                        "net_edge_total": float(net_edge_total),
+                    },
+                    decision_rule: {
+                        "val_mcc_primary": float(avg_mcc_decision),
+                        "coverage_directional": float(coverage_directional),
+                        "net_edge_total": float(net_edge_total),
+                    },
+                },
+                "effective_threshold": self._resolve_effective_threshold_summary(),
             }
             for h in range(self.num_horizons):
                 finalized["quality"][f"mcc_h{h}"] = float((decision_metrics if decision_rule != "argmax" else argmax_metrics).get(f"mcc_h{h}", 0.0))
@@ -794,6 +913,19 @@ class LiTModule(pl.LightningModule):
                 "epoch": int(self.current_epoch),
             }
             scaler_path.write_text(json.dumps(scaler_payload, indent=2), encoding="utf-8")
+            self.log(
+                "val_f1_macro_np",
+                float(finalized.get("quality", {}).get("val_f1_macro_np", 0.0)),
+                logger=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                "val_da_without_flat",
+                float(finalized.get("trade", {}).get("val_da_without_flat", 0.0)),
+                logger=True,
+                add_dataloader_idx=False,
+            )
+            finalized = self._apply_quality_gate(finalized)
         else:
             y_true_tensor = torch.from_numpy(y_true).long()
             if not torch.isfinite(logits).all():
@@ -813,7 +945,8 @@ class LiTModule(pl.LightningModule):
 
             from .utils import apply_decision_rule, apply_temperature_scaling, fit_temperature_scaler
 
-            temperature_value = fit_temperature_scaler(logits, y_true_tensor)
+            with torch.enable_grad():
+                temperature_value = fit_temperature_scaler(logits, y_true_tensor)
             scaled_logits = apply_temperature_scaling(logits, temperature_value)
             scaled_probs = torch.softmax(scaled_logits, dim=1).cpu().numpy()
 
@@ -837,6 +970,33 @@ class LiTModule(pl.LightningModule):
                 probs=scaled_probs,
                 use_torch_metrics=False,
             )
+            decision_rule_ablation = {
+                "argmax": self._compact_rule_metrics(argmax_metrics),
+            }
+            if bool(self.hparams.get("decision_rule_ablation", False)):
+                for rule_name in self._parse_decision_rule_ablation_rules():
+                    if rule_name == "argmax":
+                        continue
+                    if rule_name == decision_rule:
+                        rule_metrics = decision_metrics
+                    else:
+                        rule_pred = apply_decision_rule(
+                            scaled_probs,
+                            rule_name,
+                            decision_confidence=float(self.hparams.get("decision_confidence", 0.5)),
+                            decision_hold_threshold=float(self.hparams.get("decision_hold_threshold", 0.6)),
+                            flat_prob_threshold=float(self.hparams.get("flat_prob_threshold", 0.34)),
+                            up_prob_threshold=float(self.hparams.get("up_prob_threshold", 0.34)),
+                            down_prob_threshold=float(self.hparams.get("down_prob_threshold", 0.34)),
+                            margin_threshold=float(self.hparams.get("margin_threshold", 0.0)),
+                        )
+                        rule_metrics = self._finalize_validation_metrics(
+                            validation_payload,
+                            y_pred=rule_pred,
+                            probs=scaled_probs,
+                            use_torch_metrics=False,
+                        )
+                    decision_rule_ablation[rule_name] = self._compact_rule_metrics(rule_metrics)
 
             primary_metrics = decision_metrics if decision_rule != "argmax" else argmax_metrics
             y_pred = decision_pred if decision_rule != "argmax" else argmax_pred
@@ -877,7 +1037,22 @@ class LiTModule(pl.LightningModule):
                 "regime_metrics": {},
                 "argmax_metrics": argmax_metrics,
                 "decision_rule_metrics": decision_metrics,
+                "decision_rule_ablation": decision_rule_ablation,
+                "effective_threshold": self._resolve_effective_threshold_summary(),
             }
+            self.log(
+                "val_f1_macro_np",
+                float(finalized.get("quality", {}).get("val_f1_macro_np", 0.0)),
+                logger=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                "val_da_without_flat",
+                float(finalized.get("trade", {}).get("val_da_without_flat", 0.0)),
+                logger=True,
+                add_dataloader_idx=False,
+            )
+            finalized = self._apply_quality_gate(finalized)
 
             symbol = getattr(self.trainer, 'symbol', 'UNKNOWN')
             base_path = Path(__file__).parent.parent.parent
@@ -1135,8 +1310,21 @@ class LiTModule(pl.LightningModule):
 
         y_true_tensor = torch.from_numpy(payload["y_true"]).long()
         if use_torch_metrics:
-            val_mcc_torch = float(self.mcc(payload["logits"], y_true_tensor).detach().cpu())
-            val_f1_torch = float(self.f1_macro(payload["logits"], y_true_tensor).detach().cpu())
+            metric_device = None
+            for buf in self.mcc.buffers():
+                metric_device = buf.device
+                break
+            if metric_device is None:
+                for param in self.mcc.parameters():
+                    metric_device = param.device
+                    break
+            if metric_device is None:
+                metric_device = self.device
+
+            logits_for_metric = payload["logits"].to(metric_device)
+            y_true_metric = y_true_tensor.to(metric_device)
+            val_mcc_torch = float(self.mcc(logits_for_metric, y_true_metric).detach().cpu())
+            val_f1_torch = float(self.f1_macro(logits_for_metric, y_true_metric).detach().cpu())
         else:
             val_mcc_torch = float(quality_metrics["mcc"])
             val_f1_torch = float(quality_metrics["f1_macro"])
@@ -1259,6 +1447,9 @@ class LiTModule(pl.LightningModule):
             "market_regime_buckets": finalized.get("market_regime_buckets", {}),
             "argmax_metrics": finalized.get("argmax_metrics", {}),
             "decision_rule_metrics": finalized.get("decision_rule_metrics", {}),
+            "decision_rule_ablation": finalized.get("decision_rule_ablation", {}),
+            "effective_threshold": finalized.get("effective_threshold", {}),
+            "quality_gate": finalized.get("quality_gate", {}),
         }
         report_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
 
