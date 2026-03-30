@@ -17,6 +17,7 @@ from .train_cli import (
     APPROVED_METRICS_CONTRACT_VERSION,
     BASELINE_PROFILE,
     TASK332_PROFILE,
+    TASK333_PROFILE,
     parse_train_args,
     parse_winsor_limits,
     resolve_horizon_config,
@@ -103,6 +104,19 @@ def _validate_startup_invariants(args, *, num_horizons: int):
         raise ValueError(
             "task332_execution_recalibration requires non-argmax decision_rule for ablation contract."
         )
+    if args.profile == TASK333_PROFILE:
+        if args.decision_threshold_calibration != "target_coverage":
+            raise ValueError(
+                "task333_target_coverage_threshold requires --decision_threshold_calibration target_coverage."
+            )
+        if args.decision_rule == "argmax":
+            raise ValueError(
+                "task333_target_coverage_threshold requires non-argmax decision_rule."
+            )
+        if not bool(getattr(args, "quality_gate_enabled", False)):
+            raise ValueError(
+                "task333_target_coverage_threshold requires --quality_gate_enabled."
+            )
     _validate_decision_rule_calibration_compatibility(args)
 
 
@@ -122,6 +136,8 @@ def _build_pipeline_state(args, *, num_horizons: int) -> dict:
         "label_contract_version": args.label_contract_version,
         "split_strategy": args.split_strategy,
         "decision_rule": args.decision_rule,
+        "decision_threshold_calibration_mode": str(getattr(args, "decision_threshold_calibration", "off")),
+        "decision_threshold_target_coverage": float(getattr(args, "decision_threshold_target_coverage", 0.35)),
         "num_horizons": int(num_horizons),
         "quality_gate_enabled": bool(getattr(args, "quality_gate_enabled", False)),
     }
@@ -212,6 +228,10 @@ def _build_quality_gate_status(trainer, args) -> dict:
     f1_macro = _extract_callback_metric(trainer, "val_f1_macro_np")
     da_without_flat = _extract_callback_metric(trainer, "val_da_without_flat")
     passed_metric = _extract_callback_metric(trainer, "quality_gate_passed")
+    threshold_selected_coverage = _extract_callback_metric(trainer, "decision_threshold_selected_coverage")
+    threshold_coverage_error = _extract_callback_metric(trainer, "decision_threshold_coverage_error")
+    threshold_used_fallback = _extract_callback_metric(trainer, "decision_threshold_used_fallback")
+    threshold_selected_confidence = _extract_callback_metric(trainer, "decision_threshold_selected_confidence")
     passed = bool(passed_metric >= 0.5) if passed_metric is not None else True
     status = {
         "enabled": bool(getattr(args, "quality_gate_enabled", False)),
@@ -223,6 +243,10 @@ def _build_quality_gate_status(trainer, args) -> dict:
         "net_edge_total": net_edge,
         "decision_rule": args.decision_rule,
         "effective_threshold": getattr(args, "threshold", 0.0005),
+        "decision_threshold_selected_coverage": threshold_selected_coverage,
+        "decision_threshold_coverage_error": threshold_coverage_error,
+        "decision_threshold_used_fallback": threshold_used_fallback,
+        "decision_threshold_selected_confidence": threshold_selected_confidence,
     }
     return status
 
@@ -244,6 +268,47 @@ def _append_task332_run_report(base_path: Path, args, prepared, quality_gate_sta
         f"- da_without_flat: `{quality_gate_status.get('val_da_without_flat')}`",
         f"- net_edge_total: `{quality_gate_status.get('net_edge_total')}`",
         f"- quality_gate: `{gate_state}`",
+    ]
+    block = "\n".join(report_lines) + "\n"
+    for target in (base_path / "docs" / "train_logs.md", Path(__file__).parent / "baselines.md"):
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+
+
+def _read_latest_validation_report(base_path: Path, symbol: str) -> dict:
+    report_dir = base_path / "artifacts" / symbol / "validation"
+    if not report_dir.exists():
+        return {}
+    reports = sorted(report_dir.glob("validation_report_epoch_*.json"))
+    if not reports:
+        return {}
+    try:
+        return json.loads(reports[-1].read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _append_task333_run_report(base_path: Path, args, quality_gate_status: dict):
+    if args.profile != TASK333_PROFILE:
+        return
+    latest_report = _read_latest_validation_report(base_path, args.symbol)
+    calibration_payload = latest_report.get("decision_threshold_calibration", {})
+    selected_thresholds = calibration_payload.get("selected_thresholds", {})
+    selected_metrics = calibration_payload.get("selected_metrics", {})
+    report_lines = [
+        "",
+        f"## Задача 333 | Run report | profile={args.profile}",
+        "",
+        "- baseline_policy: `frozen_reference_from_python_lab/src/baselines.md_and_docs/train_logs.md`",
+        "- baseline_run: `not_created`",
+        f"- decision_threshold_calibration: `{args.decision_threshold_calibration}`",
+        f"- target_coverage: `{getattr(args, 'decision_threshold_target_coverage', 0.35)}`",
+        f"- selected_thresholds: `{selected_thresholds}`",
+        f"- coverage_error: `{quality_gate_status.get('decision_threshold_coverage_error')}`",
+        f"- val_mcc_primary: `{quality_gate_status.get('val_mcc_primary')}`",
+        f"- net_edge_total: `{quality_gate_status.get('net_edge_total')}`",
+        f"- quality_gate: `{'pass' if quality_gate_status.get('passed', True) else 'fail'}`",
+        f"- selected_metrics: `{selected_metrics}`",
     ]
     block = "\n".join(report_lines) + "\n"
     for target in (base_path / "docs" / "train_logs.md", Path(__file__).parent / "baselines.md"):
@@ -443,6 +508,13 @@ def _fit_model(
     model.hparams.channel_attribution_samples = args.channel_attribution_samples
     model.hparams.channel_attribution_method = args.channel_attribution_method
     model.hparams.effective_threshold_summary = dict(getattr(prepared, "effective_threshold_summary", {}) or {})
+    model.hparams.decision_threshold_calibration = args.decision_threshold_calibration
+    model.hparams.decision_threshold_target_coverage = args.decision_threshold_target_coverage
+    model.hparams.decision_threshold_target_tolerance = args.decision_threshold_target_tolerance
+    model.hparams.decision_threshold_min_coverage = args.decision_threshold_min_coverage
+    model.hparams.decision_threshold_max_coverage = args.decision_threshold_max_coverage
+    model.hparams.decision_threshold_opt_metric = args.decision_threshold_opt_metric
+    model.hparams.decision_threshold_quantiles = list(args.decision_threshold_quantiles)
 
     _sanity_check_prepared(prepared, args)
     print("Starting training...")
@@ -792,6 +864,7 @@ def train():
     )
     quality_gate_status = _build_quality_gate_status(trainer, args)
     _append_task332_run_report(paths.base_path, args, prepared, quality_gate_status)
+    _append_task333_run_report(paths.base_path, args, quality_gate_status)
     if bool(getattr(args, "quality_gate_fail_run", False)) and bool(getattr(args, "quality_gate_enabled", False)):
         if not quality_gate_status.get("passed", True):
             raise RuntimeError(

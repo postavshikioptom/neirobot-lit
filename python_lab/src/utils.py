@@ -577,6 +577,7 @@ def apply_decision_rule(
     up_prob_threshold=0.34,
     down_prob_threshold=0.34,
     margin_threshold=0.0,
+    threshold_overrides=None,
 ):
     """
     Apply decision rule over calibrated probabilities.
@@ -585,6 +586,18 @@ def apply_decision_rule(
     probs = np.asarray(probs, dtype=np.float64)
     if probs.ndim != 2 or probs.shape[1] != 3:
         raise ValueError(f"Expected probs shape (N,3), got {probs.shape}")
+    params = {
+        "decision_confidence": float(decision_confidence),
+        "decision_hold_threshold": float(decision_hold_threshold),
+        "flat_prob_threshold": float(flat_prob_threshold),
+        "up_prob_threshold": float(up_prob_threshold),
+        "down_prob_threshold": float(down_prob_threshold),
+        "margin_threshold": float(margin_threshold),
+    }
+    if threshold_overrides:
+        for key, value in threshold_overrides.items():
+            if key in params and value is not None:
+                params[key] = float(value)
 
     if rule == "argmax":
         return np.argmax(probs, axis=1)
@@ -597,15 +610,15 @@ def apply_decision_rule(
     margin = top1_prob - top2_prob
 
     if rule == "confidence_gap":
-        accept = (top1_prob >= decision_confidence) & (margin >= margin_threshold)
+        accept = (top1_prob >= params["decision_confidence"]) & (margin >= params["margin_threshold"])
         pred = np.where(accept, top1_idx, 0)
         return pred
 
     if rule == "class_specific_thresholds":
         eligible = np.zeros_like(probs, dtype=bool)
-        eligible[:, 0] = probs[:, 0] >= flat_prob_threshold
-        eligible[:, 1] = probs[:, 1] >= up_prob_threshold
-        eligible[:, 2] = probs[:, 2] >= down_prob_threshold
+        eligible[:, 0] = probs[:, 0] >= params["flat_prob_threshold"]
+        eligible[:, 1] = probs[:, 1] >= params["up_prob_threshold"]
+        eligible[:, 2] = probs[:, 2] >= params["down_prob_threshold"]
         masked = np.where(eligible, probs, -np.inf)
         pred = np.argmax(masked, axis=1)
         pred[np.all(~eligible, axis=1)] = 0
@@ -613,17 +626,195 @@ def apply_decision_rule(
 
     if rule == "flat_bias":
         pred = top1_idx.copy()
-        reject = top1_prob < decision_confidence
+        reject = top1_prob < params["decision_confidence"]
         pred[reject] = 0
         directional = pred != 0
-        hold_fail = directional & (top1_prob < decision_hold_threshold)
+        hold_fail = directional & (top1_prob < params["decision_hold_threshold"])
         pred[hold_fail] = 0
-        if margin_threshold > 0.0:
-            gap_fail = (margin < margin_threshold)
+        if params["margin_threshold"] > 0.0:
+            gap_fail = (margin < params["margin_threshold"])
             pred[gap_fail] = 0
         return pred
 
     raise ValueError(f"Unknown decision rule: {rule}")
+
+
+def calibrate_decision_thresholds_for_target_coverage(
+    *,
+    probs,
+    y_true,
+    logits,
+    f_ret,
+    imbalance,
+    rule,
+    base_params,
+    target_coverage,
+    target_tolerance,
+    min_coverage,
+    max_coverage,
+    quantiles,
+    opt_metric,
+    directional_base,
+    fee_bps=0.0,
+    slippage_bps=0.0,
+    half_spread_bps=0.0,
+):
+    probs = np.asarray(probs, dtype=np.float64)
+    labels = np.asarray(y_true)
+    logits_np = np.asarray(logits, dtype=np.float64)
+    f_ret_np = np.asarray(f_ret, dtype=np.float64)
+    imbalance_np = np.asarray(imbalance, dtype=np.float64)
+    base_params = dict(base_params or {})
+
+    def _predict_and_score(threshold_overrides):
+        pred = apply_decision_rule(
+            probs,
+            rule,
+            decision_confidence=float(base_params.get("decision_confidence", 0.5)),
+            decision_hold_threshold=float(base_params.get("decision_hold_threshold", 0.6)),
+            flat_prob_threshold=float(base_params.get("flat_prob_threshold", 0.34)),
+            up_prob_threshold=float(base_params.get("up_prob_threshold", 0.34)),
+            down_prob_threshold=float(base_params.get("down_prob_threshold", 0.34)),
+            margin_threshold=float(base_params.get("margin_threshold", 0.0)),
+            threshold_overrides=threshold_overrides,
+        )
+        direction_metrics = compute_directional_metrics(
+            labels,
+            pred,
+            logits_np,
+            f_ret_np,
+            imbalance_np,
+            directional_base=directional_base,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+            half_spread_bps=half_spread_bps,
+            probs=probs,
+        )
+        return {
+            "pred": pred,
+            "coverage_directional": float(direction_metrics.get("coverage_directional", 0.0)),
+            "net_edge_total": float(direction_metrics.get("net_edge_total", 0.0)),
+            "val_mcc_primary": float(safe_matthews_corrcoef(labels, pred)),
+            "da_without_flat": float(direction_metrics.get("da_without_flat", 0.0)),
+            "direction_metrics": direction_metrics,
+        }
+
+    fallback_eval = _predict_and_score(threshold_overrides=None)
+    fallback_thresholds = {
+        "decision_confidence": float(base_params.get("decision_confidence", 0.5)),
+        "decision_hold_threshold": float(base_params.get("decision_hold_threshold", 0.6)),
+        "flat_prob_threshold": float(base_params.get("flat_prob_threshold", 0.34)),
+        "up_prob_threshold": float(base_params.get("up_prob_threshold", 0.34)),
+        "down_prob_threshold": float(base_params.get("down_prob_threshold", 0.34)),
+        "margin_threshold": float(base_params.get("margin_threshold", 0.0)),
+    }
+
+    if probs.shape[0] == 0 or rule == "argmax":
+        return {
+            "selected_thresholds": fallback_thresholds,
+            "selected_metrics": {
+                "coverage_directional": fallback_eval["coverage_directional"],
+                "val_mcc_primary": fallback_eval["val_mcc_primary"],
+                "net_edge_total": fallback_eval["net_edge_total"],
+                "val_da_without_flat": fallback_eval["da_without_flat"],
+            },
+            "target_coverage": float(target_coverage),
+            "coverage_error": float(abs(fallback_eval["coverage_directional"] - target_coverage)),
+            "used_fallback": True,
+            "candidate_table": [],
+        }
+
+    if rule == "flat_bias":
+        confidence_base = np.maximum(probs[:, 1], probs[:, 2])
+    else:
+        confidence_base = np.max(probs, axis=1)
+
+    tau_values = []
+    for q in sorted(set(float(x) for x in quantiles)):
+        tau_values.append(float(np.quantile(confidence_base, q)))
+    tau_values = sorted(set(tau_values))
+
+    coverage_lo = max(float(min_coverage), float(target_coverage) - float(target_tolerance))
+    coverage_hi = min(float(max_coverage), float(target_coverage) + float(target_tolerance))
+
+    candidates = []
+    for tau in tau_values:
+        if rule in ("flat_bias", "confidence_gap"):
+            overrides = {"decision_confidence": tau}
+            if rule == "flat_bias":
+                overrides["decision_hold_threshold"] = tau
+        elif rule == "class_specific_thresholds":
+            overrides = {"up_prob_threshold": tau, "down_prob_threshold": tau}
+        else:
+            overrides = {}
+        eval_result = _predict_and_score(threshold_overrides=overrides)
+        coverage = eval_result["coverage_directional"]
+        candidate = {
+            "tau": float(tau),
+            "threshold_overrides": dict(overrides),
+            "coverage_directional": float(coverage),
+            "coverage_error": float(abs(coverage - float(target_coverage))),
+            "in_band": bool(coverage_lo <= coverage <= coverage_hi),
+            "val_mcc_primary": float(eval_result["val_mcc_primary"]),
+            "net_edge_total": float(eval_result["net_edge_total"]),
+            "val_da_without_flat": float(eval_result["da_without_flat"]),
+        }
+        candidates.append(candidate)
+
+    in_band = [item for item in candidates if item["in_band"]]
+    if not in_band:
+        return {
+            "selected_thresholds": fallback_thresholds,
+            "selected_metrics": {
+                "coverage_directional": fallback_eval["coverage_directional"],
+                "val_mcc_primary": fallback_eval["val_mcc_primary"],
+                "net_edge_total": fallback_eval["net_edge_total"],
+                "val_da_without_flat": fallback_eval["da_without_flat"],
+            },
+            "target_coverage": float(target_coverage),
+            "coverage_error": float(abs(fallback_eval["coverage_directional"] - target_coverage)),
+            "used_fallback": True,
+            "candidate_table": sorted(
+                candidates,
+                key=lambda row: (
+                    -float(row.get(opt_metric, row["net_edge_total"])),
+                    float(row["coverage_error"]),
+                    -float(row["net_edge_total"]),
+                ),
+            )[:10],
+        }
+
+    selected = sorted(
+        in_band,
+        key=lambda row: (
+            -float(row.get(opt_metric, row["net_edge_total"])),
+            float(row["coverage_error"]),
+            -float(row["net_edge_total"]),
+        ),
+    )[0]
+    selected_thresholds = dict(fallback_thresholds)
+    selected_thresholds.update(selected.get("threshold_overrides", {}))
+
+    return {
+        "selected_thresholds": selected_thresholds,
+        "selected_metrics": {
+            "coverage_directional": float(selected["coverage_directional"]),
+            "val_mcc_primary": float(selected["val_mcc_primary"]),
+            "net_edge_total": float(selected["net_edge_total"]),
+            "val_da_without_flat": float(selected["val_da_without_flat"]),
+        },
+        "target_coverage": float(target_coverage),
+        "coverage_error": float(selected["coverage_error"]),
+        "used_fallback": False,
+        "candidate_table": sorted(
+            candidates,
+            key=lambda row: (
+                -float(row.get(opt_metric, row["net_edge_total"])),
+                float(row["coverage_error"]),
+                -float(row["net_edge_total"]),
+            ),
+        )[:10],
+    }
 
 
 def plot_reliability_diagram(bin_data, ece, mce, save_path):

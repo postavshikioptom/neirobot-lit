@@ -6,6 +6,7 @@ import argparse
 
 BASELINE_PROFILE = "lit_scalping_baseline"
 TASK332_PROFILE = "task332_execution_recalibration"
+TASK333_PROFILE = "task333_target_coverage_threshold"
 PROFILE_NONE = "none"
 APPROVED_LABEL_CONTRACT_VERSION = "label_contract_v2"
 APPROVED_METRICS_CONTRACT_VERSION = "metrics_contract_v2"
@@ -47,7 +48,25 @@ PROFILE_OVERRIDES = {
         "quality_gate_min_coverage_directional": 0.18,
         "quality_gate_fail_run": False,
         "enable_channel_attribution": False,
-    }
+    },
+    TASK333_PROFILE: {
+        "horizons": "100",
+        "freeze_experimental_features": True,
+        "use_horizon_embedding": False,
+        "label_mode": "execution_mid_return",
+        "split_strategy": "purged_holdout",
+        "loss_type": "focal",
+        "decision_rule": "flat_bias",
+        "decision_threshold_calibration": "target_coverage",
+        "decision_threshold_target_coverage": 0.35,
+        "decision_threshold_target_tolerance": 0.05,
+        "decision_threshold_min_coverage": 0.18,
+        "decision_threshold_max_coverage": 0.75,
+        "decision_threshold_opt_metric": "net_edge_total",
+        "decision_threshold_quantiles": "0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90",
+        "quality_gate_enabled": True,
+        "enable_channel_attribution": False,
+    },
 }
 
 
@@ -92,8 +111,8 @@ def build_train_parser() -> argparse.ArgumentParser:
     experimental_group = parser.add_argument_group("experimental")
     deprecated_group = parser.add_argument_group("deprecated")
 
-    stable_group.add_argument("--profile", type=str, default=PROFILE_NONE, choices=[PROFILE_NONE, BASELINE_PROFILE, TASK332_PROFILE],
-                              help="Training profile. lit_scalping_baseline and task332_execution_recalibration force stable contract presets.")
+    stable_group.add_argument("--profile", type=str, default=PROFILE_NONE, choices=[PROFILE_NONE, BASELINE_PROFILE, TASK332_PROFILE, TASK333_PROFILE],
+                              help="Training profile. lit_scalping_baseline/task332_execution_recalibration/task333_target_coverage_threshold force stable contract presets.")
     stable_group.add_argument("--freeze_experimental_features", action=argparse.BooleanOptionalAction, default=True,
                               help="Freeze multi-horizon/distillation/legacy branches.")
 
@@ -198,6 +217,22 @@ def build_train_parser() -> argparse.ArgumentParser:
                               help="Down class probability threshold for class_specific_thresholds")
     stable_group.add_argument("--margin_threshold", type=float, default=0.0,
                               help="Minimum top1-top2 probability gap for confidence_gap/flat_bias rules")
+    stable_group.add_argument("--decision_threshold_calibration", type=str, default="off",
+                              choices=["off", "target_coverage"],
+                              help="Decision-threshold calibration mode on validation")
+    stable_group.add_argument("--decision_threshold_target_coverage", type=float, default=0.35,
+                              help="Target directional coverage for threshold calibration")
+    stable_group.add_argument("--decision_threshold_target_tolerance", type=float, default=0.05,
+                              help="Allowed coverage tolerance around target")
+    stable_group.add_argument("--decision_threshold_min_coverage", type=float, default=0.18,
+                              help="Minimum directional coverage in calibration filter")
+    stable_group.add_argument("--decision_threshold_max_coverage", type=float, default=0.75,
+                              help="Maximum directional coverage in calibration filter")
+    stable_group.add_argument("--decision_threshold_opt_metric", type=str, default="net_edge_total",
+                              choices=["net_edge_total", "val_mcc_primary"],
+                              help="Objective metric for calibrated threshold selection")
+    stable_group.add_argument("--decision_threshold_quantiles", type=str, default="0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90",
+                              help="Comma-separated quantiles in (0,1) for threshold candidates")
     stable_group.add_argument("--report_fee_bps", type=float, default=0.0,
                               help="Fee in bps used for cost-aware validation edge reporting")
     stable_group.add_argument("--report_slippage_bps", type=float, default=0.0,
@@ -369,6 +404,34 @@ def parse_train_args(argv=None):
     _validate_prob("up_prob_threshold", args.up_prob_threshold)
     _validate_prob("down_prob_threshold", args.down_prob_threshold)
     _validate_prob("margin_threshold", args.margin_threshold)
+    _validate_prob("decision_threshold_target_coverage", args.decision_threshold_target_coverage)
+    _validate_prob("decision_threshold_target_tolerance", args.decision_threshold_target_tolerance)
+    _validate_prob("decision_threshold_min_coverage", args.decision_threshold_min_coverage)
+    _validate_prob("decision_threshold_max_coverage", args.decision_threshold_max_coverage)
+    if args.decision_threshold_target_tolerance <= 0.0:
+        raise ValueError("--decision_threshold_target_tolerance must be > 0.0")
+    if not (
+        args.decision_threshold_min_coverage
+        <= args.decision_threshold_target_coverage
+        <= args.decision_threshold_max_coverage
+    ):
+        raise ValueError(
+            "Expected decision_threshold_min_coverage <= decision_threshold_target_coverage <= decision_threshold_max_coverage"
+        )
+    try:
+        quantiles = [float(item.strip()) for item in str(args.decision_threshold_quantiles).split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError(f"--decision_threshold_quantiles contains non-float values: {exc}")
+    if not quantiles:
+        raise ValueError("--decision_threshold_quantiles must contain at least one value")
+    quantiles = sorted(set(quantiles))
+    for quantile in quantiles:
+        if quantile <= 0.0 or quantile >= 1.0:
+            raise ValueError(
+                "--decision_threshold_quantiles values must be in (0.0, 1.0), "
+                f"got {quantile}"
+            )
+    args.decision_threshold_quantiles = quantiles
     if args.quality_gate_min_coverage_directional < 0.0 or args.quality_gate_min_coverage_directional > 1.0:
         raise ValueError(
             "--quality_gate_min_coverage_directional must be in [0.0, 1.0], "

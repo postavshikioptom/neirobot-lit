@@ -699,6 +699,16 @@ class LiTModule(pl.LightningModule):
         logits = validation_payload["logits"]
         y_pred = validation_payload["y_pred"]
         finalized = None
+        calibration_mode = str(self.hparams.get("decision_threshold_calibration", "off"))
+
+        def _resolve_threshold_quantiles() -> list[float]:
+            raw_value = self.hparams.get("decision_threshold_quantiles", [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90])
+            if isinstance(raw_value, (list, tuple)):
+                values = [float(item) for item in raw_value]
+            else:
+                values = [float(item.strip()) for item in str(raw_value).split(",") if item.strip()]
+            unique_sorted = sorted(set(values))
+            return [item for item in unique_sorted if 0.0 < item < 1.0] or [0.5]
 
         if self.is_multi_horizon:
             from .utils import compute_multi_horizon_metrics
@@ -721,7 +731,13 @@ class LiTModule(pl.LightningModule):
                 print(f"  Horizon {h}: MCC={mcc_h:.4f}, F1={f1_h:.4f}, Samples={samples_h}")
             avg_mcc = np.mean([metrics.get(f"mcc_h{h}", 0.0) for h in range(self.num_horizons)])
 
-            from .utils import apply_decision_rule, apply_temperature_scaling, fit_temperature_scaler, compute_directional_metrics
+            from .utils import (
+                apply_decision_rule,
+                apply_temperature_scaling,
+                calibrate_decision_thresholds_for_target_coverage,
+                compute_directional_metrics,
+                fit_temperature_scaler,
+            )
 
             f_ret = validation_payload["f_ret"]
             imbalance = validation_payload["imbalance"]
@@ -735,6 +751,7 @@ class LiTModule(pl.LightningModule):
             mce_before_list = []
             mce_after_list = []
             horizon_trade = []
+            threshold_calibration_rows = []
 
             for h in range(self.num_horizons):
                 logits_h = logits[:, h, :]
@@ -757,16 +774,56 @@ class LiTModule(pl.LightningModule):
 
                 raw_probs_h = torch.softmax(logits_h_t, dim=1).cpu().numpy()
                 argmax_preds[mask, h] = np.argmax(raw_probs_h, axis=1)
+                base_threshold_params = {
+                    "decision_confidence": float(self.hparams.get("decision_confidence", 0.5)),
+                    "decision_hold_threshold": float(self.hparams.get("decision_hold_threshold", 0.6)),
+                    "flat_prob_threshold": float(self.hparams.get("flat_prob_threshold", 0.34)),
+                    "up_prob_threshold": float(self.hparams.get("up_prob_threshold", 0.34)),
+                    "down_prob_threshold": float(self.hparams.get("down_prob_threshold", 0.34)),
+                    "margin_threshold": float(self.hparams.get("margin_threshold", 0.0)),
+                }
+                threshold_overrides = None
+                calibration_report = None
+                f_ret_h = f_ret[:, h] if f_ret.ndim == 2 else f_ret
+                if calibration_mode == "target_coverage":
+                    calibration_report = calibrate_decision_thresholds_for_target_coverage(
+                        probs=scaled_probs_h,
+                        y_true=y_true_h[mask],
+                        logits=scaled_logits_h.cpu().numpy(),
+                        f_ret=f_ret_h[mask],
+                        imbalance=imbalance[mask],
+                        rule=decision_rule,
+                        base_params=base_threshold_params,
+                        target_coverage=float(self.hparams.get("decision_threshold_target_coverage", 0.35)),
+                        target_tolerance=float(self.hparams.get("decision_threshold_target_tolerance", 0.05)),
+                        min_coverage=float(self.hparams.get("decision_threshold_min_coverage", 0.18)),
+                        max_coverage=float(self.hparams.get("decision_threshold_max_coverage", 0.75)),
+                        quantiles=_resolve_threshold_quantiles(),
+                        opt_metric=str(self.hparams.get("decision_threshold_opt_metric", "net_edge_total")),
+                        directional_base=self.hparams.get("metric_directional_base", "predicted"),
+                        fee_bps=float(self.hparams.get("report_fee_bps", 0.0)),
+                        slippage_bps=float(self.hparams.get("report_slippage_bps", 0.0)),
+                        half_spread_bps=float(self.hparams.get("report_half_spread_bps", 0.0)),
+                    )
+                    threshold_overrides = calibration_report.get("selected_thresholds", {})
                 decision_preds[mask, h] = apply_decision_rule(
                     scaled_probs_h,
                     decision_rule,
-                    decision_confidence=float(self.hparams.get("decision_confidence", 0.5)),
-                    decision_hold_threshold=float(self.hparams.get("decision_hold_threshold", 0.6)),
-                    flat_prob_threshold=float(self.hparams.get("flat_prob_threshold", 0.34)),
-                    up_prob_threshold=float(self.hparams.get("up_prob_threshold", 0.34)),
-                    down_prob_threshold=float(self.hparams.get("down_prob_threshold", 0.34)),
-                    margin_threshold=float(self.hparams.get("margin_threshold", 0.0)),
+                    decision_confidence=base_threshold_params["decision_confidence"],
+                    decision_hold_threshold=base_threshold_params["decision_hold_threshold"],
+                    flat_prob_threshold=base_threshold_params["flat_prob_threshold"],
+                    up_prob_threshold=base_threshold_params["up_prob_threshold"],
+                    down_prob_threshold=base_threshold_params["down_prob_threshold"],
+                    margin_threshold=base_threshold_params["margin_threshold"],
+                    threshold_overrides=threshold_overrides,
                 )
+                if calibration_report is not None:
+                    threshold_calibration_rows.append(
+                        {
+                            "horizon_idx": int(h),
+                            **calibration_report,
+                        }
+                    )
 
                 ece_before, mce_before, _ = self.calibration_metrics.calculate(logits_h_t, y_true_h_t)
                 ece_after, mce_after, _ = self.calibration_metrics.calculate(scaled_logits_h, y_true_h_t)
@@ -776,7 +833,6 @@ class LiTModule(pl.LightningModule):
                 mce_before_list.append(float(mce_before))
                 mce_after_list.append(float(mce_after))
 
-                f_ret_h = f_ret[:, h] if f_ret.ndim == 2 else f_ret
                 trade_metrics = compute_directional_metrics(
                     y_true_h[mask],
                     decision_preds[mask, h] if decision_rule != "argmax" else argmax_preds[mask, h],
@@ -825,6 +881,39 @@ class LiTModule(pl.LightningModule):
             self.log("val_calibration_improved", calibration_improved, logger=True, add_dataloader_idx=False)
             self.log("coverage_directional", coverage_directional, logger=True, add_dataloader_idx=False)
             self.log("net_edge_total", net_edge_total, logger=True, add_dataloader_idx=False)
+            auto_applied = float(1.0 if calibration_mode == "target_coverage" else 0.0)
+            selected_coverage = float(coverage_directional)
+            coverage_error = float(abs(selected_coverage - float(self.hparams.get("decision_threshold_target_coverage", 0.35))))
+            used_fallback = 0.0
+            selected_confidence = float(self.hparams.get("decision_hold_threshold", self.hparams.get("decision_confidence", 0.5)))
+            if threshold_calibration_rows:
+                coverage_values = np.array(
+                    [float(item.get("selected_metrics", {}).get("coverage_directional", 0.0)) for item in threshold_calibration_rows],
+                    dtype=np.float64,
+                )
+                error_values = np.array([float(item.get("coverage_error", 0.0)) for item in threshold_calibration_rows], dtype=np.float64)
+                conf_values = np.array(
+                    [
+                        float(
+                            item.get("selected_thresholds", {}).get(
+                                "decision_hold_threshold",
+                                item.get("selected_thresholds", {}).get("decision_confidence", self.hparams.get("decision_confidence", 0.5)),
+                            )
+                        )
+                        for item in threshold_calibration_rows
+                    ],
+                    dtype=np.float64,
+                )
+                selected_coverage = float(np.mean(coverage_values))
+                coverage_error = float(np.mean(error_values))
+                selected_confidence = float(np.mean(conf_values))
+                used_fallback = float(1.0 if any(bool(item.get("used_fallback", False)) for item in threshold_calibration_rows) else 0.0)
+            self.log("decision_threshold_auto_applied", auto_applied, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_target_coverage", float(self.hparams.get("decision_threshold_target_coverage", 0.35)), logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_selected_coverage", selected_coverage, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_coverage_error", coverage_error, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_used_fallback", used_fallback, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_selected_confidence", selected_confidence, logger=True, add_dataloader_idx=False)
 
             if ece_after_avg > ece_before_avg:
                 print(f"[WARN] Calibration regressed: ece_after={ece_after_avg:.6f} > ece_before={ece_before_avg:.6f}")
@@ -852,6 +941,12 @@ class LiTModule(pl.LightningModule):
                     "val_vol_mae": float(np.mean(np.abs(validation_payload["vol_true"] - validation_payload["vol_pred"]))),
                     "val_mcc_primary": float(primary_avg_mcc),
                     "val_mcc_np": float(primary_avg_mcc),
+                    "decision_threshold_auto_applied": float(auto_applied),
+                    "decision_threshold_target_coverage": float(self.hparams.get("decision_threshold_target_coverage", 0.35)),
+                    "decision_threshold_selected_coverage": float(selected_coverage),
+                    "decision_threshold_coverage_error": float(coverage_error),
+                    "decision_threshold_used_fallback": float(used_fallback),
+                    "decision_threshold_selected_confidence": float(selected_confidence),
                 },
                 "calibration": {
                     "val_ece": float(ece_after_avg),
@@ -889,6 +984,14 @@ class LiTModule(pl.LightningModule):
                     },
                 },
                 "effective_threshold": self._resolve_effective_threshold_summary(),
+                "decision_threshold_calibration": {
+                    "mode": calibration_mode,
+                    "target": float(self.hparams.get("decision_threshold_target_coverage", 0.35)),
+                    "selected_thresholds": [item.get("selected_thresholds", {}) for item in threshold_calibration_rows][:10],
+                    "selected_metrics": [item.get("selected_metrics", {}) for item in threshold_calibration_rows][:10],
+                    "used_fallback": bool(any(bool(item.get("used_fallback", False)) for item in threshold_calibration_rows)),
+                    "candidate_table_topk": [item.get("candidate_table", [])[:5] for item in threshold_calibration_rows][:10],
+                },
             }
             for h in range(self.num_horizons):
                 finalized["quality"][f"mcc_h{h}"] = float((decision_metrics if decision_rule != "argmax" else argmax_metrics).get(f"mcc_h{h}", 0.0))
@@ -943,7 +1046,12 @@ class LiTModule(pl.LightningModule):
                 use_torch_metrics=True,
             )
 
-            from .utils import apply_decision_rule, apply_temperature_scaling, fit_temperature_scaler
+            from .utils import (
+                apply_decision_rule,
+                apply_temperature_scaling,
+                calibrate_decision_thresholds_for_target_coverage,
+                fit_temperature_scaler,
+            )
 
             with torch.enable_grad():
                 temperature_value = fit_temperature_scaler(logits, y_true_tensor)
@@ -954,15 +1062,47 @@ class LiTModule(pl.LightningModule):
             ece_after, mce_after, bin_data_after = self.calibration_metrics.calculate(scaled_logits, y_true_tensor)
 
             decision_rule = self.hparams.get("decision_rule", "argmax")
+            base_threshold_params = {
+                "decision_confidence": float(self.hparams.get("decision_confidence", 0.5)),
+                "decision_hold_threshold": float(self.hparams.get("decision_hold_threshold", 0.6)),
+                "flat_prob_threshold": float(self.hparams.get("flat_prob_threshold", 0.34)),
+                "up_prob_threshold": float(self.hparams.get("up_prob_threshold", 0.34)),
+                "down_prob_threshold": float(self.hparams.get("down_prob_threshold", 0.34)),
+                "margin_threshold": float(self.hparams.get("margin_threshold", 0.0)),
+            }
+            threshold_overrides = None
+            threshold_calibration_report = None
+            if calibration_mode == "target_coverage":
+                threshold_calibration_report = calibrate_decision_thresholds_for_target_coverage(
+                    probs=scaled_probs,
+                    y_true=y_true,
+                    logits=scaled_logits.cpu().numpy(),
+                    f_ret=validation_payload["f_ret"],
+                    imbalance=validation_payload["imbalance"],
+                    rule=decision_rule,
+                    base_params=base_threshold_params,
+                    target_coverage=float(self.hparams.get("decision_threshold_target_coverage", 0.35)),
+                    target_tolerance=float(self.hparams.get("decision_threshold_target_tolerance", 0.05)),
+                    min_coverage=float(self.hparams.get("decision_threshold_min_coverage", 0.18)),
+                    max_coverage=float(self.hparams.get("decision_threshold_max_coverage", 0.75)),
+                    quantiles=_resolve_threshold_quantiles(),
+                    opt_metric=str(self.hparams.get("decision_threshold_opt_metric", "net_edge_total")),
+                    directional_base=self.hparams.get("metric_directional_base", "predicted"),
+                    fee_bps=float(self.hparams.get("report_fee_bps", 0.0)),
+                    slippage_bps=float(self.hparams.get("report_slippage_bps", 0.0)),
+                    half_spread_bps=float(self.hparams.get("report_half_spread_bps", 0.0)),
+                )
+                threshold_overrides = threshold_calibration_report.get("selected_thresholds", {})
             decision_pred = apply_decision_rule(
                 scaled_probs,
                 decision_rule,
-                decision_confidence=float(self.hparams.get("decision_confidence", 0.5)),
-                decision_hold_threshold=float(self.hparams.get("decision_hold_threshold", 0.6)),
-                flat_prob_threshold=float(self.hparams.get("flat_prob_threshold", 0.34)),
-                up_prob_threshold=float(self.hparams.get("up_prob_threshold", 0.34)),
-                down_prob_threshold=float(self.hparams.get("down_prob_threshold", 0.34)),
-                margin_threshold=float(self.hparams.get("margin_threshold", 0.0)),
+                decision_confidence=base_threshold_params["decision_confidence"],
+                decision_hold_threshold=base_threshold_params["decision_hold_threshold"],
+                flat_prob_threshold=base_threshold_params["flat_prob_threshold"],
+                up_prob_threshold=base_threshold_params["up_prob_threshold"],
+                down_prob_threshold=base_threshold_params["down_prob_threshold"],
+                margin_threshold=base_threshold_params["margin_threshold"],
+                threshold_overrides=threshold_overrides,
             )
             decision_metrics = self._finalize_validation_metrics(
                 validation_payload,
@@ -1000,6 +1140,29 @@ class LiTModule(pl.LightningModule):
 
             primary_metrics = decision_metrics if decision_rule != "argmax" else argmax_metrics
             y_pred = decision_pred if decision_rule != "argmax" else argmax_pred
+            auto_applied = float(1.0 if calibration_mode == "target_coverage" else 0.0)
+            selected_coverage = float(primary_metrics.get("coverage", {}).get("coverage_directional", 0.0))
+            if threshold_calibration_report is not None:
+                selected_coverage = float(
+                    threshold_calibration_report.get("selected_metrics", {}).get("coverage_directional", selected_coverage)
+                )
+            coverage_error = float(abs(selected_coverage - float(self.hparams.get("decision_threshold_target_coverage", 0.35))))
+            if threshold_calibration_report is not None:
+                coverage_error = float(threshold_calibration_report.get("coverage_error", coverage_error))
+            used_fallback = float(1.0 if bool((threshold_calibration_report or {}).get("used_fallback", False)) else 0.0)
+            selected_thresholds_payload = (threshold_calibration_report or {}).get("selected_thresholds", {})
+            selected_confidence = float(
+                selected_thresholds_payload.get(
+                    "decision_hold_threshold",
+                    selected_thresholds_payload.get("decision_confidence", base_threshold_params["decision_confidence"]),
+                )
+            )
+            self.log("decision_threshold_auto_applied", auto_applied, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_target_coverage", float(self.hparams.get("decision_threshold_target_coverage", 0.35)), logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_selected_coverage", selected_coverage, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_coverage_error", coverage_error, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_used_fallback", used_fallback, logger=True, add_dataloader_idx=False)
+            self.log("decision_threshold_selected_confidence", selected_confidence, logger=True, add_dataloader_idx=False)
             calibration = {
                 "val_ece": float(ece_after),
                 "val_mce": float(mce_after),
@@ -1039,7 +1202,21 @@ class LiTModule(pl.LightningModule):
                 "decision_rule_metrics": decision_metrics,
                 "decision_rule_ablation": decision_rule_ablation,
                 "effective_threshold": self._resolve_effective_threshold_summary(),
+                "decision_threshold_calibration": {
+                    "mode": calibration_mode,
+                    "target": float(self.hparams.get("decision_threshold_target_coverage", 0.35)),
+                    "selected_thresholds": dict(selected_thresholds_payload),
+                    "selected_metrics": dict((threshold_calibration_report or {}).get("selected_metrics", {})),
+                    "used_fallback": bool((threshold_calibration_report or {}).get("used_fallback", False)),
+                    "candidate_table_topk": list((threshold_calibration_report or {}).get("candidate_table", []))[:10],
+                },
             }
+            finalized["quality"]["decision_threshold_auto_applied"] = float(auto_applied)
+            finalized["quality"]["decision_threshold_target_coverage"] = float(self.hparams.get("decision_threshold_target_coverage", 0.35))
+            finalized["quality"]["decision_threshold_selected_coverage"] = float(selected_coverage)
+            finalized["quality"]["decision_threshold_coverage_error"] = float(coverage_error)
+            finalized["quality"]["decision_threshold_used_fallback"] = float(used_fallback)
+            finalized["quality"]["decision_threshold_selected_confidence"] = float(selected_confidence)
             self.log(
                 "val_f1_macro_np",
                 float(finalized.get("quality", {}).get("val_f1_macro_np", 0.0)),
@@ -1135,7 +1312,7 @@ class LiTModule(pl.LightningModule):
                     log_embeddings(self.model, val_dataloader, writer, self.current_epoch, max_samples=tb_embedding_samples)
 
         # 7. Сброс накопленных данных и метрик
-        if not is_sanity and not self.is_multi_horizon:
+        if not is_sanity and finalized is not None:
             self._save_validation_report(finalized)
         self._reset_validation_state()
         self.f1_macro.reset()
@@ -1449,6 +1626,7 @@ class LiTModule(pl.LightningModule):
             "decision_rule_metrics": finalized.get("decision_rule_metrics", {}),
             "decision_rule_ablation": finalized.get("decision_rule_ablation", {}),
             "effective_threshold": finalized.get("effective_threshold", {}),
+            "decision_threshold_calibration": finalized.get("decision_threshold_calibration", {}),
             "quality_gate": finalized.get("quality_gate", {}),
         }
         report_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
